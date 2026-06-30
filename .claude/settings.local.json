@@ -1,0 +1,37 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(claude plugin *)",
+      "mcp__svelte__get-documentation",
+      "mcp__svelte__svelte-autofixer",
+      "Bash(pnpm check *)",
+      "Bash(pnpm dev *)",
+      "Bash(echo \"started pid $!\")",
+      "Bash(curl -s -o /dev/null -w \"GET / -> %{http_code}\\\\n\" http://localhost:5183/ -L)",
+      "Bash(curl -s -o /dev/null -D - http://localhost:5183/)",
+      "Bash(node \"C:\\\\Users\\\\LENOVO\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\d--stackquest-duraflow\\\\6504a19d-4ff7-4fd7-8174-73959d59b674\\\\scratchpad\\\\mock-api.js\")",
+      "Bash(echo \"mock api pid $!\")",
+      "Bash(netstat -ano)",
+      "Bash(taskkill //PID 20384 //F //T)",
+      "Bash(cp \"C:\\\\Users\\\\LENOVO\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\d--stackquest-duraflow\\\\6504a19d-4ff7-4fd7-8174-73959d59b674\\\\scratchpad\\\\screenshot3.js\" \"D:\\\\stackquest\\\\duraflow\\\\screenshot3.tmp.cjs\")",
+      "Bash(node screenshot3.tmp.cjs)",
+      "Bash(rm -f screenshot3.tmp.cjs)",
+      "Bash(rm -f d:/stackquest/duraflow/dashboard-*.png *)",
+      "Bash(taskkill //PID 15500 //F //T)",
+      "Bash(taskkill //PID 3240 //F //T)",
+      "Bash(grep -iE \"\\\\.png$|screenshot|tmp\")",
+      "Bash(cp \"C:\\\\Users\\\\LENOVO\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\d--stackquest-duraflow\\\\6504a19d-4ff7-4fd7-8174-73959d59b674\\\\scratchpad\\\\screenshot4.js\" \"D:\\\\stackquest\\\\duraflow\\\\screenshot4.tmp.cjs\")",
+      "Bash(node screenshot4.tmp.cjs)",
+      "Bash(rm -f screenshot4.tmp.cjs)",
+      "Bash(rm -f \"C:\\\\Users\\\\LENOVO\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\d--stackquest-duraflow\\\\6504a19d-4ff7-4fd7-8174-73959d59b674\\\\scratchpad\"/*.png *)"
+    ],
+    "additionalDirectories": [
+      "d:\\stackquest\\duraflow",
+      "C:\\Users\\LENOVO\\AppData\\Local\\Temp\\claude\\d--stackquest-duraflow\\6504a19d-4ff7-4fd7-8174-73959d59b674\\scratchpad"
+    ]
+  },
+  "enableAllProjectMcpServers": true,
+  "enabledMcpjsonServers": [
+    "svelte"
+  ]
+}

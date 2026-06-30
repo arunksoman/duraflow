@@ -1,0 +1,1 @@
+Create /workers/+page.svelte showing worker status and metrics.
