@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { LogOut } from '@lucide/svelte';
 	import type { User } from '$lib/types';
+	import ThemeToggle from './ThemeToggle.svelte';
 
 	let { user }: { user: User } = $props();
 </script>
@@ -9,6 +10,7 @@
 	<h1 class="text-lg font-semibold">Dashboard</h1>
 
 	<div class="flex items-center gap-3">
+		<ThemeToggle />
 		<div class="text-right leading-tight">
 			<p class="text-sm font-medium">{user.name}</p>
 			<p class="text-base-content/50 text-xs capitalize">{user.role}</p>

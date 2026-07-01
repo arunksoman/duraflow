@@ -6,38 +6,70 @@
 		MiniMap,
 		BackgroundVariant,
 		type Node,
-		type Edge
+		type Edge,
+		type Connection
 	} from '@xyflow/svelte';
 	import '@xyflow/svelte/dist/style.css';
 
-	import { ArrowLeft, CircleCheck, Save, Trash2, Workflow } from '@lucide/svelte';
-	import type { PageProps } from './$types';
+	import { page } from '$app/state';
+	import { ArrowLeft, CircleCheck, Code2, Save, Workflow } from '@lucide/svelte';
+	import ThemeToggle from '$lib/components/ThemeToggle.svelte';
 
 	import WorkflowNode from '$lib/components/builder/WorkflowNode.svelte';
+	import ReconnectableEdge from '$lib/components/builder/ReconnectableEdge.svelte';
 	import NodePalette from '$lib/components/builder/NodePalette.svelte';
 	import FlowInterop from '$lib/components/builder/FlowInterop.svelte';
-	import RightPanel from '$lib/components/builder/RightPanel.svelte';
+	import NodeConfigModal from '$lib/components/builder/NodeConfigModal.svelte';
+	import CallConfigModal from '$lib/components/builder/CallConfigModal.svelte';
 	import { NODE_META, NODE_TYPES } from '$lib/components/builder/builderConfig';
 	import { generateDsl } from '$lib/utils/dsl';
 	import type { WorkflowNodeType } from '$lib/types';
 
-	let { data }: PageProps = $props();
+	const projectId = $derived(page.params.projectId);
+	const workflowId = $derived(page.params.workflowId);
+	const projectName = $derived(projectId === 'demo' ? 'Demo Project' : 'Project');
+	const workflowName = $derived(workflowId === 'demo' ? 'Order Fulfillment' : 'New Workflow');
 
 	// Build nodeTypes safely (avoids reserved-word property names like do/for/switch/try)
 	const nodeTypes = Object.fromEntries(NODE_TYPES.map((t) => [t, WorkflowNode]));
+	const edgeTypes = { default: ReconnectableEdge };
 
 	let nodes: Node[] = $state.raw([
+		{
+			id: 'start',
+			type: 'start',
+			position: { x: 220, y: -60 },
+			data: { type: 'start', label: 'Start', variables: [] },
+			deletable: false
+		},
 		{
 			id: '1',
 			type: 'call',
 			position: { x: 220, y: 40 },
-			data: { type: 'call', label: 'Fetch Order', method: 'get', endpoint: 'https://api.example.com/orders' }
+			data: {
+				type: 'call',
+				label: 'Fetch Order',
+				method: 'get',
+				endpoint: 'https://api.example.com/orders',
+				headers: [{ key: 'Authorization', value: '${ $secrets.apiToken }' }],
+				query: [{ key: 'orderId', value: '${ $input.orderId }' }],
+				body: '',
+				output: 'content',
+				redirect: false
+			}
 		},
 		{
 			id: '2',
 			type: 'switch',
 			position: { x: 220, y: 200 },
-			data: { type: 'switch', label: 'Validate Status' }
+			data: {
+				type: 'switch',
+				label: 'Validate Status',
+				cases: [
+					{ name: 'success', condition: "${ .status == 'success' }", then: 'process-in-parallel' },
+					{ name: 'failure', condition: "${ .status == 'error' }", then: 'log-error' }
+				]
+			}
 		},
 		{
 			id: '3',
@@ -49,7 +81,7 @@
 			id: '4',
 			type: 'set',
 			position: { x: 400, y: 360 },
-			data: { type: 'set', label: 'Log Error', variable: 'error', value: 'message' }
+			data: { type: 'set', label: 'Log Error', variables: [{ key: 'error', value: '${ .message }' }] }
 		},
 		{
 			id: '5',
@@ -66,31 +98,30 @@
 	]);
 
 	let edges: Edge[] = $state.raw([
+		{ id: 'es-1', source: 'start', target: '1' },
 		{ id: 'e1-2', source: '1', target: '2' },
-		{ id: 'e2-3', source: '2', target: '3', label: 'success' },
-		{ id: 'e2-4', source: '2', target: '4', label: 'failure' },
+		{ id: 'e2-3', source: '2', target: '3', label: 'success', style: 'stroke: #22c55e; stroke-width: 2;' },
+		{ id: 'e2-4', source: '2', target: '4', label: 'failure', style: 'stroke: #ef4444; stroke-width: 2;' },
 		{ id: 'e3-5', source: '3', target: '5' },
 		{ id: 'e3-6', source: '3', target: '6' }
 	]);
 
-	let nodeCounter = $state(10);
 	let saved = $state(false);
+	let showDsl = $state(false);
+	let configNodeId = $state<string | null>(null);
 	let screenToFlowPosition:
 		| ((pos: { x: number; y: number }) => { x: number; y: number })
 		| undefined = $state();
 
-	const selectedNode = $derived(nodes.find((n) => n.selected) ?? null);
+	const configNode = $derived(configNodeId ? (nodes.find((n) => n.id === configNodeId) ?? null) : null);
 	const dsl = $derived(generateDsl(nodes, edges));
 
 	function addNode(type: WorkflowNodeType) {
 		const meta = NODE_META[type];
-		nodeCounter++;
-		const col = (nodeCounter - 1) % 3;
-		const row = Math.floor((nodeCounter - 1) / 3);
 		const newNode: Node = {
 			id: `node-${Date.now()}`,
 			type,
-			position: { x: 80 + col * 220, y: 60 + row * 160 },
+			position: { x: 120 + Math.random() * 200, y: 120 + Math.random() * 200 },
 			data: { type, ...meta.defaultData }
 		};
 		nodes = [...nodes, newNode];
@@ -103,7 +134,7 @@
 		const meta = NODE_META[type];
 		const position = screenToFlowPosition
 			? screenToFlowPosition({ x: e.clientX, y: e.clientY })
-			: { x: 100 + ((nodeCounter * 40) % 500), y: 100 };
+			: { x: 200, y: 200 };
 		const newNode: Node = {
 			id: `node-${Date.now()}`,
 			type,
@@ -117,13 +148,6 @@
 		nodes = nodes.map((n) => (n.id === id ? { ...n, data: { ...n.data, ...patch } } : n));
 	}
 
-	function deleteSelected() {
-		const ids = new Set(nodes.filter((n) => n.selected).map((n) => n.id));
-		if (ids.size === 0) return;
-		nodes = nodes.filter((n) => !ids.has(n.id));
-		edges = edges.filter((e) => !ids.has(e.source) && !ids.has(e.target));
-	}
-
 	function handleSave() {
 		saved = true;
 		setTimeout(() => {
@@ -134,10 +158,28 @@
 	function onFlowReady(fn: (pos: { x: number; y: number }) => { x: number; y: number }) {
 		screenToFlowPosition = fn;
 	}
+
+	function handleNodeClick(event: { node: Node }) {
+		configNodeId = event.node.id;
+	}
+
+	function handleReconnect(oldEdge: Edge, newConnection: Connection) {
+		edges = edges.map((e) =>
+			e.id === oldEdge.id
+				? {
+						...e,
+						source: newConnection.source,
+						target: newConnection.target,
+						sourceHandle: newConnection.sourceHandle ?? null,
+						targetHandle: newConnection.targetHandle ?? null
+					}
+				: e
+		);
+	}
 </script>
 
 <svelte:head>
-	<title>{data.workflowName} · Builder · DuraFlow</title>
+	<title>{workflowName} · Builder · DuraFlow</title>
 </svelte:head>
 
 <div class="bg-base-200 flex h-screen flex-col overflow-hidden">
@@ -151,22 +193,22 @@
 		</div>
 		<div class="flex items-center gap-1">
 			<a href="/dashboard" class="text-base-content/50 hover:text-base-content text-xs transition">
-				{data.projectName}
+				{projectName}
 			</a>
 			<span class="text-base-content/30 text-xs">/</span>
-			<span class="text-sm font-medium">{data.workflowName}</span>
+			<span class="text-sm font-medium">{workflowName}</span>
 		</div>
 		<div class="flex-1"></div>
-		{#if selectedNode}
-			<button
-				class="btn btn-ghost btn-sm text-error"
-				onclick={deleteSelected}
-				title="Delete selected node"
-			>
-				<Trash2 size={14} />
-				Delete
-			</button>
-		{/if}
+		<ThemeToggle />
+		<button
+			class="btn btn-ghost btn-sm gap-1.5"
+			class:btn-active={showDsl}
+			onclick={() => (showDsl = !showDsl)}
+			title="View generated DSL"
+		>
+			<Code2 size={14} />
+			DSL
+		</button>
 		<button class="btn btn-sm" class:btn-success={saved} onclick={handleSave}>
 			{#if saved}
 				<CircleCheck size={14} />
@@ -178,10 +220,9 @@
 		</button>
 	</header>
 
-	<!-- Main canvas area -->
+	<!-- Main area -->
 	<div class="flex min-h-0 flex-1">
-		<NodePalette onaddnode={addNode} />
-
+		<!-- Canvas -->
 		<div
 			class="relative min-w-0 flex-1"
 			ondrop={handleDrop}
@@ -193,9 +234,12 @@
 				bind:nodes
 				bind:edges
 				{nodeTypes}
+				{edgeTypes}
 				fitView
-				deleteKey={['Backspace', 'Delete']}
 				style="width: 100%; height: 100%;"
+				deleteKey={['Delete', 'Backspace']}
+				onnodeclick={handleNodeClick}
+				onreconnect={handleReconnect}
 			>
 				<FlowInterop onready={onFlowReady} />
 				<Background variant={BackgroundVariant.Dots} gap={20} size={1.2} />
@@ -204,30 +248,87 @@
 			</SvelteFlow>
 		</div>
 
-		<RightPanel {selectedNode} {dsl} onupdate={updateNodeData} />
+		<!-- Node palette (right) -->
+		<NodePalette onaddnode={addNode} />
 	</div>
 </div>
+
+<!-- Node config modal -->
+{#if configNode}
+	{#if configNode.type === 'call'}
+		<CallConfigModal node={configNode} onclose={() => (configNodeId = null)} onupdate={updateNodeData} />
+	{:else}
+		<NodeConfigModal node={configNode} onclose={() => (configNodeId = null)} onupdate={updateNodeData} />
+	{/if}
+{/if}
+
+<!-- DSL modal -->
+{#if showDsl}
+	<div class="modal modal-open z-50">
+		<div class="modal-box w-full max-w-2xl">
+			<div class="mb-3 flex items-center justify-between">
+				<div>
+					<h3 class="font-semibold">Generated DSL</h3>
+					<p class="text-base-content/40 text-xs">Zigflow YAML · 1.0.0-alpha5</p>
+				</div>
+				<div class="flex gap-2">
+					<button
+						class="btn btn-ghost btn-sm"
+						onclick={() => navigator.clipboard.writeText(dsl)}
+						title="Copy to clipboard"
+					>
+						Copy
+					</button>
+					<button class="btn btn-ghost btn-sm btn-circle" onclick={() => (showDsl = false)}>
+						✕
+					</button>
+				</div>
+			</div>
+			<pre
+				class="bg-base-200 max-h-[60vh] overflow-auto rounded-lg p-4 font-mono text-[11px] leading-relaxed text-base-content/80 whitespace-pre">{dsl}</pre>
+		</div>
+		<form method="dialog" class="modal-backdrop">
+			<button onclick={() => (showDsl = false)}>close</button>
+		</form>
+	</div>
+{/if}
 
 <style>
 	:global(.svelte-flow__node) {
 		font-family: inherit;
 	}
+	/* Light mode edge paths */
 	:global(.svelte-flow__edge-path) {
-		stroke: var(--color-base-content);
-		opacity: 0.25;
+		stroke: #94a3b8;
 		stroke-width: 2;
 	}
 	:global(.svelte-flow__edge.selected .svelte-flow__edge-path),
 	:global(.svelte-flow__edge:hover .svelte-flow__edge-path) {
-		opacity: 0.6;
+		stroke: #6366f1;
 	}
+	/* Dark mode edge paths */
+	:global([data-theme='dark'] .svelte-flow__edge-path) {
+		stroke: #475569;
+	}
+	:global([data-theme='dark'] .svelte-flow__edge.selected .svelte-flow__edge-path),
+	:global([data-theme='dark'] .svelte-flow__edge:hover .svelte-flow__edge-path) {
+		stroke: #818cf8;
+	}
+	/* Light mode edge labels */
 	:global(.svelte-flow__edge-textbg) {
-		fill: var(--color-base-100);
+		fill: #f8fafc;
 	}
 	:global(.svelte-flow__edge-text) {
-		fill: var(--color-base-content);
+		fill: #64748b;
 		font-size: 10px;
-		opacity: 0.55;
+		font-weight: 500;
+	}
+	/* Dark mode edge labels */
+	:global([data-theme='dark'] .svelte-flow__edge-textbg) {
+		fill: #1e293b;
+	}
+	:global([data-theme='dark'] .svelte-flow__edge-text) {
+		fill: #94a3b8;
 	}
 	:global(.svelte-flow__handle) {
 		background: var(--color-base-300);

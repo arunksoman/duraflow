@@ -26,6 +26,8 @@ export interface Project {
 }
 
 export type WorkflowNodeType =
+	| 'start'
+	| 'end'
 	| 'task'
 	| 'call'
 	| 'do'

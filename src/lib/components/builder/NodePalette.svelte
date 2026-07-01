@@ -8,14 +8,16 @@
 
 	let { onaddnode }: Props = $props();
 
-	const categories = ['action', 'control', 'event', 'structure'] as const;
+	const categories = ['action', 'control', 'event', 'structure', 'terminal'] as const;
 
 	const grouped = $derived(
-		categories.map((cat) => ({
-			key: cat,
-			label: CATEGORY_LABELS[cat],
-			types: NODE_TYPES.filter((t) => NODE_META[t].category === cat)
-		}))
+		categories
+			.map((cat) => ({
+				key: cat,
+				label: CATEGORY_LABELS[cat],
+				types: NODE_TYPES.filter((t) => NODE_META[t].category === cat && NODE_META[t].showInPalette)
+			}))
+			.filter((g) => g.types.length > 0)
 	);
 
 	function handleDragStart(e: DragEvent, nodeType: WorkflowNodeType) {
@@ -24,7 +26,7 @@
 	}
 </script>
 
-<aside class="bg-base-100 border-base-300 flex w-52 shrink-0 flex-col overflow-y-auto border-r">
+<aside class="bg-base-100 border-base-300 flex w-52 shrink-0 flex-col overflow-y-auto border-l">
 	<div class="border-base-200 border-b px-4 py-3">
 		<p class="text-base-content/50 text-[10px] font-semibold uppercase tracking-wider">
 			Node Palette
