@@ -13,11 +13,12 @@
 		nodes: Node[];
 		edges: Edge[];
 		workflowMeta: WorkflowMeta;
+		width?: number;
 		onclose: () => void;
 		onupdate: (id: string, patch: Record<string, unknown>) => void;
 	}
 
-	let { node, nodes, edges, workflowMeta, onclose, onupdate }: Props = $props();
+	let { node, nodes, edges, workflowMeta, width = 340, onclose, onupdate }: Props = $props();
 
 	const nodeType = $derived<WorkflowNodeType>(
 		node && (node.type ?? 'task') in NODE_META ? (node.type as WorkflowNodeType) : 'task'
@@ -233,8 +234,8 @@
 	const hasDataFlow = $derived(!noDataFlow.includes(nodeType as (typeof noDataFlow)[number]));
 </script>
 
-<!-- Right panel — 340px, scrollable, no overlay -->
-<aside class="bg-base-100 border-base-300 flex w-[340px] shrink-0 flex-col border-l">
+<!-- Right panel — resizable, scrollable, no overlay -->
+<aside class="bg-base-100 border-base-300 flex shrink-0 flex-col border-l" style="width: {width}px; min-width: {width}px">
 	<!-- Header -->
 	<div class="border-base-200 flex shrink-0 items-center gap-2.5 border-b px-3 py-2.5">
 		<div

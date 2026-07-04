@@ -54,6 +54,35 @@
 		workflowMeta = { ...workflowMeta, ...patch };
 	}
 
+	// ── Panel layout state ────────────────────────────────────────────
+
+	let paletteOpen = $state(true);
+	let panelWidth = $state(340);
+
+	$effect(() => {
+		if (configNodeId) paletteOpen = false;
+	});
+
+	function startResize(e: MouseEvent) {
+		e.preventDefault();
+		const startX = e.clientX;
+		const startW = panelWidth;
+		document.body.style.cursor = 'col-resize';
+		document.body.style.userSelect = 'none';
+
+		function onMove(ev: MouseEvent) {
+			panelWidth = Math.max(280, Math.min(680, startW + (startX - ev.clientX)));
+		}
+		function onUp() {
+			document.body.style.cursor = '';
+			document.body.style.userSelect = '';
+			window.removeEventListener('mousemove', onMove);
+			window.removeEventListener('mouseup', onUp);
+		}
+		window.addEventListener('mousemove', onMove);
+		window.addEventListener('mouseup', onUp);
+	}
+
 	// ── Canvas state ─────────────────────────────────────────────────
 
 	let nodes: Node[] = $state.raw([
@@ -73,7 +102,7 @@
 				label: 'Fetch Order',
 				method: 'get',
 				endpoint: '${ $env.API_BASE + "/orders/" + $input.orderId }',
-				headers: [{ key: 'Authorization', value: 'Bearer ${ $env.API_KEY }' }],
+				headers: [{ key: 'Authorization', value: '${ "Bearer " + $env.API_KEY }' }],
 				query: [],
 				body: '',
 				output: 'content',
@@ -279,11 +308,15 @@
 		</button>
 	</header>
 
-	<!-- Main area: palette | canvas | node panel -->
+	<!-- Main area: palette | canvas | resize-handle | node panel -->
 	<div class="flex min-h-0 flex-1">
 
-		<!-- Node palette (left) -->
-		<NodePalette onaddnode={addNode} />
+		<!-- Node palette (left, collapsible) -->
+		<NodePalette
+			open={paletteOpen}
+			ontoggle={() => (paletteOpen = !paletteOpen)}
+			onaddnode={addNode}
+		/>
 
 		<!-- Canvas -->
 		<div
@@ -313,11 +346,18 @@
 
 		<!-- Right node config panel (slides in when a node is selected) -->
 		{#if configNode}
+			<!-- Drag-to-resize splitter -->
+			<button
+				class="bg-base-300 hover:bg-primary/40 active:bg-primary/60 z-10 w-1 shrink-0 cursor-col-resize border-0 p-0 transition-colors"
+				onmousedown={startResize}
+				aria-label="Drag to resize panel"
+			></button>
 			<NodePanel
 				node={configNode}
 				{nodes}
 				{edges}
 				{workflowMeta}
+				width={panelWidth}
 				onclose={() => (configNodeId = null)}
 				onupdate={updateNodeData}
 			/>

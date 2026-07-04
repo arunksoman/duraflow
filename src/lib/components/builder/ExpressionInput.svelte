@@ -376,47 +376,41 @@
 
 	{#if mode === 'visual'}
 		<!-- Visual part builder -->
-		<div class="flex flex-col gap-1">
+		<div class="bg-base-200/40 flex flex-col gap-1.5 rounded-lg p-2">
 			{#each parts as part, i (i)}
 				{#if i > 0}
-					<div class="text-base-content/25 text-center font-mono text-[10px]">+</div>
+					<div class="text-base-content/30 flex items-center gap-2 px-1 text-[10px] font-mono">
+						<span class="bg-base-300 h-px flex-1"></span>+<span class="bg-base-300 h-px flex-1"></span>
+					</div>
 				{/if}
 
-				<div class="flex items-center gap-1">
+				<div class="flex items-center gap-1.5">
 					{#if part.kind === 'literal'}
 						{@const lp = part as LiteralPart}
-						<span class="badge badge-ghost badge-xs shrink-0 font-mono text-[9px]">"…"</span>
+						<span class="text-base-content/40 shrink-0 font-mono text-xs leading-none">"</span>
 						<input
-							class="input input-xs min-w-0 flex-1"
+							class="input input-xs min-w-0 flex-1 font-mono"
 							placeholder="literal text"
 							value={lp.text}
 							oninput={(e) => updateLiteralText(i, (e.target as HTMLInputElement).value)}
 						/>
+						<span class="text-base-content/40 shrink-0 font-mono text-xs leading-none">"</span>
 					{:else}
 						{@const vp = part as VarPart}
 						{@const cfg = SRC_CFG[vp.source] ?? { category: 'output', hasFields: false }}
-						<!-- colored dot indicator -->
+						<!-- colored source pill -->
 						<span
-							class="size-2 shrink-0 rounded-full"
+							class="inline-flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 font-mono text-[10px] font-semibold text-white"
 							style:background={dotColor(vp.source)}
-							aria-hidden="true"
-						></span>
-						<!-- source selector -->
-						<select
-							class="select select-xs w-20 shrink-0 font-mono text-[10px]"
-							value={vp.source}
-							onchange={(e) => updateVarSource(i, (e.target as HTMLSelectElement).value)}
 						>
-							{#each availSources as src (src)}
-								<option value={src}>{src}</option>
-							{/each}
-						</select>
+							{vp.source}
+						</span>
 						<!-- field selector -->
 						{#if cfg.hasFields}
 							{@const avs = fieldsFor(vp.source)}
 							{#if avs.length > 0}
 								<select
-									class="select select-xs min-w-0 flex-1 font-mono text-[10px]"
+									class="select select-xs min-w-0 flex-1 font-mono"
 									value={vp.field}
 									onchange={(e) => updateVarField(i, (e.target as HTMLSelectElement).value)}
 								>
@@ -426,7 +420,7 @@
 								</select>
 							{:else}
 								<input
-									class="input input-xs min-w-0 flex-1 font-mono text-[10px]"
+									class="input input-xs min-w-0 flex-1 font-mono"
 									placeholder="field"
 									value={vp.field}
 									oninput={(e) => updateVarField(i, (e.target as HTMLInputElement).value)}
@@ -437,12 +431,23 @@
 						{/if}
 						<!-- transform selector -->
 						<select
-							class="select select-xs w-24 shrink-0 font-mono text-[10px]"
+							class="select select-xs w-28 shrink-0 font-mono text-[10px]"
 							value={vp.transform}
 							onchange={(e) => updateVarTransform(i, (e.target as HTMLSelectElement).value)}
 						>
 							{#each TRANSFORMS as t (t.value)}
 								<option value={t.value}>{t.label}</option>
+							{/each}
+						</select>
+						<!-- source change (hidden select triggered by pill click, shown as secondary control) -->
+						<select
+							class="select select-xs w-5 shrink-0 p-0 opacity-30 hover:opacity-100"
+							title="Change source"
+							value={vp.source}
+							onchange={(e) => updateVarSource(i, (e.target as HTMLSelectElement).value)}
+						>
+							{#each availSources as src (src)}
+								<option value={src}>{src}</option>
 							{/each}
 						</select>
 					{/if}
@@ -452,26 +457,18 @@
 						onclick={() => removePart(i)}
 						aria-label="Remove"
 					>
-						<Trash2 size={9} />
+						<Trash2 size={10} />
 					</button>
 				</div>
 			{/each}
 
 			<!-- Add buttons -->
 			<div class="flex gap-1 pt-0.5">
-				<button
-					type="button"
-					class="btn btn-ghost btn-xs gap-1 text-[10px]"
-					onclick={addVarPart}
-				>
-					<Plus size={9} />Variable
+				<button type="button" class="btn btn-ghost btn-xs gap-1 text-[10px]" onclick={addVarPart}>
+					<Plus size={10} />Variable
 				</button>
-				<button
-					type="button"
-					class="btn btn-ghost btn-xs gap-1 text-[10px]"
-					onclick={addLiteralPart}
-				>
-					<Plus size={9} />Text
+				<button type="button" class="btn btn-ghost btn-xs gap-1 text-[10px]" onclick={addLiteralPart}>
+					<Plus size={10} />Text
 				</button>
 			</div>
 
@@ -479,10 +476,10 @@
 			{#if parts.length > 0}
 				{@const preview = serializeParts(parts)}
 				{#if preview}
-					<p class="text-base-content/25 break-all font-mono text-[9px]">{preview}</p>
+					<p class="text-base-content/30 break-all font-mono text-[9px] leading-relaxed">{preview}</p>
 				{/if}
 			{:else if placeholder}
-				<p class="text-base-content/30 text-[10px] italic">{placeholder}</p>
+				<p class="text-base-content/25 text-[10px] italic">{placeholder}</p>
 			{/if}
 		</div>
 
