@@ -1,11 +1,12 @@
 <script lang="ts">
 	import { untrack } from 'svelte';
 	import type { Node, Edge } from '@xyflow/svelte';
-	import { Plus, Trash2, X, Copy } from '@lucide/svelte';
+	import { Plus, Trash2, X } from '@lucide/svelte';
 	import type { WorkflowMeta } from '$lib/types';
 	import { NODE_META } from './builderConfig';
 	import type { VarEntry, CaseEntry, EventEntry } from './builderConfig';
 	import type { WorkflowNodeType } from '$lib/types';
+	import ExpressionInput, { type AvailVar } from './ExpressionInput.svelte';
 
 	interface Props {
 		node: Node;
@@ -137,48 +138,48 @@
 
 	// ── available variables at this node ─────────────────────────────
 
-	interface AvailVar {
-		expr: string;
-		hint: string;
-		category: 'input' | 'env' | 'data' | 'context' | 'output';
-	}
-
 	const availableVars = $derived.by<AvailVar[]>(() => {
 		const vars: AvailVar[] = [];
 
 		// $input fields
-		for (const f of workflowMeta.inputSchema ?? []) {
+		for (const field of workflowMeta.inputSchema ?? []) {
 			vars.push({
-				expr: `\${ $input.${f.name} }`,
-				hint: f.example ? `e.g. ${f.example}` : (f.type ?? 'string'),
-				category: 'input'
+				expr: '${ $input.' + field.name + ' }',
+				hint: field.example ? 'e.g. ' + field.example : (field.type ?? 'string'),
+				category: 'input',
+				source: '$input',
+				field: field.name,
+				rawRef: '$input.' + field.name
 			});
 		}
 		if ((workflowMeta.inputSchema ?? []).length === 0) {
-			vars.push({ expr: '${ $input }', hint: 'full trigger payload', category: 'input' });
+			vars.push({ expr: '${ $input }', hint: 'full trigger payload', category: 'input', source: '$input', field: '', rawRef: '$input' });
 		}
 
 		// $env vars
 		for (const e of workflowMeta.envVars ?? []) {
 			vars.push({
-				expr: `\${ $env.${e.name} }`,
-				hint: e.example ? `e.g. ${e.example}` : (e.description ?? ''),
-				category: 'env'
+				expr: '${ $env.' + e.name + ' }',
+				hint: e.example ? 'e.g. ' + e.example : (e.description ?? ''),
+				category: 'env',
+				source: '$env',
+				field: e.name,
+				rawRef: '$env.' + e.name
 			});
 		}
 
 		// $output (always)
-		vars.push({ expr: '${ . }', hint: 'previous task output (shorthand)', category: 'output' });
-		vars.push({ expr: '${ $output }', hint: 'previous task full output', category: 'output' });
+		vars.push({ expr: '${ . }', hint: 'previous task output (shorthand)', category: 'output', source: '.', field: '', rawRef: '.' });
+		vars.push({ expr: '${ $output }', hint: 'previous task full output', category: 'output', source: '$output', field: '', rawRef: '$output' });
 
 		// $data keys from upstream Set nodes (and start node vars)
-		const ancestors = new Set<string>();
+		const ancestors: string[] = [];
 		const queue = [node.id];
 		while (queue.length > 0) {
 			const curr = queue.shift()!;
 			for (const edge of edges) {
-				if (edge.target === curr && !ancestors.has(edge.source)) {
-					ancestors.add(edge.source);
+				if (edge.target === curr && !ancestors.includes(edge.source)) {
+					ancestors.push(edge.source);
 					queue.push(edge.source);
 				}
 			}
@@ -187,30 +188,25 @@
 		const startNode = nodes.find((n) => n.type === 'start');
 		if (startNode) {
 			for (const v of (startNode.data?.variables as VarEntry[]) ?? []) {
-				if (v.key) vars.push({ expr: `\${ $data.${v.key} }`, hint: `from Start init`, category: 'data' });
+				if (v.key) vars.push({ expr: '${ $data.' + v.key + ' }', hint: 'from Start init', category: 'data', source: '$data', field: v.key, rawRef: '$data.' + v.key });
 			}
 		}
 
 		for (const n of nodes) {
-			if (ancestors.has(n.id) && n.type === 'set') {
+			if (ancestors.includes(n.id) && n.type === 'set') {
 				for (const v of (n.data?.variables as VarEntry[]) ?? []) {
-					if (v.key)
-						vars.push({
-							expr: `\${ $data.${v.key} }`,
-							hint: `from Set: ${n.data?.label ?? 'Set'}`,
-							category: 'data'
-						});
+					if (v.key) vars.push({ expr: '${ $data.' + v.key + ' }', hint: 'from Set: ' + (n.data?.label ?? 'Set'), category: 'data', source: '$data', field: v.key, rawRef: '$data.' + v.key });
 				}
 			}
 		}
 
-		// $context hint (generic — only when upstream nodes have export.as)
-		const hasExports = [...ancestors].some((aid) => {
+		// $context hint (when upstream nodes have export.as)
+		const hasExports = ancestors.some((aid) => {
 			const an = nodes.find((n) => n.id === aid);
 			return an && (an.data?.exportAs as string);
 		});
 		if (hasExports) {
-			vars.push({ expr: '${ $context }', hint: 'accumulated via export.as', category: 'context' });
+			vars.push({ expr: '${ $context }', hint: 'accumulated via export.as', category: 'context', source: '$context', field: '', rawRef: '$context' });
 		}
 
 		return vars;
@@ -232,18 +228,6 @@
 			}));
 		return [...directives, ...nodeOptions];
 	});
-
-	function copyVar(expr: string) {
-		navigator.clipboard.writeText(expr).catch(() => {});
-	}
-
-	const categoryColor: Record<string, string> = {
-		input: 'text-primary',
-		env: 'text-warning',
-		data: 'text-success',
-		context: 'text-info',
-		output: 'text-secondary'
-	};
 
 	const noDataFlow = ['start', 'end'] as const;
 	const hasDataFlow = $derived(!noDataFlow.includes(nodeType as (typeof noDataFlow)[number]));
@@ -293,23 +277,21 @@
 				<!-- Endpoint -->
 				<div class="flex flex-col gap-1">
 					<span class="text-base-content/50 text-[10px] font-semibold uppercase tracking-wider">Endpoint</span>
-					<div class="flex gap-1.5">
-						<select
-							class="select select-xs w-24 shrink-0 font-mono font-bold"
-							value={f('method') || 'get'}
-							onchange={(e) => patch('method', (e.target as HTMLSelectElement).value)}
-						>
-							{#each ['get','post','put','patch','delete'] as m (m)}
-								<option value={m}>{m.toUpperCase()}</option>
-							{/each}
-						</select>
-						<input
-							class="input input-xs min-w-0 flex-1 font-mono"
-							placeholder="https://... or ${'${ $env.BASE_URL }'}/path"
-							value={f('endpoint')}
-							oninput={(e) => patch('endpoint', (e.target as HTMLInputElement).value)}
-						/>
-					</div>
+					<select
+						class="select select-xs w-24 font-mono font-bold"
+						value={f('method') || 'get'}
+						onchange={(e) => patch('method', (e.target as HTMLSelectElement).value)}
+					>
+						{#each ['get','post','put','patch','delete'] as m (m)}
+							<option value={m}>{m.toUpperCase()}</option>
+						{/each}
+					</select>
+					<ExpressionInput
+						value={f('endpoint')}
+						placeholder={'${ $env.API_BASE } + "/path"'}
+						availVars={availableVars}
+						onchange={(v) => patch('endpoint', v)}
+					/>
 				</div>
 
 				<!-- Headers -->
@@ -319,15 +301,20 @@
 						<button class="btn btn-ghost btn-xs gap-1" onclick={addHeader}><Plus size={9} />Add</button>
 					</div>
 					{#each localHeaders as h, i (i)}
-						<div class="flex items-center gap-1">
-							<input class="input input-xs w-28 shrink-0 font-mono" placeholder="Header-Name" value={h.key}
-								oninput={(e) => updateHeader(i, 'key', (e.target as HTMLInputElement).value)} />
-							<span class="text-base-content/30 text-xs shrink-0">:</span>
-							<input class="input input-xs min-w-0 flex-1 font-mono" placeholder={'value or ${ ... }'} value={h.value}
-								oninput={(e) => updateHeader(i, 'value', (e.target as HTMLInputElement).value)} />
-							<button class="btn btn-ghost btn-xs btn-circle text-error shrink-0" onclick={() => removeHeader(i)} aria-label="Remove">
-								<Trash2 size={9} />
-							</button>
+						<div class="border-base-300 flex flex-col gap-1 rounded border p-2">
+							<div class="flex items-center gap-1">
+								<input class="input input-xs min-w-0 flex-1 font-mono" placeholder="Header-Name" value={h.key}
+									oninput={(e) => updateHeader(i, 'key', (e.target as HTMLInputElement).value)} />
+								<button class="btn btn-ghost btn-xs btn-circle text-error shrink-0" onclick={() => removeHeader(i)} aria-label="Remove">
+									<Trash2 size={9} />
+								</button>
+							</div>
+							<ExpressionInput
+								value={h.value}
+								placeholder="value or expression"
+								availVars={availableVars}
+								onchange={(val) => updateHeader(i, 'value', val)}
+							/>
 						</div>
 					{/each}
 				</div>
@@ -339,28 +326,37 @@
 						<button class="btn btn-ghost btn-xs gap-1" onclick={addQuery}><Plus size={9} />Add</button>
 					</div>
 					{#each localQuery as q, i (i)}
-						<div class="flex items-center gap-1">
-							<input class="input input-xs w-28 shrink-0 font-mono" placeholder="param" value={q.key}
-								oninput={(e) => updateQuery(i, 'key', (e.target as HTMLInputElement).value)} />
-							<span class="text-base-content/30 text-xs shrink-0">=</span>
-							<input class="input input-xs min-w-0 flex-1 font-mono" placeholder={'value or ${ ... }'} value={q.value}
-								oninput={(e) => updateQuery(i, 'value', (e.target as HTMLInputElement).value)} />
-							<button class="btn btn-ghost btn-xs btn-circle text-error shrink-0" onclick={() => removeQuery(i)} aria-label="Remove">
-								<Trash2 size={9} />
-							</button>
+						<div class="border-base-300 flex flex-col gap-1 rounded border p-2">
+							<div class="flex items-center gap-1">
+								<input class="input input-xs min-w-0 flex-1 font-mono" placeholder="param" value={q.key}
+									oninput={(e) => updateQuery(i, 'key', (e.target as HTMLInputElement).value)} />
+								<button class="btn btn-ghost btn-xs btn-circle text-error shrink-0" onclick={() => removeQuery(i)} aria-label="Remove">
+									<Trash2 size={9} />
+								</button>
+							</div>
+							<ExpressionInput
+								value={q.value}
+								placeholder="value or expression"
+								availVars={availableVars}
+								onchange={(val) => updateQuery(i, 'value', val)}
+							/>
 						</div>
 					{/each}
 				</div>
 
 				<!-- Body -->
 				<div class="flex flex-col gap-1">
-					<label class="text-base-content/50 text-[10px] font-semibold uppercase tracking-wider" for="np-body">
+					<span class="text-base-content/50 text-[10px] font-semibold uppercase tracking-wider">
 						Body <span class="text-base-content/30 normal-case font-normal">— JSON or expression</span>
-					</label>
-					<textarea id="np-body" class="textarea textarea-xs w-full font-mono text-xs leading-relaxed" rows={4}
-						placeholder={'{ "key": "value" } or ${ . }'}
+					</span>
+					<ExpressionInput
 						value={f('body')}
-						oninput={(e) => patch('body', (e.target as HTMLTextAreaElement).value)}></textarea>
+						placeholder={'{ "key": "value" } or ${ . }'}
+						multiline={true}
+						rows={4}
+						availVars={availableVars}
+						onchange={(v) => patch('body', v)}
+					/>
 				</div>
 
 				<!-- Response -->
@@ -424,13 +420,18 @@
 						<p class="text-base-content/30 py-2 text-center text-xs">No variables — click Add.</p>
 					{:else}
 						{#each localVars as v, i (i)}
-							<div class="flex items-center gap-1">
-								<input class="input input-xs w-24 shrink-0 font-mono" placeholder="key" value={v.key}
-									oninput={(e) => updateVar(i, 'key', (e.target as HTMLInputElement).value)} />
-								<span class="text-base-content/30 text-xs shrink-0">=</span>
-								<input class="input input-xs min-w-0 flex-1 font-mono" placeholder={'${ . } or literal'} value={v.value}
-									oninput={(e) => updateVar(i, 'value', (e.target as HTMLInputElement).value)} />
-								<button class="btn btn-ghost btn-xs btn-circle text-error shrink-0" onclick={() => removeVar(i)} aria-label="Remove"><Trash2 size={9} /></button>
+							<div class="border-base-300 flex flex-col gap-1 rounded border p-2">
+								<div class="flex items-center gap-1">
+									<input class="input input-xs min-w-0 flex-1 font-mono" placeholder="key" value={v.key}
+										oninput={(e) => updateVar(i, 'key', (e.target as HTMLInputElement).value)} />
+									<button class="btn btn-ghost btn-xs btn-circle text-error shrink-0" onclick={() => removeVar(i)} aria-label="Remove"><Trash2 size={9} /></button>
+								</div>
+								<ExpressionInput
+									value={v.value}
+									placeholder={'${ . } or literal'}
+									availVars={availableVars}
+									onchange={(val) => updateVar(i, 'value', val)}
+								/>
 							</div>
 						{/each}
 					{/if}
@@ -455,12 +456,14 @@
 									oninput={(e) => updateCase(i, 'name', (e.target as HTMLInputElement).value)} />
 								<button class="btn btn-ghost btn-xs btn-circle text-error shrink-0" onclick={() => removeCase(i)} aria-label="Remove"><Trash2 size={9} /></button>
 							</div>
-							<div class="flex items-center gap-1.5">
-								<span class="text-base-content/40 w-10 shrink-0 text-[10px]">when</span>
-								<input class="input input-xs min-w-0 flex-1 font-mono"
-									placeholder={'${ .status == "ok" }  (blank = default)'}
+							<div class="flex flex-col gap-0.5">
+								<span class="text-base-content/40 text-[10px]">when</span>
+								<ExpressionInput
 									value={c.condition}
-									oninput={(e) => updateCase(i, 'condition', (e.target as HTMLInputElement).value)} />
+									placeholder={'${ .status == "ok" }  (blank = default)'}
+									availVars={availableVars}
+									onchange={(val) => updateCase(i, 'condition', val)}
+								/>
 							</div>
 							<div class="flex items-center gap-1.5">
 								<span class="text-base-content/40 w-10 shrink-0 text-[10px]">then</span>
@@ -492,19 +495,23 @@
 					</div>
 				</div>
 				<div class="flex flex-col gap-1">
-					<label class="text-base-content/50 text-[10px] font-semibold uppercase" for="np-in">in (collection expr)</label>
-					<input id="np-in" class="input input-xs font-mono w-full"
-						placeholder={'${ $input.items }'}
+					<span class="text-base-content/50 text-[10px] font-semibold uppercase">in (collection expr)</span>
+					<ExpressionInput
 						value={f('in') || '${ $input.items }'}
-						oninput={(e) => patch('in', (e.target as HTMLInputElement).value)} />
+						placeholder={'${ $input.items }'}
+						availVars={availableVars}
+						onchange={(v) => patch('in', v)}
+					/>
 					<p class="text-base-content/30 text-[9px]">Read via ${'${ $data.item }'} and ${'${ $data.index }'} inside the loop</p>
 				</div>
 				<div class="flex flex-col gap-1">
-					<label class="text-base-content/50 text-[10px] font-semibold uppercase" for="np-while">while (continue if true)</label>
-					<input id="np-while" class="input input-xs font-mono w-full"
-						placeholder={'${ $data.index < 10 }  (optional)'}
+					<span class="text-base-content/50 text-[10px] font-semibold uppercase">while (continue if true)</span>
+					<ExpressionInput
 						value={f('while')}
-						oninput={(e) => patch('while', (e.target as HTMLInputElement).value)} />
+						placeholder={'${ $data.index < 10 }  (optional)'}
+						availVars={availableVars}
+						onchange={(v) => patch('while', v)}
+					/>
 				</div>
 			{/if}
 
@@ -556,11 +563,13 @@
 					<p class="text-base-content/30 text-[9px]">Values support expressions e.g. ${'${ $data.delaySeconds }'}</p>
 				{:else}
 					<div class="flex flex-col gap-1">
-						<label class="text-base-content/50 text-[10px] font-semibold uppercase" for="np-until">RFC 3339 timestamp</label>
-						<input id="np-until" class="input input-xs font-mono w-full"
-							placeholder={'2026-12-31T23:59:59Z or ${ $data.deadline }'}
+						<span class="text-base-content/50 text-[10px] font-semibold uppercase">RFC 3339 timestamp</span>
+						<ExpressionInput
 							value={f('until')}
-							oninput={(e) => patch('until', (e.target as HTMLInputElement).value)} />
+							placeholder={'2026-12-31T23:59:59Z or ${ $data.deadline }'}
+							availVars={availableVars}
+							onchange={(v) => patch('until', v)}
+						/>
 						<p class="text-base-content/30 text-[9px]">Past timestamps are a no-op — execution continues immediately</p>
 					</div>
 				{/if}
@@ -599,9 +608,12 @@
 								</select>
 								<button class="btn btn-ghost btn-xs btn-circle text-error shrink-0" onclick={() => removeEvent(i)} aria-label="Remove"><Trash2 size={9} /></button>
 							</div>
-							<input class="input input-xs font-mono w-full" placeholder={'acceptIf: ${ .valid == true }  (optional)'}
+							<ExpressionInput
 								value={ev.acceptIf ?? ''}
-								oninput={(e) => updateEvent(i, 'acceptIf', (e.target as HTMLInputElement).value)} />
+								placeholder={'${ .valid == true }  (optional acceptIf)'}
+								availVars={availableVars}
+								onchange={(val) => updateEvent(i, 'acceptIf', val)}
+							/>
 						</div>
 					{/each}
 				</div>
@@ -630,11 +642,13 @@
 							oninput={(e) => patch('errorTitle', (e.target as HTMLInputElement).value)} />
 					</div>
 					<div class="flex flex-col gap-1">
-						<label class="text-base-content/50 text-[10px] font-semibold uppercase" for="np-errdetail">detail (optional, supports expressions)</label>
-						<input id="np-errdetail" class="input input-xs font-mono w-full"
-							placeholder={'${ "Failed: " + .message }'}
+						<span class="text-base-content/50 text-[10px] font-semibold uppercase">detail (optional)</span>
+						<ExpressionInput
 							value={f('errorDetail')}
-							oninput={(e) => patch('errorDetail', (e.target as HTMLInputElement).value)} />
+							placeholder={'${ "Failed: " + .message }'}
+							availVars={availableVars}
+							onchange={(v) => patch('errorDetail', v)}
+						/>
 					</div>
 				</div>
 			{/if}
@@ -723,11 +737,13 @@
 							oninput={(e) => patch('workflowType', (e.target as HTMLInputElement).value)} />
 					</div>
 					<div class="flex flex-col gap-1">
-						<label class="text-base-content/50 text-[10px] font-semibold uppercase" for="np-cwinput">Input expression</label>
-						<input id="np-cwinput" class="input input-xs font-mono w-full"
-							placeholder={'${ . }'}
+						<span class="text-base-content/50 text-[10px] font-semibold uppercase">Input expression</span>
+						<ExpressionInput
 							value={f('childInput') || '${ . }'}
-							oninput={(e) => patch('childInput', (e.target as HTMLInputElement).value)} />
+							placeholder={'${ . }'}
+							availVars={availableVars}
+							onchange={(v) => patch('childInput', v)}
+						/>
 					</div>
 					<label class="flex cursor-pointer items-center gap-2 text-xs">
 						<input type="checkbox" class="checkbox checkbox-xs" checked={bool('await', true)}
@@ -751,55 +767,36 @@
 				<p class="text-base-content/50 mb-2 text-[10px] font-semibold uppercase tracking-wider">Data Flow</p>
 				<div class="flex flex-col gap-2">
 					<div class="flex flex-col gap-0.5">
-						<label class="text-base-content/40 font-mono text-[10px]" for="np-inputfrom">input.from</label>
-						<input id="np-inputfrom" class="input input-xs font-mono w-full"
-							placeholder={'${ $context.field }  (override what . is)'}
+						<span class="text-base-content/40 font-mono text-[10px]">input.from</span>
+						<ExpressionInput
 							value={f('inputFrom')}
-							oninput={(e) => patch('inputFrom', (e.target as HTMLInputElement).value)} />
+							placeholder={'${ $context.field }  (override what . is)'}
+							availVars={availableVars}
+							onchange={(v) => patch('inputFrom', v)}
+						/>
 					</div>
 					<div class="flex flex-col gap-0.5">
-						<label class="text-base-content/40 font-mono text-[10px]" for="np-outputas">output.as</label>
-						<input id="np-outputas" class="input input-xs font-mono w-full"
-							placeholder={'${ { key: .field } }  (reshape $output)'}
+						<span class="text-base-content/40 font-mono text-[10px]">output.as</span>
+						<ExpressionInput
 							value={f('outputAs')}
-							oninput={(e) => patch('outputAs', (e.target as HTMLInputElement).value)} />
+							placeholder={'${ { key: .field } }  (reshape $output)'}
+							availVars={availableVars}
+							onchange={(v) => patch('outputAs', v)}
+						/>
 					</div>
 					<div class="flex flex-col gap-0.5">
-						<label class="text-base-content/40 font-mono text-[10px]" for="np-exportas">export.as</label>
-						<input id="np-exportas" class="input input-xs font-mono w-full"
-							placeholder={'${ $context + { key: $output } }'}
+						<span class="text-base-content/40 font-mono text-[10px]">export.as</span>
+						<ExpressionInput
 							value={f('exportAs')}
-							oninput={(e) => patch('exportAs', (e.target as HTMLInputElement).value)} />
+							placeholder={'${ $context + { key: $output } }'}
+							availVars={availableVars}
+							onchange={(v) => patch('exportAs', v)}
+						/>
 						<p class="text-base-content/25 text-[9px]">Accumulated into $context — readable by any downstream task</p>
 					</div>
 				</div>
 			</div>
 		{/if}
 
-		<!-- ── AVAILABLE VARIABLES ───────────────────────────────────────── -->
-		{#if nodeType !== 'end'}
-			<div class="border-base-200 border-t p-3">
-				<p class="text-base-content/50 mb-2 text-[10px] font-semibold uppercase tracking-wider">
-					Available Here
-					<span class="text-base-content/30 normal-case font-normal ml-1">click to copy</span>
-				</p>
-				{#if availableVars.length === 0}
-					<p class="text-base-content/25 text-[10px]">Define $input fields or $env vars in Workflow Variables.</p>
-				{:else}
-					<div class="flex flex-wrap gap-1">
-						{#each availableVars as v (v.expr)}
-							<button
-								class="border-base-300 hover:bg-base-200 flex items-center gap-1 rounded border px-1.5 py-0.5 transition"
-								onclick={() => copyVar(v.expr)}
-								title={v.hint || v.expr}
-							>
-								<code class="text-[10px] {categoryColor[v.category]}">{v.expr}</code>
-								<Copy size={8} class="text-base-content/20" />
-							</button>
-						{/each}
-					</div>
-				{/if}
-			</div>
-		{/if}
 	</div>
 </aside>
