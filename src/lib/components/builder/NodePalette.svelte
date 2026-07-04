@@ -26,7 +26,7 @@
 	}
 </script>
 
-<aside class="bg-base-100 border-base-300 flex w-52 shrink-0 flex-col overflow-y-auto border-l">
+<aside class="bg-base-100 border-base-300 flex w-52 shrink-0 flex-col overflow-y-auto border-r">
 	<div class="border-base-200 border-b px-4 py-3">
 		<p class="text-base-content/50 text-[10px] font-semibold uppercase tracking-wider">
 			Node Palette

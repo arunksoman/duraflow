@@ -107,3 +107,28 @@ export interface Schedule {
 	enabled: boolean;
 	nextRunAt?: string;
 }
+
+// ── Workflow Builder ────────────────────────────────────────────────
+
+export interface InputField {
+	name: string;
+	type: 'string' | 'number' | 'boolean' | 'object' | 'array';
+	description?: string;
+	example?: string;
+}
+
+export interface EnvVar {
+	/** Name without the ZIGGY_ prefix — e.g. "API_BASE" → ${ $env.API_BASE } */
+	name: string;
+	description?: string;
+	example?: string;
+}
+
+export interface WorkflowMeta {
+	workflowType: string;
+	taskQueue: string;
+	namespace: string;
+	version: string;
+	inputSchema: InputField[];
+	envVars: EnvVar[];
+}

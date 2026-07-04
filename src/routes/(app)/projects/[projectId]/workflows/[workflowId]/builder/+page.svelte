@@ -12,27 +12,49 @@
 	import '@xyflow/svelte/dist/style.css';
 
 	import { page } from '$app/state';
-	import { ArrowLeft, CircleCheck, Code2, Save, Workflow } from '@lucide/svelte';
+	import { ArrowLeft, CircleCheck, Code2, Save, SlidersHorizontal, Workflow } from '@lucide/svelte';
 	import ThemeToggle from '$lib/components/ThemeToggle.svelte';
 
 	import WorkflowNode from '$lib/components/builder/WorkflowNode.svelte';
 	import ReconnectableEdge from '$lib/components/builder/ReconnectableEdge.svelte';
 	import NodePalette from '$lib/components/builder/NodePalette.svelte';
 	import FlowInterop from '$lib/components/builder/FlowInterop.svelte';
-	import NodeConfigModal from '$lib/components/builder/NodeConfigModal.svelte';
-	import CallConfigModal from '$lib/components/builder/CallConfigModal.svelte';
+	import NodePanel from '$lib/components/builder/NodePanel.svelte';
+	import WorkflowVariablesModal from '$lib/components/builder/WorkflowVariablesModal.svelte';
 	import { NODE_META, NODE_TYPES } from '$lib/components/builder/builderConfig';
 	import { generateDsl } from '$lib/utils/dsl';
-	import type { WorkflowNodeType } from '$lib/types';
+	import type { WorkflowNodeType, WorkflowMeta } from '$lib/types';
 
 	const projectId = $derived(page.params.projectId);
 	const workflowId = $derived(page.params.workflowId);
 	const projectName = $derived(projectId === 'demo' ? 'Demo Project' : 'Project');
 	const workflowName = $derived(workflowId === 'demo' ? 'Order Fulfillment' : 'New Workflow');
 
-	// Build nodeTypes safely (avoids reserved-word property names like do/for/switch/try)
 	const nodeTypes = Object.fromEntries(NODE_TYPES.map((t) => [t, WorkflowNode]));
 	const edgeTypes = { default: ReconnectableEdge };
+
+	// ── Workflow metadata & variables ────────────────────────────────
+
+	let workflowMeta = $state<WorkflowMeta>({
+		workflowType: 'order-fulfillment',
+		taskQueue: 'default',
+		namespace: 'default',
+		version: '0.1.0',
+		inputSchema: [
+			{ name: 'orderId', type: 'string', example: 'ord-1234' },
+			{ name: 'userId', type: 'string', example: 'usr-5678' }
+		],
+		envVars: [
+			{ name: 'API_BASE', description: 'Base URL for the API', example: 'https://api.example.com' },
+			{ name: 'API_KEY', description: 'API authentication key', example: '••••••' }
+		]
+	});
+
+	function updateWorkflowMeta(patch: Partial<WorkflowMeta>) {
+		workflowMeta = { ...workflowMeta, ...patch };
+	}
+
+	// ── Canvas state ─────────────────────────────────────────────────
 
 	let nodes: Node[] = $state.raw([
 		{
@@ -50,12 +72,15 @@
 				type: 'call',
 				label: 'Fetch Order',
 				method: 'get',
-				endpoint: 'https://api.example.com/orders',
-				headers: [{ key: 'Authorization', value: '${ $secrets.apiToken }' }],
-				query: [{ key: 'orderId', value: '${ $input.orderId }' }],
+				endpoint: '${ $env.API_BASE + "/orders/" + $input.orderId }',
+				headers: [{ key: 'Authorization', value: 'Bearer ${ $env.API_KEY }' }],
+				query: [],
 				body: '',
 				output: 'content',
-				redirect: false
+				redirect: false,
+				inputFrom: '',
+				outputAs: '',
+				exportAs: '${ $context + { order: $output } }'
 			}
 		},
 		{
@@ -64,36 +89,58 @@
 			position: { x: 220, y: 200 },
 			data: {
 				type: 'switch',
-				label: 'Validate Status',
+				label: 'Route by Status',
 				cases: [
-					{ name: 'success', condition: "${ .status == 'success' }", then: 'process-in-parallel' },
-					{ name: 'failure', condition: "${ .status == 'error' }", then: 'log-error' }
-				]
+					{ name: 'success', condition: "${ .status == 'success' }", then: '3' },
+					{ name: 'failure', condition: "${ .status == 'error' }", then: '4' },
+					{ name: 'default', condition: '', then: 'end' }
+				],
+				inputFrom: '',
+				outputAs: '',
+				exportAs: ''
 			}
 		},
 		{
 			id: '3',
 			type: 'fork',
-			position: { x: 60, y: 360 },
-			data: { type: 'fork', label: 'Process in Parallel' }
+			position: { x: 60, y: 370 },
+			data: { type: 'fork', label: 'Process in Parallel', compete: false, inputFrom: '', outputAs: '', exportAs: '' }
 		},
 		{
 			id: '4',
 			type: 'set',
-			position: { x: 400, y: 360 },
-			data: { type: 'set', label: 'Log Error', variables: [{ key: 'error', value: '${ .message }' }] }
+			position: { x: 400, y: 370 },
+			data: {
+				type: 'set',
+				label: 'Log Error',
+				variables: [{ key: 'errorMsg', value: '${ .message }' }],
+				inputFrom: '',
+				outputAs: '',
+				exportAs: '${ $context + { lastError: $data.errorMsg } }'
+			}
 		},
 		{
 			id: '5',
 			type: 'wait',
-			position: { x: 60, y: 520 },
-			data: { type: 'wait', label: 'Wait for Confirm', duration: 300 }
+			position: { x: 60, y: 530 },
+			data: { type: 'wait', label: 'Wait for Confirm', waitMode: 'duration', days: 0, hours: 0, minutes: 5, seconds: 0, until: '', inputFrom: '', outputAs: '', exportAs: '' }
 		},
 		{
 			id: '6',
 			type: 'raise',
-			position: { x: 230, y: 520 },
-			data: { type: 'raise', label: 'Order Completed', eventType: 'com.example.order.completed' }
+			position: { x: 230, y: 530 },
+			data: {
+				type: 'raise',
+				label: 'Order Failed',
+				errorType: 'https://serverlessworkflow.io/spec/1.0.0/errors/communication',
+				errorStatus: 500,
+				errorTitle: 'Order processing failed',
+				errorDetail: '${ "Failed: " + $data.errorMsg }',
+				errorInstance: '',
+				inputFrom: '',
+				outputAs: '',
+				exportAs: ''
+			}
 		}
 	]);
 
@@ -103,18 +150,23 @@
 		{ id: 'e2-3', source: '2', target: '3', label: 'success', style: 'stroke: #22c55e; stroke-width: 2;' },
 		{ id: 'e2-4', source: '2', target: '4', label: 'failure', style: 'stroke: #ef4444; stroke-width: 2;' },
 		{ id: 'e3-5', source: '3', target: '5' },
-		{ id: 'e3-6', source: '3', target: '6' }
+		{ id: 'e4-6', source: '4', target: '6' }
 	]);
+
+	// ── UI state ─────────────────────────────────────────────────────
 
 	let saved = $state(false);
 	let showDsl = $state(false);
+	let showVariables = $state(false);
 	let configNodeId = $state<string | null>(null);
 	let screenToFlowPosition:
 		| ((pos: { x: number; y: number }) => { x: number; y: number })
 		| undefined = $state();
 
 	const configNode = $derived(configNodeId ? (nodes.find((n) => n.id === configNodeId) ?? null) : null);
-	const dsl = $derived(generateDsl(nodes, edges));
+	const dsl = $derived(generateDsl(nodes, edges, workflowMeta));
+
+	// ── Node operations ──────────────────────────────────────────────
 
 	function addNode(type: WorkflowNodeType) {
 		const meta = NODE_META[type];
@@ -148,17 +200,6 @@
 		nodes = nodes.map((n) => (n.id === id ? { ...n, data: { ...n.data, ...patch } } : n));
 	}
 
-	function handleSave() {
-		saved = true;
-		setTimeout(() => {
-			saved = false;
-		}, 2000);
-	}
-
-	function onFlowReady(fn: (pos: { x: number; y: number }) => { x: number; y: number }) {
-		screenToFlowPosition = fn;
-	}
-
 	function handleNodeClick(event: { node: Node }) {
 		configNodeId = event.node.id;
 	}
@@ -175,6 +216,15 @@
 					}
 				: e
 		);
+	}
+
+	function handleSave() {
+		saved = true;
+		setTimeout(() => (saved = false), 2000);
+	}
+
+	function onFlowReady(fn: (pos: { x: number; y: number }) => { x: number; y: number }) {
+		screenToFlowPosition = fn;
 	}
 </script>
 
@@ -199,12 +249,21 @@
 			<span class="text-sm font-medium">{workflowName}</span>
 		</div>
 		<div class="flex-1"></div>
+		<button
+			class="btn btn-ghost btn-sm gap-1.5"
+			class:btn-active={showVariables}
+			onclick={() => (showVariables = true)}
+			title="Workflow variables — $input schema, $env vars"
+		>
+			<SlidersHorizontal size={14} />
+			Variables
+		</button>
 		<ThemeToggle />
 		<button
 			class="btn btn-ghost btn-sm gap-1.5"
 			class:btn-active={showDsl}
 			onclick={() => (showDsl = !showDsl)}
-			title="View generated DSL"
+			title="View generated Zigflow DSL"
 		>
 			<Code2 size={14} />
 			DSL
@@ -220,8 +279,12 @@
 		</button>
 	</header>
 
-	<!-- Main area -->
+	<!-- Main area: palette | canvas | node panel -->
 	<div class="flex min-h-0 flex-1">
+
+		<!-- Node palette (left) -->
+		<NodePalette onaddnode={addNode} />
+
 		<!-- Canvas -->
 		<div
 			class="relative min-w-0 flex-1"
@@ -248,18 +311,27 @@
 			</SvelteFlow>
 		</div>
 
-		<!-- Node palette (right) -->
-		<NodePalette onaddnode={addNode} />
+		<!-- Right node config panel (slides in when a node is selected) -->
+		{#if configNode}
+			<NodePanel
+				node={configNode}
+				{nodes}
+				{edges}
+				{workflowMeta}
+				onclose={() => (configNodeId = null)}
+				onupdate={updateNodeData}
+			/>
+		{/if}
 	</div>
 </div>
 
-<!-- Node config modal -->
-{#if configNode}
-	{#if configNode.type === 'call'}
-		<CallConfigModal node={configNode} onclose={() => (configNodeId = null)} onupdate={updateNodeData} />
-	{:else}
-		<NodeConfigModal node={configNode} onclose={() => (configNodeId = null)} onupdate={updateNodeData} />
-	{/if}
+<!-- Workflow Variables modal -->
+{#if showVariables}
+	<WorkflowVariablesModal
+		meta={workflowMeta}
+		onclose={() => (showVariables = false)}
+		onupdate={updateWorkflowMeta}
+	/>
 {/if}
 
 <!-- DSL modal -->
@@ -279,13 +351,10 @@
 					>
 						Copy
 					</button>
-					<button class="btn btn-ghost btn-sm btn-circle" onclick={() => (showDsl = false)}>
-						✕
-					</button>
+					<button class="btn btn-ghost btn-sm btn-circle" onclick={() => (showDsl = false)}>✕</button>
 				</div>
 			</div>
-			<pre
-				class="bg-base-200 max-h-[60vh] overflow-auto rounded-lg p-4 font-mono text-[11px] leading-relaxed text-base-content/80 whitespace-pre">{dsl}</pre>
+			<pre class="bg-base-200 max-h-[60vh] overflow-auto rounded-lg p-4 font-mono text-[11px] leading-relaxed text-base-content/80 whitespace-pre">{dsl}</pre>
 		</div>
 		<form method="dialog" class="modal-backdrop">
 			<button onclick={() => (showDsl = false)}>close</button>
@@ -297,7 +366,6 @@
 	:global(.svelte-flow__node) {
 		font-family: inherit;
 	}
-	/* Light mode edge paths */
 	:global(.svelte-flow__edge-path) {
 		stroke: #94a3b8;
 		stroke-width: 2;
@@ -306,7 +374,6 @@
 	:global(.svelte-flow__edge:hover .svelte-flow__edge-path) {
 		stroke: #6366f1;
 	}
-	/* Dark mode edge paths */
 	:global([data-theme='dark'] .svelte-flow__edge-path) {
 		stroke: #475569;
 	}
@@ -314,22 +381,10 @@
 	:global([data-theme='dark'] .svelte-flow__edge:hover .svelte-flow__edge-path) {
 		stroke: #818cf8;
 	}
-	/* Light mode edge labels */
-	:global(.svelte-flow__edge-textbg) {
-		fill: #f8fafc;
-	}
-	:global(.svelte-flow__edge-text) {
-		fill: #64748b;
-		font-size: 10px;
-		font-weight: 500;
-	}
-	/* Dark mode edge labels */
-	:global([data-theme='dark'] .svelte-flow__edge-textbg) {
-		fill: #1e293b;
-	}
-	:global([data-theme='dark'] .svelte-flow__edge-text) {
-		fill: #94a3b8;
-	}
+	:global(.svelte-flow__edge-textbg) { fill: #f8fafc; }
+	:global(.svelte-flow__edge-text) { fill: #64748b; font-size: 10px; font-weight: 500; }
+	:global([data-theme='dark'] .svelte-flow__edge-textbg) { fill: #1e293b; }
+	:global([data-theme='dark'] .svelte-flow__edge-text) { fill: #94a3b8; }
 	:global(.svelte-flow__handle) {
 		background: var(--color-base-300);
 		border-color: var(--color-base-100);
@@ -351,9 +406,7 @@
 		border-bottom-color: var(--color-base-200);
 		fill: var(--color-base-content);
 	}
-	:global(.svelte-flow__controls-button:hover) {
-		background: var(--color-base-200);
-	}
+	:global(.svelte-flow__controls-button:hover) { background: var(--color-base-200); }
 	:global(.svelte-flow__minimap) {
 		background: var(--color-base-100);
 		border: 1px solid var(--color-base-300);
