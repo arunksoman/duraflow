@@ -12,6 +12,7 @@ import {
 	Pencil,
 	Repeat,
 	ShieldAlert,
+	TriangleAlert,
 	Workflow,
 	Zap
 } from '@lucide/svelte';
@@ -22,11 +23,29 @@ export interface VarEntry {
 	value: string;
 }
 
+/** Switch case. `then` holds a flow directive OR a node.id (resolved to slug at DSL time). */
 export interface CaseEntry {
 	name: string;
 	condition: string;
 	then: string;
 }
+
+/** Event filter for Listen task. */
+export interface EventEntry {
+	id: string;
+	type: 'signal' | 'query' | 'update';
+	data?: string;
+	acceptIf?: string;
+}
+
+/** Base data flow fields present on every task node. */
+export interface DataFlow {
+	inputFrom: string;
+	outputAs: string;
+	exportAs: string;
+}
+
+const EMPTY_FLOW: DataFlow = { inputFrom: '', outputAs: '', exportAs: '' };
 
 export interface NodeMeta {
 	label: string;
@@ -41,7 +60,7 @@ export interface NodeMeta {
 export const NODE_META: Record<WorkflowNodeType, NodeMeta> = {
 	start: {
 		label: 'Start',
-		description: 'Workflow entry point — optionally initialise variables',
+		description: 'Workflow entry point — optionally initialise $data variables',
 		icon: CirclePlay,
 		color: '#22c55e',
 		category: 'terminal',
@@ -57,18 +76,9 @@ export const NODE_META: Record<WorkflowNodeType, NodeMeta> = {
 		showInPalette: true,
 		defaultData: { label: 'End' }
 	},
-	task: {
-		label: 'Task',
-		description: 'Execute a named task via HTTP',
-		icon: CheckSquare,
-		color: '#3b82f6',
-		category: 'action',
-		showInPalette: true,
-		defaultData: { label: 'Task', method: 'get', endpoint: 'https://api.example.com/endpoint', timeout: '30s' }
-	},
 	call: {
 		label: 'REST',
-		description: 'REST API call with headers, body, and query params',
+		description: 'HTTP REST call — supports $env, $input, $data, $context in all fields',
 		icon: Globe,
 		color: '#6366f1',
 		category: 'action',
@@ -77,61 +87,144 @@ export const NODE_META: Record<WorkflowNodeType, NodeMeta> = {
 			label: 'REST Call',
 			method: 'get',
 			endpoint: '',
-			headers: [],
-			query: [],
+			headers: [] as VarEntry[],
+			query: [] as VarEntry[],
 			body: '',
 			output: 'content',
-			redirect: false
+			redirect: false,
+			...EMPTY_FLOW
 		}
 	},
-	do: {
-		label: 'Do',
-		description: 'Sequential steps (internal)',
+	task: {
+		label: 'Task',
+		description: 'Named Temporal activity via HTTP',
 		icon: CheckSquare,
-		color: '#64748b',
+		color: '#3b82f6',
+		category: 'action',
+		showInPalette: true,
+		defaultData: {
+			label: 'Task',
+			method: 'get',
+			endpoint: '',
+			timeout: '',
+			...EMPTY_FLOW
+		}
+	},
+	set: {
+		label: 'Set',
+		description: 'Write key-value pairs into $data — accessible as ${ $data.<key> } downstream',
+		icon: Pencil,
+		color: '#10b981',
+		category: 'action',
+		showInPalette: true,
+		defaultData: {
+			label: 'Set Variables',
+			variables: [{ key: 'result', value: '${ . }' }] as VarEntry[],
+			...EMPTY_FLOW
+		}
+	},
+	switch: {
+		label: 'Switch',
+		description: 'Conditional branching — cases evaluated in order, first match wins',
+		icon: GitBranch,
+		color: '#06b6d4',
 		category: 'control',
-		showInPalette: false,
-		defaultData: { label: 'Do' }
+		showInPalette: true,
+		defaultData: {
+			label: 'Switch',
+			cases: [
+				{ name: 'success', condition: "${ .status == 'success' }", then: 'continue' },
+				{ name: 'default', condition: '', then: 'end' }
+			] as CaseEntry[],
+			...EMPTY_FLOW
+		}
 	},
 	for: {
 		label: 'For',
-		description: 'Iterate over a collection',
+		description: 'Iterate over a collection — each iteration runs as a child workflow',
 		icon: Repeat,
 		color: '#14b8a6',
 		category: 'control',
 		showInPalette: true,
-		defaultData: { label: 'For Each', each: 'item', collection: 'items' }
+		defaultData: {
+			label: 'For Each',
+			each: 'item',
+			at: 'index',
+			in: '${ $input.items }',
+			while: '',
+			...EMPTY_FLOW
+		}
 	},
 	fork: {
 		label: 'Fork',
-		description: 'Parallel branches',
+		description: 'Run branches in parallel — compete mode returns only the fastest',
 		icon: GitFork,
 		color: '#f97316',
 		category: 'control',
 		showInPalette: true,
-		defaultData: { label: 'Fork' }
+		defaultData: { label: 'Fork', compete: false, ...EMPTY_FLOW }
+	},
+	try: {
+		label: 'Try',
+		description: 'Wrap tasks in error handling — catch block runs on any failure',
+		icon: ShieldAlert,
+		color: '#ef4444',
+		category: 'control',
+		showInPalette: true,
+		defaultData: { label: 'Try', catchAs: 'error', ...EMPTY_FLOW }
+	},
+	wait: {
+		label: 'Wait',
+		description: 'Durable timer — pause by duration or until a specific timestamp',
+		icon: Clock,
+		color: '#f59e0b',
+		category: 'event',
+		showInPalette: true,
+		defaultData: {
+			label: 'Wait',
+			waitMode: 'duration',
+			seconds: 30,
+			minutes: 0,
+			hours: 0,
+			days: 0,
+			until: '',
+			...EMPTY_FLOW
+		}
 	},
 	listen: {
 		label: 'Listen',
-		description: 'Wait for an event',
+		description: 'Wait for Temporal signals, queries, or updates',
 		icon: Bell,
 		color: '#a855f7',
 		category: 'event',
 		showInPalette: true,
-		defaultData: { label: 'Listen', eventType: 'custom.event' }
+		defaultData: {
+			label: 'Listen',
+			strategy: 'one',
+			events: [{ id: 'my-signal', type: 'signal' }] as EventEntry[],
+			...EMPTY_FLOW
+		}
 	},
 	raise: {
 		label: 'Raise',
-		description: 'Emit an event',
-		icon: Zap,
-		color: '#eab308',
+		description: 'Throw a typed error (RFC 7807 Problem Details) — terminates current path',
+		icon: TriangleAlert,
+		color: '#dc2626',
 		category: 'event',
 		showInPalette: true,
-		defaultData: { label: 'Raise', eventType: 'custom.event' }
+		defaultData: {
+			label: 'Raise Error',
+			errorType: 'https://serverlessworkflow.io/spec/1.0.0/errors/communication',
+			errorStatus: 500,
+			errorTitle: '',
+			errorDetail: '',
+			errorInstance: '',
+			...EMPTY_FLOW
+		}
 	},
 	run: {
 		label: 'BYOC',
-		description: 'Bring Your Own Code — script, shell, or container',
+		description: 'Bring Your Own Code — script, shell command, or container',
 		icon: Code2,
 		color: '#6b7280',
 		category: 'action',
@@ -144,62 +237,33 @@ export const NODE_META: Record<WorkflowNodeType, NodeMeta> = {
 			command: '',
 			image: '',
 			pullPolicy: 'ifNotPresent',
-			workflowType: ''
+			workflowType: '',
+			...EMPTY_FLOW
 		}
 	},
-	set: {
-		label: 'Set',
-		description: 'Set one or more workflow variables',
-		icon: Pencil,
-		color: '#10b981',
-		category: 'action',
-		showInPalette: true,
-		defaultData: {
-			label: 'Set Variables',
-			variables: [{ key: 'result', value: '${ . }' }] as VarEntry[]
-		}
-	},
-	switch: {
-		label: 'Switch',
-		description: 'Conditional branching on runtime expressions',
-		icon: GitBranch,
-		color: '#06b6d4',
+	do: {
+		label: 'Do',
+		description: 'Sequential task group (internal / DSL only)',
+		icon: CheckSquare,
+		color: '#64748b',
 		category: 'control',
-		showInPalette: true,
-		defaultData: {
-			label: 'Switch',
-			cases: [
-				{ name: 'success', condition: "${ .status == 'success' }", then: 'continue' },
-				{ name: 'default', condition: '', then: 'end' }
-			] as CaseEntry[]
-		}
-	},
-	try: {
-		label: 'Try',
-		description: 'Error handling block',
-		icon: ShieldAlert,
-		color: '#ef4444',
-		category: 'control',
-		showInPalette: true,
-		defaultData: { label: 'Try' }
-	},
-	wait: {
-		label: 'Wait',
-		description: 'Pause for a duration',
-		icon: Clock,
-		color: '#f59e0b',
-		category: 'event',
-		showInPalette: true,
-		defaultData: { label: 'Wait', duration: 30 }
+		showInPalette: false,
+		defaultData: { label: 'Do', ...EMPTY_FLOW }
 	},
 	childWorkflow: {
 		label: 'Child Flow',
-		description: 'Invoke a nested workflow',
+		description: 'Invoke a child workflow by type — runs as Temporal child workflow',
 		icon: Workflow,
 		color: '#8b5cf6',
 		category: 'structure',
 		showInPalette: true,
-		defaultData: { label: 'Child Workflow', workflowType: 'child-workflow-type' }
+		defaultData: {
+			label: 'Child Workflow',
+			workflowType: '',
+			childInput: '${ . }',
+			await: true,
+			...EMPTY_FLOW
+		}
 	}
 };
 
