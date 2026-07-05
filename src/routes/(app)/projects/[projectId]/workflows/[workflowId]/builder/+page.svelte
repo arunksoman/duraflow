@@ -57,7 +57,7 @@
 	// ── Panel layout state ────────────────────────────────────────────
 
 	let paletteOpen = $state(true);
-	let panelWidth = $state(340);
+	let panelWidth = $state(400);
 
 	$effect(() => {
 		if (configNodeId) paletteOpen = false;
@@ -71,7 +71,7 @@
 		document.body.style.userSelect = 'none';
 
 		function onMove(ev: MouseEvent) {
-			panelWidth = Math.max(280, Math.min(680, startW + (startX - ev.clientX)));
+			panelWidth = Math.max(360, Math.min(680, startW + (startX - ev.clientX)));
 		}
 		function onUp() {
 			document.body.style.cursor = '';

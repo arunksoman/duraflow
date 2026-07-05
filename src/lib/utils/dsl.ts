@@ -28,7 +28,6 @@ function resolveNodeSlug(nodeId: string, allNodes: Node[]): string {
 function resolveThen(then: string, allNodes: Node[]): string {
 	const directives = ['continue', 'end', 'exit'];
 	if (directives.includes(then)) return then;
-	// If the stored value looks like a node id, resolve it; otherwise treat as a literal slug
 	const byId = allNodes.find((n) => n.id === then);
 	if (byId) {
 		if (byId.type === 'end') return 'end';
@@ -47,7 +46,6 @@ class DslBuilder {
 		return this;
 	}
 
-	/** Emit raw lines — used by the outer generator for one-off blocks. */
 	raw(...items: string[]): this {
 		this.lines.push(...items);
 		return this;
@@ -58,13 +56,11 @@ class DslBuilder {
 	document(meta: WorkflowMeta, workflowName: string): this {
 		this.push(
 			`document:`,
-			`  dsl: '1.0.0-alpha5'`,
-			`  namespace: ${meta.namespace || 'default'}`,
-			`  name: ${workflowName}`,
-			`  version: '${meta.version || '0.1.0'}'`
+			`  dsl: 1.0.0`,
+			`  taskQueue: ${meta.taskQueue || 'zigflow'}`,
+			`  workflowType: ${meta.workflowType || workflowName}`,
+			`  version: '${meta.version || '0.0.1'}'`
 		);
-		if (meta.taskQueue) this.push(`  taskQueue: ${meta.taskQueue}`);
-		if (meta.workflowType) this.push(`  workflowType: ${meta.workflowType}`);
 		this.push('', 'do:');
 		return this;
 	}
@@ -72,32 +68,38 @@ class DslBuilder {
 	// ── Data flow (input.from / output.as / export.as) ───────────────
 
 	private dataFlow(data: Record<string, unknown>, indent: string): this {
-		const inputFrom = (data.inputFrom as string) ?? '';
-		const outputAs = (data.outputAs as string) ?? '';
-		const exportAs = (data.exportAs as string) ?? '';
+		const inputFrom = ((data.inputFrom as string) ?? '').trim();
+		const outputAs = ((data.outputAs as string) ?? '').trim();
+		const exportAs = ((data.exportAs as string) ?? '').trim();
 
-		if (inputFrom.trim()) {
-			this.push(`${indent}input:`, `${indent}  from: ${inputFrom.trim()}`);
+		if (inputFrom) {
+			this.push(`${indent}input:`);
+			this.push(`${indent}  from: ${inputFrom}`);
 		}
-		if (outputAs.trim()) {
-			this.push(`${indent}output:`, `${indent}  as: ${outputAs.trim()}`);
+		if (outputAs) {
+			this.push(`${indent}output:`);
+			this.push(`${indent}  as: ${outputAs}`);
 		}
-		if (exportAs.trim()) {
-			this.push(`${indent}export:`, `${indent}  as: ${exportAs.trim()}`);
+		if (exportAs) {
+			this.push(`${indent}export:`);
+			this.push(`${indent}  as: ${exportAs}`);
 		}
 		return this;
 	}
 
 	// ── Task emitters ────────────────────────────────────────────────
 
-	call(taskId: string, data: Record<string, unknown>, allNodes: Node[]): this {
+	call(taskId: string, data: Record<string, unknown>): this {
 		const hdrs = ((data.headers as VarEntry[]) ?? []).filter((h) => h.key);
 		const qry = ((data.query as VarEntry[]) ?? []).filter((q) => q.key);
 		const bodyStr = ((data.body as string) ?? '').trim();
 		const outputFmt = (data.output as string) ?? 'content';
 		const redir = data.redirect === true;
 
-		this.push(`  - ${taskId}:`, `      call: http`, `      with:`);
+		this.push(`  - ${taskId}:`);
+		this.push(`      call: http`);
+		this.dataFlow(data, '      ');
+		this.push(`      with:`);
 		this.push(`        method: ${data.method ?? 'get'}`);
 		this.push(`        endpoint: ${data.endpoint ?? ''}`);
 
@@ -121,41 +123,60 @@ class DslBuilder {
 		if (outputFmt !== 'content') this.push(`        output: ${outputFmt}`);
 		if (redir) this.push(`        redirect: true`);
 
-		this.dataFlow(data, '      ');
 		return this;
 	}
 
 	task(taskId: string, data: Record<string, unknown>): this {
-		this.push(`  - ${taskId}:`, `      call: http`, `      with:`);
+		this.push(`  - ${taskId}:`);
+		this.push(`      call: http`);
+		this.dataFlow(data, '      ');
+		this.push(`      with:`);
 		this.push(`        method: ${data.method ?? 'get'}`);
 		this.push(`        endpoint: ${data.endpoint ?? ''}`);
 		if (data.timeout) this.push(`        timeout: ${data.timeout}`);
-		this.dataFlow(data, '      ');
 		return this;
 	}
 
 	set(taskId: string, data: Record<string, unknown>): this {
 		const vars = (data.variables as VarEntry[]) ?? [];
 		const valid = vars.filter((v) => v.key);
-		this.push(`  - ${taskId}:`, `      set:`);
+		this.push(`  - ${taskId}:`);
+		this.dataFlow(data, '      ');
+		this.push(`      set:`);
 		if (valid.length > 0) {
 			for (const v of valid) this.push(`        ${v.key}: ${v.value || "''"}`);
 		} else {
 			this.push('        result: ${ . }');
 		}
+		return this;
+	}
+
+	if(taskId: string, data: Record<string, unknown>): this {
+		const condition = ((data.condition as string) ?? '').trim();
+		const vars = (data.variables as VarEntry[]) ?? [];
+		const valid = vars.filter((v) => v.key);
+		this.push(`  - ${taskId}:`);
+		if (condition) this.push(`      if: ${condition}`);
 		this.dataFlow(data, '      ');
+		this.push(`      set:`);
+		if (valid.length > 0) {
+			for (const v of valid) this.push(`        ${v.key}: ${v.value || "''"}`);
+		} else {
+			this.push('        result: ${ . }');
+		}
 		return this;
 	}
 
 	switch(taskId: string, data: Record<string, unknown>, allNodes: Node[]): this {
 		const cases = (data.cases as CaseEntry[]) ?? [];
-		this.push(`  - ${taskId}:`, `      switch:`);
+		this.push(`  - ${taskId}:`);
+		this.dataFlow(data, '      ');
+		this.push(`      switch:`);
 		for (const c of cases) {
 			this.push(`        - ${c.name}:`);
 			if (c.condition.trim()) this.push(`            when: ${c.condition.trim()}`);
 			this.push(`            then: ${resolveThen(c.then, allNodes)}`);
 		}
-		this.dataFlow(data, '      ');
 		return this;
 	}
 
@@ -163,54 +184,66 @@ class DslBuilder {
 		const each = (data.each as string) || 'item';
 		const at = (data.at as string) || 'index';
 		const inExpr = (data.in as string) || '${ $input.items }';
-		const whileExpr = (data.while as string) || '';
+		const whileExpr = ((data.while as string) ?? '').trim();
 
-		this.push(`  - ${taskId}:`, `      for:`);
+		this.push(`  - ${taskId}:`);
+		this.dataFlow(data, '      ');
+		this.push(`      for:`);
 		this.push(`        each: ${each}`);
 		this.push(`        at: ${at}`);
 		this.push(`        in: ${inExpr}`);
-		if (whileExpr.trim()) this.push(`        while: ${whileExpr.trim()}`);
-		this.push(`        do:`, `          - step: {}`);
-		this.dataFlow(data, '      ');
+		if (whileExpr) this.push(`        while: ${whileExpr}`);
+		this.push(`        do:`);
+		this.push('          - step:');
+		this.push('              set:');
+		this.push('                result: ${ . }');
 		return this;
 	}
 
 	fork(taskId: string, data: Record<string, unknown>, nexts: string[], allNodes: Node[]): this {
 		const compete = data.compete === true;
-		this.push(`  - ${taskId}:`, `      fork:`);
+		this.push(`  - ${taskId}:`);
+		this.dataFlow(data, '      ');
+		this.push(`      fork:`);
 		if (compete) this.push(`        compete: true`);
 		this.push(`        branches:`);
 		if (nexts.length > 0) {
 			for (const nid of nexts) {
-				this.push(`          - ${resolveNodeSlug(nid, allNodes)}: {}`);
+				const slug = resolveNodeSlug(nid, allNodes);
+				this.push(`          - ${slug}:`);
+				this.push(`              do: []`);
 			}
 		} else {
-			this.push(`          - branch1: {}`, `          - branch2: {}`);
+			this.push(`          - branch1:`);
+			this.push(`              do: []`);
+			this.push(`          - branch2:`);
+			this.push(`              do: []`);
 		}
-		this.dataFlow(data, '      ');
 		return this;
 	}
 
 	try(taskId: string, data: Record<string, unknown>): this {
 		const catchAs = (data.catchAs as string) || 'error';
-		this.push(
-			`  - ${taskId}:`,
-			`      try:`,
-			`        do:`,
-			`          - step: {}`,
-			`      catch:`,
-			`        errors:`,
-			`          as: ${catchAs}`,
-			`        do:`,
-			`          - handleError: {}`
-		);
+		this.push(`  - ${taskId}:`);
 		this.dataFlow(data, '      ');
+		this.push('      try:');
+		this.push('        - tryBody:');
+		this.push('            set:');
+		this.push('              result: ${ . }');
+		this.push(`      catch:`);
+		this.push(`        as: ${catchAs}`);
+		this.push(`        do:`);
+		this.push('          - handleError:');
+		this.push('              set:');
+		this.push(`                error: \${ $data.${catchAs} }`);
 		return this;
 	}
 
 	wait(taskId: string, data: Record<string, unknown>): this {
 		const mode = (data.waitMode as string) ?? 'duration';
-		this.push(`  - ${taskId}:`, `      wait:`);
+		this.push(`  - ${taskId}:`);
+		this.dataFlow(data, '      ');
+		this.push(`      wait:`);
 		if (mode === 'until') {
 			const until = (data.until as string) || '';
 			this.push(`        until: ${until}`);
@@ -224,14 +257,17 @@ class DslBuilder {
 			if (minutes) this.push(`        minutes: ${minutes}`);
 			if (seconds || (!days && !hours && !minutes)) this.push(`        seconds: ${seconds}`);
 		}
-		this.dataFlow(data, '      ');
 		return this;
 	}
 
 	listen(taskId: string, data: Record<string, unknown>): this {
 		const strategy = (data.strategy as string) || 'one';
 		const events = (data.events as EventEntry[]) ?? [];
-		this.push(`  - ${taskId}:`, `      listen:`, `        to:`, `          ${strategy}:`);
+		this.push(`  - ${taskId}:`);
+		this.dataFlow(data, '      ');
+		this.push(`      listen:`);
+		this.push(`        to:`);
+		this.push(`          ${strategy}:`);
 		if (events.length > 0) {
 			for (const ev of events) {
 				this.push(`            - with:`);
@@ -241,79 +277,74 @@ class DslBuilder {
 				if (ev.acceptIf) this.push(`                acceptIf: ${ev.acceptIf}`);
 			}
 		} else {
-			this.push(`            - with:`, `                id: my-event`, `                type: signal`);
+			this.push(`            - with:`);
+			this.push(`                id: my-event`);
+			this.push(`                type: signal`);
 		}
-		this.dataFlow(data, '      ');
 		return this;
 	}
 
 	raise(taskId: string, data: Record<string, unknown>): this {
-		this.push(`  - ${taskId}:`, `      raise:`, `        error:`);
+		this.push(`  - ${taskId}:`);
+		this.push(`      raise:`);
+		this.push(`        error:`);
 		this.push(`          type: ${data.errorType ?? 'https://serverlessworkflow.io/spec/1.0.0/errors/communication'}`);
 		this.push(`          status: ${data.errorStatus ?? 500}`);
 		if (data.errorTitle) this.push(`          title: ${data.errorTitle}`);
 		if (data.errorDetail) this.push(`          detail: ${data.errorDetail}`);
-		if (data.errorInstance) this.push(`          instance: ${data.errorInstance}`);
 		return this;
 	}
 
 	run(taskId: string, data: Record<string, unknown>): this {
 		const runType = (data.runType as string) ?? 'script';
-		this.push(`  - ${taskId}:`, `      run:`);
+		this.push(`  - ${taskId}:`);
+		this.dataFlow(data, '      ');
+		this.push(`      run:`);
 
 		if (runType === 'script') {
 			const lang = (data.language as string) ?? 'js';
 			const code = (data.code as string) ?? '';
-			this.push(`        script:`, `          language: ${lang}`, `          code: |`);
+			this.push(`        script:`);
+			this.push(`          language: ${lang}`);
+			this.push(`          code: |`);
 			for (const l of code.split('\n')) this.push(`            ${l}`);
 		} else if (runType === 'shell') {
-			this.push(`        shell:`, `          command: ${(data.command as string) || 'echo hello'}`);
+			this.push(`        shell:`);
+			this.push(`          command: ${(data.command as string) || 'echo hello'}`);
 		} else if (runType === 'container') {
-			this.push(
-				`        container:`,
-				`          image: ${(data.image as string) || 'alpine:latest'}`,
-				`          pullPolicy: ${(data.pullPolicy as string) || 'ifNotPresent'}`
-			);
+			this.push(`        container:`);
+			this.push(`          image: ${(data.image as string) || 'alpine:latest'}`);
+			this.push(`          pullPolicy: ${(data.pullPolicy as string) || 'ifNotPresent'}`);
 		} else if (runType === 'workflow') {
-			this.push(
-				`        workflow:`,
-				`          type: ${(data.workflowType as string) || 'my-workflow-type'}`,
-				'          input: ${ . }',
-				`          await: true`
-			);
+			this.push(`        workflow:`);
+			this.push(`          type: ${(data.workflowType as string) || 'my-workflow-type'}`);
 		}
-		this.dataFlow(data, '      ');
 		return this;
 	}
 
 	childWorkflow(taskId: string, data: Record<string, unknown>): this {
-		const input = (data.childInput as string) || '${ . }';
+		const input = ((data.childInput as string) || '').trim();
 		const awaitChild = data.await !== false;
-		this.push(
-			`  - ${taskId}:`,
-			`      run:`,
-			`        workflow:`,
-			`          type: ${(data.workflowType as string) || 'child-workflow-type'}`,
-			`          input: ${input}`
-		);
-		if (!awaitChild) this.push(`          await: false`);
+		this.push(`  - ${taskId}:`);
 		this.dataFlow(data, '      ');
+		this.push(`      run:`);
+		this.push(`        workflow:`);
+		this.push(`          type: ${(data.workflowType as string) || 'child-workflow-type'}`);
+		if (input && input !== '${ . }') this.push(`          input: ${input}`);
+		if (!awaitChild) this.push(`          await: false`);
 		return this;
 	}
 
 	do(taskId: string, data: Record<string, unknown>): this {
-		this.push(`  - ${taskId}:`, `      do:`, `        - step: {}`);
+		this.push(`  - ${taskId}:`);
 		this.dataFlow(data, '      ');
+		this.push('      do:');
+		this.push('        - step:');
+		this.push('            set:');
+		this.push('              result: ${ . }');
 		return this;
 	}
 
-	/** Append an explicit `then:` continuation line to the last task block. */
-	then(targetSlug: string): this {
-		this.push(`      then: ${targetSlug}`);
-		return this;
-	}
-
-	/** Blank separator between tasks. */
 	sep(): this {
 		this.push('');
 		return this;
@@ -348,11 +379,9 @@ function topoSort(nodes: Node[], edges: Edge[]): Node[] {
 		for (const nxt of nextMap.get(id) ?? []) visit(nxt);
 	}
 
-	// Start from roots (nodes with no incoming edges)
 	for (const node of nodes) {
 		if (!prevSet.has(node.id)) visit(node.id);
 	}
-	// Catch any disconnected nodes
 	for (const node of nodes) visit(node.id);
 
 	return ordered;
@@ -366,10 +395,10 @@ export function generateDsl(nodes: Node[], edges: Edge[], meta?: WorkflowMeta): 
 			'# Add nodes to the canvas to generate DSL',
 			'',
 			'document:',
-			"  dsl: '1.0.0-alpha5'",
-			'  namespace: default',
-			'  name: my-workflow',
-			"  version: '0.1.0'",
+			'  dsl: 1.0.0',
+			'  taskQueue: zigflow',
+			'  workflowType: my-workflow',
+			"  version: '0.0.1'",
 			'',
 			'do: []'
 		].join('\n');
@@ -382,13 +411,13 @@ export function generateDsl(nodes: Node[], edges: Edge[], meta?: WorkflowMeta): 
 	}
 
 	const ordered = topoSort(nodes, edges);
-	const workflowName = toSlug((ordered[0]?.data?.label as string) ?? 'my-workflow');
+	const workflowName = toSlug((meta?.workflowType) || ((ordered[0]?.data?.label as string) ?? 'my-workflow'));
 
 	const effectiveMeta: WorkflowMeta = meta ?? {
-		workflowType: '',
-		taskQueue: '',
-		namespace: 'default',
-		version: '0.1.0',
+		workflowType: workflowName,
+		taskQueue: 'zigflow',
+		namespace: '',
+		version: '0.0.1',
 		inputSchema: [],
 		envVars: []
 	};
@@ -400,11 +429,9 @@ export function generateDsl(nodes: Node[], edges: Edge[], meta?: WorkflowMeta): 
 	const startNode = nodes.find((n) => n.type === 'start');
 	const startVars = ((startNode?.data?.variables as VarEntry[]) ?? []).filter((v) => v.key);
 	if (startVars.length > 0) {
-		builder.raw(`  - init:`, `      set:`);
+		builder.raw(`  - init:`);
+		builder.raw(`      set:`);
 		for (const v of startVars) builder.raw(`        ${v.key}: ${v.value || "''"}`);
-		if (ordered.length > 0) {
-			builder.then(toSlug((ordered[0].data?.label as string) ?? 'task'));
-		}
 		builder.sep();
 	}
 
@@ -414,21 +441,19 @@ export function generateDsl(nodes: Node[], edges: Edge[], meta?: WorkflowMeta): 
 		const type = node.type ?? 'task';
 		const taskId = toSlug((data.label as string) ?? type);
 		const nexts = nextMap.get(node.id) ?? [];
-		// Filter out 'end' nodes from nexts for then: generation
-		const realNexts = nexts.filter((nid) => {
-			const n = nodes.find((x) => x.id === nid);
-			return n && n.type !== 'end';
-		});
 
 		switch (type) {
 			case 'call':
-				builder.call(taskId, data, nodes);
+				builder.call(taskId, data);
 				break;
 			case 'task':
 				builder.task(taskId, data);
 				break;
 			case 'set':
 				builder.set(taskId, data);
+				break;
+			case 'if':
+				builder.if(taskId, data);
 				break;
 			case 'switch':
 				builder.switch(taskId, data, nodes);
@@ -462,11 +487,6 @@ export function generateDsl(nodes: Node[], edges: Edge[], meta?: WorkflowMeta): 
 				break;
 			default:
 				builder.raw(`  - ${taskId}:`, `      # unknown type: ${type}`);
-		}
-
-		// Auto-append then: for linear nodes (not switch/fork which manage their own routing)
-		if (!['switch', 'fork', 'raise'].includes(type) && realNexts.length === 1) {
-			builder.then(resolveNodeSlug(realNexts[0], nodes));
 		}
 
 		builder.sep();

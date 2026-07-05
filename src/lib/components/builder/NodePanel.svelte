@@ -7,6 +7,7 @@
 	import type { VarEntry, CaseEntry, EventEntry } from './builderConfig';
 	import type { WorkflowNodeType } from '$lib/types';
 	import ExpressionInput, { type AvailVar } from './ExpressionInput.svelte';
+	import ConditionBuilder from './ConditionBuilder.svelte';
 
 	interface Props {
 		node: Node;
@@ -276,23 +277,27 @@
 			<!-- ── REST (call: http) ─────────────────────────────────── -->
 			{#if nodeType === 'call'}
 				<!-- Endpoint -->
-				<div class="flex flex-col gap-1">
+				<div class="flex flex-col gap-0.5">
 					<span class="text-base-content/50 text-[10px] font-semibold uppercase tracking-wider">Endpoint</span>
-					<select
-						class="select select-xs w-24 font-mono font-bold"
-						value={f('method') || 'get'}
-						onchange={(e) => patch('method', (e.target as HTMLSelectElement).value)}
-					>
-						{#each ['get','post','put','patch','delete'] as m (m)}
-							<option value={m}>{m.toUpperCase()}</option>
-						{/each}
-					</select>
-					<ExpressionInput
-						value={f('endpoint')}
-						placeholder={'${ $env.API_BASE } + "/path"'}
-						availVars={availableVars}
-						onchange={(v) => patch('endpoint', v)}
-					/>
+					<div class="flex items-center gap-1">
+						<select
+							class="select select-xs w-20 shrink-0 font-mono font-bold"
+							value={f('method') || 'get'}
+							onchange={(e) => patch('method', (e.target as HTMLSelectElement).value)}
+						>
+							{#each ['get','post','put','patch','delete'] as m (m)}
+								<option value={m}>{m.toUpperCase()}</option>
+							{/each}
+						</select>
+						<div class="min-w-0 flex-1">
+							<ExpressionInput
+								value={f('endpoint')}
+								placeholder={'$env.API_BASE + "/path"'}
+								availVars={availableVars}
+								onchange={(v) => patch('endpoint', v)}
+							/>
+						</div>
+					</div>
 				</div>
 
 				<!-- Headers -->
@@ -302,20 +307,20 @@
 						<button class="btn btn-ghost btn-xs gap-1" onclick={addHeader}><Plus size={9} />Add</button>
 					</div>
 					{#each localHeaders as h, i (i)}
-						<div class="border-base-300 flex flex-col gap-1 rounded border p-2">
-							<div class="flex items-center gap-1">
-								<input class="input input-xs min-w-0 flex-1 font-mono" placeholder="Header-Name" value={h.key}
-									oninput={(e) => updateHeader(i, 'key', (e.target as HTMLInputElement).value)} />
-								<button class="btn btn-ghost btn-xs btn-circle text-error shrink-0" onclick={() => removeHeader(i)} aria-label="Remove">
-									<Trash2 size={9} />
-								</button>
+						<div class="flex items-start gap-1.5">
+							<input class="input input-xs w-32 shrink-0 font-mono" placeholder="Header-Name" value={h.key}
+								oninput={(e) => updateHeader(i, 'key', (e.target as HTMLInputElement).value)} />
+							<div class="min-w-0 flex-1">
+								<ExpressionInput
+									value={h.value}
+									placeholder="value or expression"
+									availVars={availableVars}
+									onchange={(val) => updateHeader(i, 'value', val)}
+								/>
 							</div>
-							<ExpressionInput
-								value={h.value}
-								placeholder="value or expression"
-								availVars={availableVars}
-								onchange={(val) => updateHeader(i, 'value', val)}
-							/>
+							<button class="btn btn-ghost btn-xs btn-circle text-error mt-0.5 shrink-0" onclick={() => removeHeader(i)} aria-label="Remove">
+								<Trash2 size={9} />
+							</button>
 						</div>
 					{/each}
 				</div>
@@ -327,20 +332,20 @@
 						<button class="btn btn-ghost btn-xs gap-1" onclick={addQuery}><Plus size={9} />Add</button>
 					</div>
 					{#each localQuery as q, i (i)}
-						<div class="border-base-300 flex flex-col gap-1 rounded border p-2">
-							<div class="flex items-center gap-1">
-								<input class="input input-xs min-w-0 flex-1 font-mono" placeholder="param" value={q.key}
-									oninput={(e) => updateQuery(i, 'key', (e.target as HTMLInputElement).value)} />
-								<button class="btn btn-ghost btn-xs btn-circle text-error shrink-0" onclick={() => removeQuery(i)} aria-label="Remove">
-									<Trash2 size={9} />
-								</button>
+						<div class="flex items-start gap-1.5">
+							<input class="input input-xs w-32 shrink-0 font-mono" placeholder="param" value={q.key}
+								oninput={(e) => updateQuery(i, 'key', (e.target as HTMLInputElement).value)} />
+							<div class="min-w-0 flex-1">
+								<ExpressionInput
+									value={q.value}
+									placeholder="value or expression"
+									availVars={availableVars}
+									onchange={(val) => updateQuery(i, 'value', val)}
+								/>
 							</div>
-							<ExpressionInput
-								value={q.value}
-								placeholder="value or expression"
-								availVars={availableVars}
-								onchange={(val) => updateQuery(i, 'value', val)}
-							/>
+							<button class="btn btn-ghost btn-xs btn-circle text-error mt-0.5 shrink-0" onclick={() => removeQuery(i)} aria-label="Remove">
+								<Trash2 size={9} />
+							</button>
 						</div>
 					{/each}
 				</div>
@@ -383,23 +388,67 @@
 
 			<!-- ── TASK (simple HTTP) ─────────────────────────────────── -->
 			{#if nodeType === 'task'}
-				<div class="flex gap-1.5">
-					<select class="select select-xs w-24 shrink-0 font-mono font-bold" value={f('method') || 'get'}
+				<div class="flex items-center gap-1">
+					<select class="select select-xs w-20 shrink-0 font-mono font-bold" value={f('method') || 'get'}
 						onchange={(e) => patch('method', (e.target as HTMLSelectElement).value)}>
 						{#each ['get','post','put','patch','delete'] as m (m)}
 							<option value={m}>{m.toUpperCase()}</option>
 						{/each}
 					</select>
-					<input class="input input-xs min-w-0 flex-1 font-mono"
-						placeholder="https://api.example.com/endpoint"
-						value={f('endpoint')}
-						oninput={(e) => patch('endpoint', (e.target as HTMLInputElement).value)} />
+					<div class="min-w-0 flex-1">
+						<ExpressionInput
+							value={f('endpoint')}
+							placeholder={'https://api.example.com/endpoint'}
+							availVars={availableVars}
+							onchange={(v) => patch('endpoint', v)}
+						/>
+					</div>
 				</div>
 				<div class="flex flex-col gap-1">
 					<label class="text-base-content/50 text-[10px] font-semibold uppercase tracking-wider" for="np-timeout">Timeout</label>
 					<input id="np-timeout" class="input input-xs w-full" placeholder="30s"
 						value={f('timeout')}
 						oninput={(e) => patch('timeout', (e.target as HTMLInputElement).value)} />
+				</div>
+			{/if}
+
+			<!-- ── IF ────────────────────────────────────────────────── -->
+			{#if nodeType === 'if'}
+				<div class="flex flex-col gap-2">
+					<div class="flex flex-col gap-0.5">
+						<span class="text-base-content/50 text-[10px] font-semibold uppercase tracking-wider">Condition</span>
+						<ConditionBuilder
+							value={f('condition')}
+							availVars={availableVars}
+							onchange={(v) => patch('condition', v)}
+						/>
+						<p class="text-base-content/30 text-[9px]">Task executes only when this jq expression is truthy. Leave blank to always run.</p>
+					</div>
+					<div class="flex flex-col gap-1.5">
+						<div class="flex items-center justify-between">
+							<span class="text-base-content/50 text-[10px] font-semibold uppercase tracking-wider">Variables → $data</span>
+							<button class="btn btn-ghost btn-xs gap-1" onclick={addVar}><Plus size={9} />Add</button>
+						</div>
+						{#if localVars.length === 0}
+							<p class="text-base-content/30 py-2 text-center text-xs">No variables — click Add.</p>
+						{:else}
+							{#each localVars as v, i (i)}
+								<div class="flex items-start gap-1.5">
+									<input class="input input-xs w-32 shrink-0 font-mono" placeholder="key" value={v.key}
+										oninput={(e) => updateVar(i, 'key', (e.target as HTMLInputElement).value)} />
+									<div class="min-w-0 flex-1">
+										<ExpressionInput
+											value={v.value}
+											placeholder={'${ . } or literal'}
+											availVars={availableVars}
+											onchange={(val) => updateVar(i, 'value', val)}
+										/>
+									</div>
+									<button class="btn btn-ghost btn-xs btn-circle text-error mt-0.5 shrink-0" onclick={() => removeVar(i)} aria-label="Remove"><Trash2 size={9} /></button>
+								</div>
+							{/each}
+						{/if}
+					</div>
 				</div>
 			{/if}
 
@@ -421,18 +470,18 @@
 						<p class="text-base-content/30 py-2 text-center text-xs">No variables — click Add.</p>
 					{:else}
 						{#each localVars as v, i (i)}
-							<div class="border-base-300 flex flex-col gap-1 rounded border p-2">
-								<div class="flex items-center gap-1">
-									<input class="input input-xs min-w-0 flex-1 font-mono" placeholder="key" value={v.key}
-										oninput={(e) => updateVar(i, 'key', (e.target as HTMLInputElement).value)} />
-									<button class="btn btn-ghost btn-xs btn-circle text-error shrink-0" onclick={() => removeVar(i)} aria-label="Remove"><Trash2 size={9} /></button>
+							<div class="flex items-start gap-1.5">
+								<input class="input input-xs w-32 shrink-0 font-mono" placeholder="key" value={v.key}
+									oninput={(e) => updateVar(i, 'key', (e.target as HTMLInputElement).value)} />
+								<div class="min-w-0 flex-1">
+									<ExpressionInput
+										value={v.value}
+										placeholder={'${ . } or literal'}
+										availVars={availableVars}
+										onchange={(val) => updateVar(i, 'value', val)}
+									/>
 								</div>
-								<ExpressionInput
-									value={v.value}
-									placeholder={'${ . } or literal'}
-									availVars={availableVars}
-									onchange={(val) => updateVar(i, 'value', val)}
-								/>
+								<button class="btn btn-ghost btn-xs btn-circle text-error mt-0.5 shrink-0" onclick={() => removeVar(i)} aria-label="Remove"><Trash2 size={9} /></button>
 							</div>
 						{/each}
 					{/if}
@@ -459,7 +508,7 @@
 							</div>
 							<div class="flex flex-col gap-0.5">
 								<span class="text-base-content/40 text-[10px]">when</span>
-								<ExpressionInput
+								<ConditionBuilder
 									value={c.condition}
 									placeholder={'${ .status == "ok" }  (blank = default)'}
 									availVars={availableVars}
@@ -507,7 +556,7 @@
 				</div>
 				<div class="flex flex-col gap-1">
 					<span class="text-base-content/50 text-[10px] font-semibold uppercase">while (continue if true)</span>
-					<ExpressionInput
+					<ConditionBuilder
 						value={f('while')}
 						placeholder={'${ $data.index < 10 }  (optional)'}
 						availVars={availableVars}
@@ -609,7 +658,7 @@
 								</select>
 								<button class="btn btn-ghost btn-xs btn-circle text-error shrink-0" onclick={() => removeEvent(i)} aria-label="Remove"><Trash2 size={9} /></button>
 							</div>
-							<ExpressionInput
+							<ConditionBuilder
 								value={ev.acceptIf ?? ''}
 								placeholder={'${ .valid == true }  (optional acceptIf)'}
 								availVars={availableVars}
