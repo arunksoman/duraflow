@@ -5,6 +5,7 @@ import {
 	CirclePlay,
 	Clock,
 	Code2,
+	Filter,
 	GitBranch,
 	GitFork,
 	Globe,
@@ -123,6 +124,20 @@ export const NODE_META: Record<WorkflowNodeType, NodeMeta> = {
 			...EMPTY_FLOW
 		}
 	},
+	if: {
+		label: 'If',
+		description: 'Conditionally execute — task runs only when the jq expression is truthy',
+		icon: Filter,
+		color: '#0ea5e9',
+		category: 'control',
+		showInPalette: true,
+		defaultData: {
+			label: 'If',
+			condition: '',
+			variables: [] as VarEntry[],
+			...EMPTY_FLOW
+		}
+	},
 	switch: {
 		label: 'Switch',
 		description: 'Conditional branching — cases evaluated in order, first match wins',
@@ -132,10 +147,7 @@ export const NODE_META: Record<WorkflowNodeType, NodeMeta> = {
 		showInPalette: true,
 		defaultData: {
 			label: 'Switch',
-			cases: [
-				{ name: 'success', condition: "${ .status == 'success' }", then: 'continue' },
-				{ name: 'default', condition: '', then: 'end' }
-			] as CaseEntry[],
+			cases: [] as CaseEntry[],
 			...EMPTY_FLOW
 		}
 	},

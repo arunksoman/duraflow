@@ -33,6 +33,7 @@ export type WorkflowNodeType =
 	| 'do'
 	| 'for'
 	| 'fork'
+	| 'if'
 	| 'listen'
 	| 'raise'
 	| 'run'

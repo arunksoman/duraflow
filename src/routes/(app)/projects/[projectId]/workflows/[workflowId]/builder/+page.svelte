@@ -36,22 +36,45 @@
 	// ── Workflow metadata & variables ────────────────────────────────
 
 	let workflowMeta = $state<WorkflowMeta>({
-		workflowType: 'order-fulfillment',
+		workflowType: '',
 		taskQueue: 'default',
 		namespace: 'default',
 		version: '0.1.0',
-		inputSchema: [
-			{ name: 'orderId', type: 'string', example: 'ord-1234' },
-			{ name: 'userId', type: 'string', example: 'usr-5678' }
-		],
-		envVars: [
-			{ name: 'API_BASE', description: 'Base URL for the API', example: 'https://api.example.com' },
-			{ name: 'API_KEY', description: 'API authentication key', example: '••••••' }
-		]
+		inputSchema: [],
+		envVars: []
 	});
 
 	function updateWorkflowMeta(patch: Partial<WorkflowMeta>) {
 		workflowMeta = { ...workflowMeta, ...patch };
+	}
+
+	// ── Panel layout state ────────────────────────────────────────────
+
+	let paletteOpen = $state(true);
+	let panelWidth = $state(400);
+
+	$effect(() => {
+		if (configNodeId) paletteOpen = false;
+	});
+
+	function startResize(e: MouseEvent) {
+		e.preventDefault();
+		const startX = e.clientX;
+		const startW = panelWidth;
+		document.body.style.cursor = 'col-resize';
+		document.body.style.userSelect = 'none';
+
+		function onMove(ev: MouseEvent) {
+			panelWidth = Math.max(360, Math.min(680, startW + (startX - ev.clientX)));
+		}
+		function onUp() {
+			document.body.style.cursor = '';
+			document.body.style.userSelect = '';
+			window.removeEventListener('mousemove', onMove);
+			window.removeEventListener('mouseup', onUp);
+		}
+		window.addEventListener('mousemove', onMove);
+		window.addEventListener('mouseup', onUp);
 	}
 
 	// ── Canvas state ─────────────────────────────────────────────────
@@ -60,98 +83,13 @@
 		{
 			id: 'start',
 			type: 'start',
-			position: { x: 220, y: -60 },
+			position: { x: 200, y: 100 },
 			data: { type: 'start', label: 'Start', variables: [] },
 			deletable: false
-		},
-		{
-			id: '1',
-			type: 'call',
-			position: { x: 220, y: 40 },
-			data: {
-				type: 'call',
-				label: 'Fetch Order',
-				method: 'get',
-				endpoint: '${ $env.API_BASE + "/orders/" + $input.orderId }',
-				headers: [{ key: 'Authorization', value: 'Bearer ${ $env.API_KEY }' }],
-				query: [],
-				body: '',
-				output: 'content',
-				redirect: false,
-				inputFrom: '',
-				outputAs: '',
-				exportAs: '${ $context + { order: $output } }'
-			}
-		},
-		{
-			id: '2',
-			type: 'switch',
-			position: { x: 220, y: 200 },
-			data: {
-				type: 'switch',
-				label: 'Route by Status',
-				cases: [
-					{ name: 'success', condition: "${ .status == 'success' }", then: '3' },
-					{ name: 'failure', condition: "${ .status == 'error' }", then: '4' },
-					{ name: 'default', condition: '', then: 'end' }
-				],
-				inputFrom: '',
-				outputAs: '',
-				exportAs: ''
-			}
-		},
-		{
-			id: '3',
-			type: 'fork',
-			position: { x: 60, y: 370 },
-			data: { type: 'fork', label: 'Process in Parallel', compete: false, inputFrom: '', outputAs: '', exportAs: '' }
-		},
-		{
-			id: '4',
-			type: 'set',
-			position: { x: 400, y: 370 },
-			data: {
-				type: 'set',
-				label: 'Log Error',
-				variables: [{ key: 'errorMsg', value: '${ .message }' }],
-				inputFrom: '',
-				outputAs: '',
-				exportAs: '${ $context + { lastError: $data.errorMsg } }'
-			}
-		},
-		{
-			id: '5',
-			type: 'wait',
-			position: { x: 60, y: 530 },
-			data: { type: 'wait', label: 'Wait for Confirm', waitMode: 'duration', days: 0, hours: 0, minutes: 5, seconds: 0, until: '', inputFrom: '', outputAs: '', exportAs: '' }
-		},
-		{
-			id: '6',
-			type: 'raise',
-			position: { x: 230, y: 530 },
-			data: {
-				type: 'raise',
-				label: 'Order Failed',
-				errorType: 'https://serverlessworkflow.io/spec/1.0.0/errors/communication',
-				errorStatus: 500,
-				errorTitle: 'Order processing failed',
-				errorDetail: '${ "Failed: " + $data.errorMsg }',
-				errorInstance: '',
-				inputFrom: '',
-				outputAs: '',
-				exportAs: ''
-			}
 		}
 	]);
 
-	let edges: Edge[] = $state.raw([
-		{ id: 'es-1', source: 'start', target: '1' },
-		{ id: 'e1-2', source: '1', target: '2' },
-		{ id: 'e2-3', source: '2', target: '3', label: 'success', style: 'stroke: #22c55e; stroke-width: 2;' },
-		{ id: 'e2-4', source: '2', target: '4', label: 'failure', style: 'stroke: #ef4444; stroke-width: 2;' },
-		{ id: 'e3-5', source: '3', target: '5' },
-		{ id: 'e4-6', source: '4', target: '6' }
-	]);
+	let edges: Edge[] = $state.raw([]);
 
 	// ── UI state ─────────────────────────────────────────────────────
 
@@ -279,11 +217,15 @@
 		</button>
 	</header>
 
-	<!-- Main area: palette | canvas | node panel -->
+	<!-- Main area: palette | canvas | resize-handle | node panel -->
 	<div class="flex min-h-0 flex-1">
 
-		<!-- Node palette (left) -->
-		<NodePalette onaddnode={addNode} />
+		<!-- Node palette (left, collapsible) -->
+		<NodePalette
+			open={paletteOpen}
+			ontoggle={() => (paletteOpen = !paletteOpen)}
+			onaddnode={addNode}
+		/>
 
 		<!-- Canvas -->
 		<div
@@ -313,11 +255,18 @@
 
 		<!-- Right node config panel (slides in when a node is selected) -->
 		{#if configNode}
+			<!-- Drag-to-resize splitter -->
+			<button
+				class="bg-base-300 hover:bg-primary/40 active:bg-primary/60 z-10 w-1 shrink-0 cursor-col-resize border-0 p-0 transition-colors"
+				onmousedown={startResize}
+				aria-label="Drag to resize panel"
+			></button>
 			<NodePanel
 				node={configNode}
 				{nodes}
 				{edges}
 				{workflowMeta}
+				width={panelWidth}
 				onclose={() => (configNodeId = null)}
 				onupdate={updateNodeData}
 			/>
