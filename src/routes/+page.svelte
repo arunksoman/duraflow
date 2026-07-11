@@ -102,8 +102,8 @@
 		</h1>
 
 		<p class="text-base-content/60 mx-auto mt-5 max-w-2xl text-lg">
-			DuraFlow is a visual workflow builder for teams running durable, long-lived processes.
-			Compose nodes on a canvas, ship them as code, and watch every execution from one place.
+			DuraFlow is a visual workflow builder for teams running durable, long-lived processes. Compose
+			nodes on a canvas, ship them as code, and watch every execution from one place.
 		</p>
 
 		<div class="mt-8 flex items-center justify-center gap-3">
@@ -154,7 +154,9 @@
 					{@const Icon = feature.icon}
 					<div class="card bg-base-100 border-base-300 border shadow-sm">
 						<div class="card-body gap-2">
-							<div class="bg-primary/10 text-primary mb-1 flex size-10 items-center justify-center rounded-lg">
+							<div
+								class="bg-primary/10 text-primary mb-1 flex size-10 items-center justify-center rounded-lg"
+							>
 								<Icon size={20} />
 							</div>
 							<h3 class="card-title text-base">{feature.title}</h3>

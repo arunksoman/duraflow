@@ -6,7 +6,9 @@
 	<title>Docs · DuraFlow</title>
 </svelte:head>
 
-<div class="bg-base-100 flex min-h-screen flex-col items-center justify-center gap-4 px-4 text-center">
+<div
+	class="bg-base-100 flex min-h-screen flex-col items-center justify-center gap-4 px-4 text-center"
+>
 	<div class="bg-primary/10 text-primary rounded-xl p-3">
 		<BookOpen size={28} />
 	</div>

@@ -115,7 +115,8 @@
 
 			<label class="fieldset-label flex flex-col gap-1">
 				<span class="text-sm font-medium">Description (optional)</span>
-				<textarea name="description" class="textarea w-full" rows="2">{form?.description ?? ''}</textarea
+				<textarea name="description" class="textarea w-full" rows="2"
+					>{form?.description ?? ''}</textarea
 				>
 			</label>
 

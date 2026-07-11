@@ -8,7 +8,7 @@
 		id,
 		data = {},
 		selected = false,
-		type = 'task'
+		type = 'set'
 	}: {
 		id: string;
 		data: Record<string, unknown>;
@@ -22,11 +22,22 @@
 	} = $props();
 
 	const nodeType = $derived(
-		(type as WorkflowNodeType) in NODE_META ? (type as WorkflowNodeType) : 'task'
+		(type as WorkflowNodeType) in NODE_META ? (type as WorkflowNodeType) : 'set'
 	);
 	const meta = $derived(NODE_META[nodeType]);
 	const label = $derived((data.label as string) || meta.label);
 	const Icon = $derived(meta.icon);
+	const scopeBadge = $derived.by(() => {
+		if (meta.nestedScopes === 'do') return 'loop body';
+		// 'try-catch' intentionally has no badge — its try/catch bodies render inline as
+		// connected sibling nodes on the canvas (see inlineTryView.ts), so a summary pill on the
+		// collapsed card would be redundant.
+		if (meta.nestedScopes === 'fork-branches') {
+			const n = Array.isArray(data.branches) ? data.branches.length : 0;
+			return n === 1 ? '1 branch' : `${n} branches`;
+		}
+		return null;
+	});
 
 	let isHovered = $state(false);
 
@@ -73,10 +84,20 @@
 		</div>
 		<span class="text-base-content min-w-0 flex-1 truncate text-xs font-semibold">{label}</span>
 	</div>
-	<div class="border-base-200 border-t px-2.5 py-1.5">
+	<div class="border-base-200 flex items-center justify-between border-t px-2.5 py-1.5">
 		<span class="text-base-content/40 font-mono text-[10px] uppercase tracking-wide">
 			{nodeType === 'childWorkflow' ? 'child-flow' : nodeType}
 		</span>
+		{#if scopeBadge}
+			<span
+				class="rounded px-1 py-0.5 text-[9px] font-medium"
+				style:background="{meta.color}18"
+				style:color={meta.color}
+				title="Open this node's config panel to edit its nested body"
+			>
+				{scopeBadge}
+			</span>
+		{/if}
 	</div>
 </div>
 

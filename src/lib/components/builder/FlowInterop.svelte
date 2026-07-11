@@ -3,7 +3,9 @@
 	import { useSvelteFlow } from '@xyflow/svelte';
 
 	interface Props {
-		onready: (screenToFlowPosition: (pos: { x: number; y: number }) => { x: number; y: number }) => void;
+		onready: (
+			screenToFlowPosition: (pos: { x: number; y: number }) => { x: number; y: number }
+		) => void;
 	}
 
 	let { onready }: Props = $props();

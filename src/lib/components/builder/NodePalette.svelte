@@ -49,7 +49,9 @@
 
 		{#each grouped as group (group.key)}
 			<div class="border-base-200 border-b px-3 py-2">
-				<p class="text-base-content/40 mb-1.5 px-1 text-[10px] font-semibold uppercase tracking-wider">
+				<p
+					class="text-base-content/40 mb-1.5 px-1 text-[10px] font-semibold uppercase tracking-wider"
+				>
 					{group.label}
 				</p>
 				<div class="flex flex-col gap-0.5">

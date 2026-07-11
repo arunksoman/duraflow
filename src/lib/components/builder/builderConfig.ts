@@ -5,7 +5,6 @@ import {
 	CirclePlay,
 	Clock,
 	Code2,
-	Filter,
 	GitBranch,
 	GitFork,
 	Globe,
@@ -14,8 +13,7 @@ import {
 	Repeat,
 	ShieldAlert,
 	TriangleAlert,
-	Workflow,
-	Zap
+	Workflow
 } from '@lucide/svelte';
 import type { WorkflowNodeType } from '$lib/types';
 
@@ -39,14 +37,32 @@ export interface EventEntry {
 	acceptIf?: string;
 }
 
-/** Base data flow fields present on every task node. */
+/** A named Fork branch — each branch's body is authored via drill-in navigation. */
+export interface BranchEntry {
+	/** Stable id used as the drill-in scope key — independent of the mutable `name`. */
+	id: string;
+	name: string;
+}
+
+export type PullPolicy = 'always' | 'never' | 'ifNotPresent';
+
+/**
+ * Shared fields present on every real task node (start/end excepted): the `if` guard maps to
+ * Zigflow's `TaskBase.if` (skip this task unless truthy — shared by every task type, not a
+ * standalone node), plus the `output.as` / `export.as` data-flow fields. Note: Zigflow's `input`
+ * task property only supports a `schema` (for input validation) — there is no `input.from`
+ * equivalent, so this shape intentionally has no "input" data-flow field.
+ */
 export interface DataFlow {
-	inputFrom: string;
+	if: string;
 	outputAs: string;
 	exportAs: string;
 }
 
-const EMPTY_FLOW: DataFlow = { inputFrom: '', outputAs: '', exportAs: '' };
+const EMPTY_FLOW: DataFlow = { if: '', outputAs: '', exportAs: '' };
+
+/** Marks which node types have a drill-in nested scope, and what shape it is. */
+export type NestedScopeKind = 'do' | 'try-catch' | 'fork-branches';
 
 export interface NodeMeta {
 	label: string;
@@ -56,6 +72,8 @@ export interface NodeMeta {
 	category: 'action' | 'control' | 'event' | 'structure' | 'terminal';
 	showInPalette: boolean;
 	defaultData: Record<string, unknown>;
+	/** Undefined = no drill-in scope (most node types). */
+	nestedScopes?: NestedScopeKind;
 }
 
 export const NODE_META: Record<WorkflowNodeType, NodeMeta> = {
@@ -96,21 +114,6 @@ export const NODE_META: Record<WorkflowNodeType, NodeMeta> = {
 			...EMPTY_FLOW
 		}
 	},
-	task: {
-		label: 'Task',
-		description: 'Named Temporal activity via HTTP',
-		icon: CheckSquare,
-		color: '#3b82f6',
-		category: 'action',
-		showInPalette: true,
-		defaultData: {
-			label: 'Task',
-			method: 'get',
-			endpoint: '',
-			timeout: '',
-			...EMPTY_FLOW
-		}
-	},
 	set: {
 		label: 'Set',
 		description: 'Write key-value pairs into $data — accessible as ${ $data.<key> } downstream',
@@ -121,20 +124,6 @@ export const NODE_META: Record<WorkflowNodeType, NodeMeta> = {
 		defaultData: {
 			label: 'Set Variables',
 			variables: [{ key: 'result', value: '${ . }' }] as VarEntry[],
-			...EMPTY_FLOW
-		}
-	},
-	if: {
-		label: 'If',
-		description: 'Conditionally execute — task runs only when the jq expression is truthy',
-		icon: Filter,
-		color: '#0ea5e9',
-		category: 'control',
-		showInPalette: true,
-		defaultData: {
-			label: 'If',
-			condition: '',
-			variables: [] as VarEntry[],
 			...EMPTY_FLOW
 		}
 	},
@@ -158,6 +147,7 @@ export const NODE_META: Record<WorkflowNodeType, NodeMeta> = {
 		color: '#14b8a6',
 		category: 'control',
 		showInPalette: true,
+		nestedScopes: 'do',
 		defaultData: {
 			label: 'For Each',
 			each: 'item',
@@ -174,7 +164,8 @@ export const NODE_META: Record<WorkflowNodeType, NodeMeta> = {
 		color: '#f97316',
 		category: 'control',
 		showInPalette: true,
-		defaultData: { label: 'Fork', compete: false, ...EMPTY_FLOW }
+		nestedScopes: 'fork-branches',
+		defaultData: { label: 'Fork', compete: false, branches: [] as BranchEntry[], ...EMPTY_FLOW }
 	},
 	try: {
 		label: 'Try',
@@ -183,6 +174,7 @@ export const NODE_META: Record<WorkflowNodeType, NodeMeta> = {
 		color: '#ef4444',
 		category: 'control',
 		showInPalette: true,
+		nestedScopes: 'try-catch',
 		defaultData: { label: 'Try', catchAs: 'error', ...EMPTY_FLOW }
 	},
 	wait: {
@@ -255,11 +247,12 @@ export const NODE_META: Record<WorkflowNodeType, NodeMeta> = {
 	},
 	do: {
 		label: 'Do',
-		description: 'Sequential task group (internal / DSL only)',
+		description: 'Sequential task group — shown when hand-written DSL groups tasks explicitly',
 		icon: CheckSquare,
 		color: '#64748b',
 		category: 'control',
 		showInPalette: false,
+		nestedScopes: 'do',
 		defaultData: { label: 'Do', ...EMPTY_FLOW }
 	},
 	childWorkflow: {

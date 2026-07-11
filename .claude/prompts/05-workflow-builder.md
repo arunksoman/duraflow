@@ -1,6 +1,7 @@
 Create the workflow builder at /projects/[projectId]/workflows/[workflowId]/builder/+page.svelte using SvelteFlow.
 
 Requirements:
+
 - Left sidebar node palette (all Zigflow task types + ChildWorkflow node)
 - Drag & drop canvas
 - Custom node components for each task type

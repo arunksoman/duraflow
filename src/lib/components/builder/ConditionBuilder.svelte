@@ -24,7 +24,11 @@
 	const OPERATORS: Op[] = ['==', '!=', '>=', '<=', '>', '<', '| not'];
 	const RIGHT_TYPES: RightType[] = ['str', 'num', 'bool', 'null', 'var'];
 	const RIGHT_TYPE_LABELS: Record<RightType, string> = {
-		str: '"…"', num: '123', bool: 'T/F', null: 'nil', var: '$var'
+		str: '"…"',
+		num: '123',
+		bool: 'T/F',
+		null: 'nil',
+		var: '$var'
 	};
 
 	let { value, availVars, placeholder = '${ condition }', onchange }: Props = $props();
@@ -64,18 +68,42 @@
 			if (inStr) {
 				current += ch;
 				if (ch === strCh && inner[i - 1] !== '\\') inStr = false;
-				i++; continue;
+				i++;
+				continue;
 			}
-			if (ch === '"' || ch === "'") { inStr = true; strCh = ch; current += ch; i++; continue; }
-			if ('([{'.includes(ch)) { depth++; current += ch; i++; continue; }
-			if (')]}'.includes(ch)) { depth--; current += ch; i++; continue; }
+			if (ch === '"' || ch === "'") {
+				inStr = true;
+				strCh = ch;
+				current += ch;
+				i++;
+				continue;
+			}
+			if ('([{'.includes(ch)) {
+				depth++;
+				current += ch;
+				i++;
+				continue;
+			}
+			if (')]}'.includes(ch)) {
+				depth--;
+				current += ch;
+				i++;
+				continue;
+			}
 			if (depth === 0 && inner.slice(i).startsWith(' and ')) {
-				results.push({ part: current.trim(), join: 'and' }); current = ''; i += 5; continue;
+				results.push({ part: current.trim(), join: 'and' });
+				current = '';
+				i += 5;
+				continue;
 			}
 			if (depth === 0 && inner.slice(i).startsWith(' or ')) {
-				results.push({ part: current.trim(), join: 'or' }); current = ''; i += 4; continue;
+				results.push({ part: current.trim(), join: 'or' });
+				current = '';
+				i += 4;
+				continue;
 			}
-			current += ch; i++;
+			current += ch;
+			i++;
 		}
 		if (current.trim()) results.push({ part: current.trim(), join: null });
 		return results.length > 0 ? results : null;
@@ -109,15 +137,24 @@
 	function serializeClauses(cs: ConditionClause[]): string {
 		if (cs.length === 0) return '';
 		const exprs = cs.map((c) =>
-			c.op === '| not' ? `${c.left} | not` : `${c.left} ${c.op} ${serializeRight(c.rightType, c.rightVal)}`
+			c.op === '| not'
+				? `${c.left} | not`
+				: `${c.left} ${c.op} ${serializeRight(c.rightType, c.rightVal)}`
 		);
 		let result = exprs[0];
-		for (let idx = 1; idx < exprs.length; idx++) result += ` ${cs[idx - 1].join ?? 'and'} ${exprs[idx]}`;
+		for (let idx = 1; idx < exprs.length; idx++)
+			result += ` ${cs[idx - 1].join ?? 'and'} ${exprs[idx]}`;
 		return `\${ ${result} }`;
 	}
 
 	function defaultClause(): ConditionClause {
-		return { left: availVars[0]?.rawRef ?? '.', op: '==', rightType: 'str', rightVal: '', join: null };
+		return {
+			left: availVars[0]?.rawRef ?? '.',
+			op: '==',
+			rightType: 'str',
+			rightVal: '',
+			join: null
+		};
 	}
 
 	// ExpressionInput emits "${ $input.x }" — strip to raw ref for condition use
@@ -137,7 +174,9 @@
 
 	// ── Handlers ─────────────────────────────────────────────────────────
 
-	function emit() { onchange(serializeClauses(clauses)); }
+	function emit() {
+		onchange(serializeClauses(clauses));
+	}
 
 	function addClause() {
 		if (clauses.length > 0) {
@@ -149,8 +188,11 @@
 
 	function removeClause(i: number) {
 		if (editingRight === i) editingRight = null;
-		if (clauses.length <= 1) { clauses = []; emit(); return; }
-		else {
+		if (clauses.length <= 1) {
+			clauses = [];
+			emit();
+			return;
+		} else {
 			const next = clauses.filter((_, j) => j !== i);
 			clauses = next.map((c, j) => (j === next.length - 1 ? { ...c, join: null } : c));
 		}
@@ -158,7 +200,9 @@
 	}
 
 	function toggleJoin(i: number) {
-		clauses = clauses.map((c, j) => j === i ? { ...c, join: c.join === 'and' ? 'or' : 'and' } : c);
+		clauses = clauses.map((c, j) =>
+			j === i ? { ...c, join: c.join === 'and' ? 'or' : 'and' } : c
+		);
 		emit();
 	}
 
@@ -170,17 +214,29 @@
 	function cycleRightType(i: number) {
 		const c = clauses[i];
 		const next = RIGHT_TYPES[(RIGHT_TYPES.indexOf(c.rightType) + 1) % RIGHT_TYPES.length];
-		const nextVal = next === 'bool' ? 'true' : next === 'null' ? '' : next === 'var' ? (availVars[0]?.rawRef ?? '.') : '';
+		const nextVal =
+			next === 'bool'
+				? 'true'
+				: next === 'null'
+					? ''
+					: next === 'var'
+						? (availVars[0]?.rawRef ?? '.')
+						: '';
 		updateClause(i, { rightType: next, rightVal: nextVal });
 		if (next === 'str' || next === 'num') editingRight = i;
 		else editingRight = null;
 	}
 
 	function toggleRaw() {
-		if (!rawMode) { rawText = serializeClauses(clauses); rawMode = true; }
-		else {
+		if (!rawMode) {
+			rawText = serializeClauses(clauses);
+			rawMode = true;
+		} else {
 			const p = parseCondition(rawText);
-			if (p !== null) { clauses = p; rawMode = false; }
+			if (p !== null) {
+				clauses = p;
+				rawMode = false;
+			}
 			onchange(rawText);
 		}
 	}
@@ -197,27 +253,35 @@
 			type="text"
 			{placeholder}
 			value={rawText}
-			oninput={(e) => { rawText = (e.target as HTMLInputElement).value; onchange(rawText); }}
+			oninput={(e) => {
+				rawText = (e.target as HTMLInputElement).value;
+				onchange(rawText);
+			}}
 		/>
 		<button
 			type="button"
 			class="btn btn-ghost btn-xs shrink-0 px-1.5 font-mono text-[9px] opacity-50 hover:opacity-100"
-			onclick={toggleRaw}
-		>chip</button>
+			onclick={toggleRaw}>chip</button
+		>
 	</div>
 {:else}
-	<div class="border-base-300 bg-base-100 flex w-full flex-col rounded-lg border transition-colors focus-within:border-primary/40">
+	<div
+		class="border-base-300 bg-base-100 flex w-full flex-col rounded-lg border transition-colors focus-within:border-primary/40"
+	>
 		{#each clauses as clause, i (i)}
-			<div class="flex min-w-0 items-center gap-1.5 px-2 py-1 {i > 0 ? 'border-base-300/50 border-t' : ''}">
-
+			<div
+				class="flex min-w-0 items-center gap-1.5 px-2 py-1 {i > 0
+					? 'border-base-300/50 border-t'
+					: ''}"
+			>
 				<!-- Join / spacer -->
 				{#if i > 0}
 					<button
 						type="button"
 						class="w-7 shrink-0 rounded px-1 py-0.5 text-center font-mono text-[9px] font-semibold text-primary/70 hover:bg-primary/10 hover:text-primary"
 						onclick={() => toggleJoin(i - 1)}
-						title="Toggle and / or"
-					>{clauses[i - 1].join ?? 'and'}</button>
+						title="Toggle and / or">{clauses[i - 1].join ?? 'and'}</button
+					>
 				{:else}
 					<span class="w-7 shrink-0"></span>
 				{/if}
@@ -257,21 +321,26 @@
 						<button
 							type="button"
 							class="shrink-0 rounded bg-primary/10 px-2 py-0.5 font-mono text-[10px] font-semibold text-primary hover:bg-primary/20"
-							onclick={() => updateClause(i, { rightVal: clause.rightVal === 'true' ? 'false' : 'true' })}
-						>{clause.rightVal || 'true'}</button>
-
+							onclick={() =>
+								updateClause(i, { rightVal: clause.rightVal === 'true' ? 'false' : 'true' })}
+							>{clause.rightVal || 'true'}</button
+						>
 					{:else if clause.rightType === 'null'}
 						<span class="shrink-0 px-1 font-mono text-[10px] text-base-content/40">null</span>
-
 					{:else if clause.rightType === 'str'}
 						{#if editingRight === i}
-							<span class="inline-flex items-center rounded bg-success/10 px-1 py-0.5 font-mono text-[10px]">
+							<span
+								class="inline-flex items-center rounded bg-success/10 px-1 py-0.5 font-mono text-[10px]"
+							>
 								<span class="select-none text-success/60">"</span>
 								<input
-									{@attach (node) => { (node as HTMLInputElement).focus(); }}
+									{@attach (node) => {
+										(node as HTMLInputElement).focus();
+									}}
 									class="min-w-12 max-w-40 bg-transparent font-mono text-[10px] text-base-content outline-none"
 									value={clause.rightVal}
-									oninput={(e) => updateClause(i, { rightVal: (e.target as HTMLInputElement).value })}
+									oninput={(e) =>
+										updateClause(i, { rightVal: (e.target as HTMLInputElement).value })}
 									onblur={() => (editingRight = null)}
 									onkeydown={stopEdit}
 								/>
@@ -293,17 +362,21 @@
 								<span class="select-none text-success/60">"</span>
 							</button>
 						{/if}
-
 					{:else if clause.rightType === 'num'}
 						{#if editingRight === i}
-							<span class="inline-flex items-center rounded bg-warning/10 px-1 py-0.5 font-mono text-[10px]">
+							<span
+								class="inline-flex items-center rounded bg-warning/10 px-1 py-0.5 font-mono text-[10px]"
+							>
 								<span class="mr-0.5 select-none text-warning/60">#</span>
 								<input
-									{@attach (node) => { (node as HTMLInputElement).focus(); }}
+									{@attach (node) => {
+										(node as HTMLInputElement).focus();
+									}}
 									type="number"
 									class="w-20 bg-transparent font-mono text-[10px] text-base-content outline-none"
 									value={clause.rightVal}
-									oninput={(e) => updateClause(i, { rightVal: (e.target as HTMLInputElement).value })}
+									oninput={(e) =>
+										updateClause(i, { rightVal: (e.target as HTMLInputElement).value })}
 									onblur={() => (editingRight = null)}
 									onkeydown={stopEdit}
 								/>
@@ -319,7 +392,6 @@
 								<span class="text-base-content/80">{clause.rightVal || '0'}</span>
 							</button>
 						{/if}
-
 					{:else if clause.rightType === 'var'}
 						<!-- Right var: same ExpressionInput as left -->
 						<div class="flex-1 min-w-0">
@@ -343,15 +415,16 @@
 							class="font-mono text-[9px] text-base-content/20 hover:text-base-content/60"
 							onclick={() => cycleRightType(i)}
 							title="Value type: {RIGHT_TYPE_LABELS[clause.rightType]}"
-						>{RIGHT_TYPE_LABELS[clause.rightType]}</button>
+							>{RIGHT_TYPE_LABELS[clause.rightType]}</button
+						>
 					{/if}
 					{#if clauses.length > 1}
 						<button
 							type="button"
 							class="font-mono text-[11px] leading-none text-base-content/20 hover:text-error"
 							onclick={() => removeClause(i)}
-							aria-label="Remove condition"
-						>×</button>
+							aria-label="Remove condition">×</button
+						>
 					{/if}
 				</div>
 			</div>
@@ -362,14 +435,14 @@
 			<button
 				type="button"
 				class="font-mono text-[9px] text-base-content/30 hover:text-base-content/70"
-				onclick={addClause}
-			>+ add condition</button>
+				onclick={addClause}>+ add condition</button
+			>
 			<button
 				type="button"
 				class="ml-auto font-mono text-[8px] text-base-content/20 hover:text-base-content/60"
 				onclick={toggleRaw}
-				title="Edit raw jq expression"
-			>&lt;/&gt;</button>
+				title="Edit raw jq expression">&lt;/&gt;</button
+			>
 		</div>
 	</div>
 {/if}

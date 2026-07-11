@@ -28,12 +28,10 @@ export interface Project {
 export type WorkflowNodeType =
 	| 'start'
 	| 'end'
-	| 'task'
 	| 'call'
 	| 'do'
 	| 'for'
 	| 'fork'
-	| 'if'
 	| 'listen'
 	| 'raise'
 	| 'run'
@@ -43,40 +41,21 @@ export type WorkflowNodeType =
 	| 'wait'
 	| 'childWorkflow';
 
-export interface WorkflowNode {
-	id: string;
-	type: WorkflowNodeType;
-	position: { x: number; y: number };
-	data: Record<string, unknown>;
-}
-
-export interface WorkflowEdge {
-	id: string;
-	source: string;
-	target: string;
-	label?: string;
-}
-
 export interface Workflow {
 	id: string;
 	projectId: string;
 	name: string;
 	description?: string;
 	version: number;
-	nodes: WorkflowNode[];
-	edges: WorkflowEdge[];
+	/** The persisted Zigflow DSL (YAML) — the canvas is derived from this, not the other way round. */
+	dsl: string;
 	parentWorkflowId?: string;
 	createdAt: string;
 	updatedAt: string;
 }
 
 export type ExecutionStatus =
-	| 'running'
-	| 'completed'
-	| 'failed'
-	| 'cancelled'
-	| 'terminated'
-	| 'timed_out';
+	'running' | 'completed' | 'failed' | 'cancelled' | 'terminated' | 'timed_out';
 
 export interface Execution {
 	id: string;
@@ -128,8 +107,15 @@ export interface EnvVar {
 export interface WorkflowMeta {
 	workflowType: string;
 	taskQueue: string;
-	namespace: string;
 	version: string;
 	inputSchema: InputField[];
 	envVars: EnvVar[];
+	/**
+	 * Passed through from/to `document.title`/`summary`/`tags`/`metadata` so a loaded DSL's
+	 * values survive a canvas round-trip even though there's no dedicated editor for them yet.
+	 */
+	title?: string;
+	summary?: string;
+	tags?: Record<string, string>;
+	metadata?: Record<string, unknown>;
 }

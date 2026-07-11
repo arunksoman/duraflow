@@ -14,12 +14,9 @@
 	let inputSchema = $state<InputField[]>(
 		untrack(() => (meta.inputSchema ?? []).map((f) => ({ ...f })))
 	);
-	let envVars = $state<EnvVar[]>(
-		untrack(() => (meta.envVars ?? []).map((e) => ({ ...e })))
-	);
+	let envVars = $state<EnvVar[]>(untrack(() => (meta.envVars ?? []).map((e) => ({ ...e }))));
 	let workflowType = $state<string>(untrack(() => meta.workflowType ?? ''));
 	let taskQueue = $state<string>(untrack(() => meta.taskQueue ?? ''));
-	let namespace = $state<string>(untrack(() => meta.namespace ?? 'default'));
 	let version = $state<string>(untrack(() => meta.version ?? '0.1.0'));
 
 	const FIELD_TYPES = ['string', 'number', 'boolean', 'object', 'array'] as const;
@@ -74,7 +71,6 @@
 		</div>
 
 		<div class="flex max-h-[72vh] flex-col gap-6 overflow-y-auto pr-1">
-
 			<!-- ── Document metadata ─────────────────────────────────────── -->
 			<section>
 				<h4 class="text-base-content/70 mb-2 text-xs font-semibold uppercase tracking-wider">
@@ -93,7 +89,9 @@
 								onupdate({ workflowType });
 							}}
 						/>
-						<span class="text-base-content/30 text-[10px]">RFC 1123 — letters, digits, hyphens only</span>
+						<span class="text-base-content/30 text-[10px]"
+							>RFC 1123 — letters, digits, hyphens only</span
+						>
 					</div>
 					<div class="flex flex-col gap-1">
 						<label class="text-base-content/50 text-xs" for="wv-tq">taskQueue</label>
@@ -105,19 +103,6 @@
 							oninput={(e) => {
 								taskQueue = (e.target as HTMLInputElement).value;
 								onupdate({ taskQueue });
-							}}
-						/>
-					</div>
-					<div class="flex flex-col gap-1">
-						<label class="text-base-content/50 text-xs" for="wv-ns">namespace</label>
-						<input
-							id="wv-ns"
-							class="input input-sm font-mono text-xs"
-							placeholder="default"
-							value={namespace}
-							oninput={(e) => {
-								namespace = (e.target as HTMLInputElement).value;
-								onupdate({ namespace });
 							}}
 						/>
 					</div>
@@ -161,7 +146,9 @@
 				{:else}
 					<div class="flex flex-col gap-2">
 						{#each inputSchema as field, i (i)}
-							<div class="border-base-300 grid grid-cols-[1fr_100px_1fr_auto] gap-2 rounded-lg border p-2">
+							<div
+								class="border-base-300 grid grid-cols-[1fr_100px_1fr_auto] gap-2 rounded-lg border p-2"
+							>
 								<div class="flex flex-col gap-0.5">
 									<span class="text-base-content/40 text-[10px]">name</span>
 									<input
@@ -221,7 +208,8 @@
 						</h4>
 						<p class="text-base-content/40 mt-0.5 text-[10px]">
 							Worker environment variables prefixed <code>ZIGGY_</code> — e.g. define
-							<code>API_BASE</code> → use as <code class="text-warning">${'${ $env.API_BASE }'}</code>
+							<code>API_BASE</code> → use as
+							<code class="text-warning">${'${ $env.API_BASE }'}</code>
 						</p>
 					</div>
 					<button class="btn btn-ghost btn-xs gap-1" onclick={addEnvVar}>
@@ -238,15 +226,16 @@
 				{:else}
 					<div class="flex flex-col gap-2">
 						{#each envVars as env, i (i)}
-							<div class="border-base-300 grid grid-cols-[80px_1fr_1fr_auto] items-end gap-2 rounded-lg border p-2">
+							<div
+								class="border-base-300 grid grid-cols-[80px_1fr_1fr_auto] items-end gap-2 rounded-lg border p-2"
+							>
 								<div class="flex flex-col gap-0.5">
 									<span class="text-base-content/40 text-[10px]">ZIGGY_</span>
 									<input
 										class="input input-xs font-mono"
 										placeholder="API_BASE"
 										value={env.name}
-										oninput={(e) =>
-											updateEnvVar(i, 'name', (e.target as HTMLInputElement).value)}
+										oninput={(e) => updateEnvVar(i, 'name', (e.target as HTMLInputElement).value)}
 									/>
 								</div>
 								<div class="flex flex-col gap-0.5">
@@ -288,12 +277,36 @@
 					Runtime Variable Reference
 				</h4>
 				<div class="grid grid-cols-2 gap-x-4 gap-y-1 font-mono text-[10px]">
-					<span><code class="text-primary">$input</code><span class="text-base-content/40"> — trigger payload (immutable)</span></span>
-					<span><code class="text-success">$data.&lt;key&gt;</code><span class="text-base-content/40"> — values from Set tasks</span></span>
-					<span><code class="text-warning">$env.&lt;NAME&gt;</code><span class="text-base-content/40"> — ZIGGY_* env vars</span></span>
-					<span><code class="text-info">$context</code><span class="text-base-content/40"> — accumulated via export.as</span></span>
-					<span><code class="text-secondary">$output</code><span class="text-base-content/40"> — previous task's raw result</span></span>
-					<span><code class="text-base-content/40">.</code><span class="text-base-content/40"> — shorthand for $output in jq</span></span>
+					<span
+						><code class="text-primary">$input</code><span class="text-base-content/40">
+							— trigger payload (immutable)</span
+						></span
+					>
+					<span
+						><code class="text-success">$data.&lt;key&gt;</code><span class="text-base-content/40">
+							— values from Set tasks</span
+						></span
+					>
+					<span
+						><code class="text-warning">$env.&lt;NAME&gt;</code><span class="text-base-content/40">
+							— ZIGGY_* env vars</span
+						></span
+					>
+					<span
+						><code class="text-info">$context</code><span class="text-base-content/40">
+							— accumulated via export.as</span
+						></span
+					>
+					<span
+						><code class="text-secondary">$output</code><span class="text-base-content/40">
+							— previous task's raw result</span
+						></span
+					>
+					<span
+						><code class="text-base-content/40">.</code><span class="text-base-content/40">
+							— shorthand for $output in jq</span
+						></span
+					>
 				</div>
 			</section>
 		</div>
