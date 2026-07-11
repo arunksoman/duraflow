@@ -133,8 +133,8 @@ export const NODE_META: Record<WorkflowNodeType, NodeMeta> = {
 		showInPalette: true,
 		defaultData: {
 			label: 'If',
-			condition: '${ $input.flag == true }',
-			variables: [{ key: 'result', value: '${ . }' }] as VarEntry[],
+			condition: '',
+			variables: [] as VarEntry[],
 			...EMPTY_FLOW
 		}
 	},
@@ -147,10 +147,7 @@ export const NODE_META: Record<WorkflowNodeType, NodeMeta> = {
 		showInPalette: true,
 		defaultData: {
 			label: 'Switch',
-			cases: [
-				{ name: 'success', condition: '${ .status == "success" }', then: 'continue' },
-				{ name: 'default', condition: '', then: 'end' }
-			] as CaseEntry[],
+			cases: [] as CaseEntry[],
 			...EMPTY_FLOW
 		}
 	},
