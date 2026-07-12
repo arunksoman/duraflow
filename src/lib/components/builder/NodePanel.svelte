@@ -2,7 +2,7 @@
 	import { untrack } from 'svelte';
 	import type { Node, Edge } from '@xyflow/svelte';
 	import { Plus, Trash2, X } from '@lucide/svelte';
-	import type { WorkflowMeta } from '$lib/types';
+	import type { WorkflowMeta, InputField } from '$lib/types';
 	import { NODE_META } from './builderConfig';
 	import type { VarEntry, CaseEntry, EventEntry, BranchEntry } from './builderConfig';
 	import type { WorkflowNodeType } from '$lib/types';
@@ -20,6 +20,8 @@
 		onupdate: (id: string, patch: Record<string, unknown>) => void;
 		/** A `fork` branch was removed — the parent must prune its scope (and any descendants). */
 		onremovebranch: (forkNodeId: string, branchId: string) => void;
+		/** Edits to the workflow's `$input` schema (Start node's config panel), not this node's own data. */
+		onupdatemeta: (patch: Partial<WorkflowMeta>) => void;
 	}
 
 	let {
@@ -30,7 +32,8 @@
 		width = 340,
 		onclose,
 		onupdate,
-		onremovebranch
+		onremovebranch,
+		onupdatemeta
 	}: Props = $props();
 
 	const nodeType = $derived<WorkflowNodeType>(
@@ -83,6 +86,11 @@
 	let runType = $state<string>(untrack(() => (node?.data?.runType as string) ?? 'script'));
 	let bodyRawMode = $state(false);
 	let waitMode = $state<string>(untrack(() => (node?.data?.waitMode as string) ?? 'duration'));
+	// Backs the Start node's `$input` schema editor — lives on `workflowMeta`, not this node's own
+	// data, since it describes the whole workflow's trigger payload, not a per-node value.
+	let localInputSchema = $state<InputField[]>(
+		untrack(() => (workflowMeta.inputSchema ?? []).map((f) => ({ ...f })))
+	);
 
 	// ── helpers ──────────────────────────────────────────────────────
 
@@ -221,6 +229,22 @@
 	function updateBranchName(i: number, name: string) {
 		localBranches = localBranches.map((b, j) => (j === i ? { ...b, name } : b));
 		saveBranches();
+	}
+
+	function saveInputSchema() {
+		onupdatemeta({ inputSchema: localInputSchema.map((f) => ({ ...f })) });
+	}
+	function addInputField() {
+		localInputSchema = [...localInputSchema, { name: '', type: 'string' }];
+		saveInputSchema();
+	}
+	function removeInputField(i: number) {
+		localInputSchema = localInputSchema.filter((_, j) => j !== i);
+		saveInputSchema();
+	}
+	function updateInputField<K extends keyof InputField>(i: number, key: K, val: InputField[K]) {
+		localInputSchema = localInputSchema.map((f, j) => (j === i ? { ...f, [key]: val } : f));
+		saveInputSchema();
 	}
 
 	// ── task slug (DSL id derived from label) ─────────────────────────
@@ -587,6 +611,101 @@
 					<p class="text-base-content/25 text-[10px]">
 						4xx → non-retryable · 5xx → retryable · 408/429 → retryable
 					</p>
+				</div>
+			{/if}
+
+			<!-- ── START: $input SCHEMA ────────────────────────────────── -->
+			{#if nodeType === 'start'}
+				<div class="flex flex-col gap-1.5">
+					<div class="flex items-center justify-between">
+						<div>
+							<span class="text-base-content/50 text-[10px] font-semibold uppercase tracking-wider">
+								<code class="text-primary font-mono">$input</code> Schema
+							</span>
+							<p class="text-base-content/30 text-[9px]">
+								Fields the caller supplies when triggering this workflow (or a parent workflow
+								invoking it as a child) — read-only at runtime.
+							</p>
+						</div>
+						<button class="btn btn-ghost btn-xs gap-1" onclick={addInputField}
+							><Plus size={9} />Add</button
+						>
+					</div>
+					{#if localInputSchema.length === 0}
+						<p class="text-base-content/30 py-2 text-center text-xs">
+							No input fields defined — use $input freely or add fields for autocomplete hints.
+						</p>
+					{:else}
+						{#each localInputSchema as field, i (i)}
+							<div class="border-base-300 flex flex-col gap-1.5 rounded-lg border p-1.5">
+								<div class="flex items-center gap-1.5">
+									<input
+										class="input input-xs min-w-0 flex-1 font-mono"
+										placeholder="name"
+										value={field.name}
+										oninput={(e) =>
+											updateInputField(i, 'name', (e.target as HTMLInputElement).value)}
+									/>
+									<select
+										class="select select-xs w-24 shrink-0"
+										value={field.type}
+										onchange={(e) =>
+											updateInputField(
+												i,
+												'type',
+												(e.target as HTMLSelectElement).value as InputField['type']
+											)}
+									>
+										{#each ['string', 'number', 'boolean', 'object', 'array'] as t (t)}
+											<option value={t}>{t}</option>
+										{/each}
+									</select>
+									<button
+										class="btn btn-ghost btn-xs btn-circle text-error shrink-0"
+										onclick={() => removeInputField(i)}
+										aria-label="Remove field"
+									>
+										<Trash2 size={9} />
+									</button>
+								</div>
+								<div class="flex items-center gap-1.5">
+									{#if field.type === 'array'}
+										<select
+											class="select select-xs w-28 shrink-0"
+											value={field.itemsType ?? 'string'}
+											onchange={(e) =>
+												updateInputField(
+													i,
+													'itemsType',
+													(e.target as HTMLSelectElement).value as InputField['type']
+												)}
+										>
+											{#each ['string', 'number', 'boolean', 'object'] as t (t)}
+												<option value={t}>{t}[]</option>
+											{/each}
+										</select>
+									{/if}
+									<label class="flex cursor-pointer items-center gap-1 text-[10px]">
+										<input
+											type="checkbox"
+											class="checkbox checkbox-xs"
+											checked={field.required ?? false}
+											onchange={(e) =>
+												updateInputField(i, 'required', (e.target as HTMLInputElement).checked)}
+										/>
+										required
+									</label>
+									<input
+										class="input input-xs min-w-0 flex-1 font-mono"
+										placeholder="example value"
+										value={field.example ?? ''}
+										oninput={(e) =>
+											updateInputField(i, 'example', (e.target as HTMLInputElement).value)}
+									/>
+								</div>
+							</div>
+						{/each}
+					{/if}
 				</div>
 			{/if}
 

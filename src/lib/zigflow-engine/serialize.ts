@@ -291,6 +291,7 @@ export function serializeZigflowDocument(doc: ZigflowDocument): string {
 	const ctx: BuildCtx = { blockLiteralPaths: [] };
 	const obj = {
 		document: buildHeader(doc.document),
+		...(doc.input ? { input: doc.input } : {}),
 		do: buildTaskList(doc.do, ['do'], ctx)
 	};
 

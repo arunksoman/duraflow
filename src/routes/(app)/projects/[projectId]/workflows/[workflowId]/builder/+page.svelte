@@ -484,6 +484,7 @@
 				onclose={() => (configNodeId = null)}
 				onupdate={updateNodeData}
 				onremovebranch={handleRemoveBranch}
+				onupdatemeta={updateWorkflowMeta}
 			/>
 		{/if}
 	</div>

@@ -236,5 +236,7 @@ export interface ZigflowDocumentHeader {
  */
 export interface ZigflowDocument {
 	document: ZigflowDocumentHeader;
+	/** Declares the JSON Schema of data a caller must supply when starting/triggering the workflow. */
+	input?: InputConfig;
 	do: TaskList;
 }

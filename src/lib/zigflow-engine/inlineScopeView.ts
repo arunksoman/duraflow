@@ -54,9 +54,9 @@ function buildOwnerMap(nodes: Node[]): Map<string, string> {
 }
 
 /**
- * One inline lane a container node (`for`/bare-`do`, `try`, `fork`) needs on the canvas, and the
- * real scope key backing it. `redirectContinuation` is set ONLY for try's first (try-body) lane —
- * see `analyzeContainerNodes` below for what that actually changes.
+ * One inline lane a container node (`for`/bare-`do`, `try`, `fork`) needs on the canvas, and
+ * the real scope key backing it. `redirectContinuation` is set ONLY for try's first (try-body)
+ * lane — see `analyzeContainerNodes` below for what that actually changes.
  */
 interface LaneSpec {
 	key: string;

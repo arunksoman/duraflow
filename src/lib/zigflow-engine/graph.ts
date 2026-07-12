@@ -5,6 +5,7 @@ import type {
 	FlowDirective,
 	ForkTask,
 	ForTask,
+	InputConfig,
 	PullPolicy,
 	RaiseTask,
 	RunConfig,
@@ -25,7 +26,7 @@ import type {
 	EventEntry,
 	BranchEntry
 } from '../components/builder/builderConfig';
-import type { WorkflowNodeType } from '../types';
+import type { WorkflowNodeType, InputField } from '../types';
 import { toSlug, uniqueSlug } from './slug';
 import { orderNodesInScope, layoutScope } from './layout';
 import {
@@ -53,6 +54,7 @@ export interface WorkflowHeaderFields {
 	summary?: string;
 	tags?: Record<string, string>;
 	metadata?: Record<string, unknown>;
+	inputSchema?: InputField[];
 }
 
 function definedEntries<T extends Record<string, unknown>>(obj: T): Partial<T> {
@@ -77,6 +79,53 @@ function recordFromEntries(entries: VarEntry[] | undefined): Record<string, unkn
 	return out;
 }
 
+interface JsonSchemaProperty {
+	type?: string;
+	description?: string;
+	items?: { type?: string };
+}
+
+/** Inverse of `stringifyInputSchema` — the document-level `input.schema` -> the Start node's flat field-list UI model. */
+function parseInputSchema(input: InputConfig | undefined): InputField[] {
+	const doc = input?.schema?.document as
+		{ properties?: Record<string, JsonSchemaProperty>; required?: string[] } | undefined;
+	if (!doc?.properties) return [];
+	const required = new Set(doc.required ?? []);
+	return Object.entries(doc.properties).map(([name, prop]) => ({
+		name,
+		type: (prop.type as InputField['type']) ?? 'string',
+		required: required.has(name) || undefined,
+		...(prop.type === 'array'
+			? { itemsType: (prop.items?.type as InputField['itemsType']) ?? 'string' }
+			: {}),
+		...(prop.description ? { description: prop.description } : {})
+	}));
+}
+
+/** The Start node's flat field-list UI model -> a real JSON Schema for the document-level `input.schema`. */
+function stringifyInputSchema(fields: InputField[]): InputConfig | undefined {
+	const named = fields.filter((f) => f.name);
+	if (named.length === 0) return undefined;
+
+	const properties: Record<string, JsonSchemaProperty> = {};
+	const required: string[] = [];
+	for (const f of named) {
+		properties[f.name] = {
+			type: f.type,
+			...(f.description ? { description: f.description } : {}),
+			...(f.type === 'array' ? { items: { type: f.itemsType ?? 'string' } } : {})
+		};
+		if (f.required) required.push(f.name);
+	}
+
+	return {
+		schema: {
+			format: 'json',
+			document: { type: 'object', ...(required.length > 0 ? { required } : {}), properties }
+		}
+	};
+}
+
 // =========================================================================
 // graphToAst — node-graph (per scope) -> ZigflowDocument
 // =========================================================================
@@ -94,7 +143,12 @@ export function graphToAst(graph: WorkflowGraph, header: WorkflowHeaderFields): 
 			? { metadata: header.metadata }
 			: {})
 	};
-	return { document: documentHeader, do: scopeToTaskList(graph, ROOT_SCOPE_ID) };
+	const input = stringifyInputSchema(header.inputSchema ?? []);
+	return {
+		document: documentHeader,
+		...(input ? { input } : {}),
+		do: scopeToTaskList(graph, ROOT_SCOPE_ID)
+	};
 }
 
 function scopeToTaskList(graph: WorkflowGraph, scopeId: string): TaskList {
@@ -388,7 +442,8 @@ export function astToGraph(doc: ZigflowDocument): {
 			title: doc.document.title,
 			summary: doc.document.summary,
 			tags: doc.document.tags,
-			metadata: doc.document.metadata
+			metadata: doc.document.metadata,
+			inputSchema: parseInputSchema(doc.input)
 		}
 	};
 }
@@ -416,9 +471,8 @@ function buildScope(list: TaskList, scopeId: string, scopesOut: Record<string, S
 	}
 
 	// Pass 2: fill each node's data, recursing into nested scopes as needed.
-	list.forEach((entry, i) => {
-		const [, task] = Object.entries(entry)[0];
-		const node = nodes[i];
+	nodes.forEach((node, idx) => {
+		const task = Object.values(list[idx])[0];
 		node.data = {
 			type: node.type,
 			...node.data,

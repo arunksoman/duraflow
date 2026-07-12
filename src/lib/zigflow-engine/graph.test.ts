@@ -285,4 +285,59 @@ describe('graphToAst', () => {
 			set: { message: 'Hello from Ziggy' }
 		});
 	});
+
+	it('round-trips a document-level `input.schema` instead of dropping it', () => {
+		const doc: ZigflowDocument = {
+			document: header(),
+			input: {
+				schema: {
+					format: 'json',
+					document: {
+						type: 'object',
+						required: ['userIds'],
+						properties: {
+							userIds: { type: 'array', items: { type: 'number' } },
+							note: { type: 'string', description: 'optional note' }
+						}
+					}
+				}
+			},
+			do: [
+				{
+					processBatch: {
+						for: { each: 'user', at: 'index', in: '${ $input.userIds }' },
+						do: [{ fetchUser: { set: { seen: '${ $data.user }' } } }]
+					}
+				}
+			]
+		};
+
+		const { graph, header: hdr } = astToGraph(doc);
+		expect(hdr.inputSchema).toEqual([
+			{ name: 'userIds', type: 'array', required: true, itemsType: 'number' },
+			{ name: 'note', type: 'string', description: 'optional note' }
+		]);
+
+		const rebuilt = graphToAst(graph, hdr);
+		expect(rebuilt.input).toEqual(doc.input);
+
+		const yamlText = serializeZigflowDocument(rebuilt);
+		const result = deserializeZigflowDocument(yamlText);
+		expect(result.ok).toBe(true);
+		if (!result.ok) return;
+		expect(result.document.input).toEqual(doc.input);
+	});
+
+	it('omits the `input` key entirely when there is no input schema', () => {
+		const doc: ZigflowDocument = {
+			document: header(),
+			do: [{ setup: { set: { x: 1 } } }]
+		};
+		const { graph, header: hdr } = astToGraph(doc);
+		expect(hdr.inputSchema).toEqual([]);
+
+		const rebuilt = graphToAst(graph, hdr);
+		expect(rebuilt.input).toBeUndefined();
+		expect(serializeZigflowDocument(rebuilt)).not.toContain('input:');
+	});
 });

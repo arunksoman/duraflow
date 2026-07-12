@@ -93,7 +93,11 @@ export interface Schedule {
 export interface InputField {
 	name: string;
 	type: 'string' | 'number' | 'boolean' | 'object' | 'array';
+	required?: boolean;
+	/** Element type when `type === 'array'` — ignored otherwise. */
+	itemsType?: InputField['type'];
 	description?: string;
+	/** UI-only annotation — not part of the DSL, dropped on every load/save round trip. */
 	example?: string;
 }
 

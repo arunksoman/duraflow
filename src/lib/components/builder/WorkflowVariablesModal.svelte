@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { untrack } from 'svelte';
 	import { Plus, Trash2, X } from '@lucide/svelte';
-	import type { WorkflowMeta, InputField, EnvVar } from '$lib/types';
+	import type { WorkflowMeta, EnvVar } from '$lib/types';
 
 	interface Props {
 		meta: WorkflowMeta;
@@ -11,34 +11,13 @@
 
 	let { meta, onclose, onupdate }: Props = $props();
 
-	let inputSchema = $state<InputField[]>(
-		untrack(() => (meta.inputSchema ?? []).map((f) => ({ ...f })))
-	);
 	let envVars = $state<EnvVar[]>(untrack(() => (meta.envVars ?? []).map((e) => ({ ...e }))));
 	let workflowType = $state<string>(untrack(() => meta.workflowType ?? ''));
 	let taskQueue = $state<string>(untrack(() => meta.taskQueue ?? ''));
 	let version = $state<string>(untrack(() => meta.version ?? '0.1.0'));
 
-	const FIELD_TYPES = ['string', 'number', 'boolean', 'object', 'array'] as const;
-
-	function saveInputSchema() {
-		onupdate({ inputSchema: inputSchema.map((f) => ({ ...f })) });
-	}
 	function saveEnvVars() {
 		onupdate({ envVars: envVars.map((e) => ({ ...e })) });
-	}
-
-	function addInputField() {
-		inputSchema = [...inputSchema, { name: '', type: 'string', description: '', example: '' }];
-		saveInputSchema();
-	}
-	function removeInputField(i: number) {
-		inputSchema = inputSchema.filter((_, idx) => idx !== i);
-		saveInputSchema();
-	}
-	function updateInputField<K extends keyof InputField>(i: number, key: K, val: InputField[K]) {
-		inputSchema = inputSchema.map((f, idx) => (idx === i ? { ...f, [key]: val } : f));
-		saveInputSchema();
 	}
 
 	function addEnvVar() {
@@ -62,7 +41,8 @@
 			<div>
 				<h3 class="font-semibold">Workflow Variables</h3>
 				<p class="text-base-content/40 text-xs">
-					Define the runtime variables available to every node in this workflow
+					Document metadata and worker environment variables — the workflow's <code>$input</code>
+					schema is edited on the Start node itself.
 				</p>
 			</div>
 			<button class="btn btn-ghost btn-sm btn-circle" onclick={onclose} aria-label="Close">
@@ -120,83 +100,6 @@
 						/>
 					</div>
 				</div>
-			</section>
-
-			<!-- ── $input schema ─────────────────────────────────────────── -->
-			<section>
-				<div class="mb-2 flex items-center justify-between">
-					<div>
-						<h4 class="text-base-content/70 text-xs font-semibold uppercase tracking-wider">
-							<code class="text-primary font-mono">$input</code> Schema
-						</h4>
-						<p class="text-base-content/40 mt-0.5 text-[10px]">
-							Fields sent by the caller when triggering this workflow — read-only at runtime
-						</p>
-					</div>
-					<button class="btn btn-ghost btn-xs gap-1" onclick={addInputField}>
-						<Plus size={10} />
-						Add field
-					</button>
-				</div>
-
-				{#if inputSchema.length === 0}
-					<p class="text-base-content/30 py-3 text-center text-xs">
-						No input fields defined — use <code>$input</code> freely or add fields for autocomplete hints.
-					</p>
-				{:else}
-					<div class="flex flex-col gap-2">
-						{#each inputSchema as field, i (i)}
-							<div
-								class="border-base-300 grid grid-cols-[1fr_100px_1fr_auto] gap-2 rounded-lg border p-2"
-							>
-								<div class="flex flex-col gap-0.5">
-									<span class="text-base-content/40 text-[10px]">name</span>
-									<input
-										class="input input-xs font-mono"
-										placeholder="orderId"
-										value={field.name}
-										oninput={(e) =>
-											updateInputField(i, 'name', (e.target as HTMLInputElement).value)}
-									/>
-								</div>
-								<div class="flex flex-col gap-0.5">
-									<span class="text-base-content/40 text-[10px]">type</span>
-									<select
-										class="select select-xs"
-										value={field.type}
-										onchange={(e) =>
-											updateInputField(
-												i,
-												'type',
-												(e.target as HTMLSelectElement).value as InputField['type']
-											)}
-									>
-										{#each FIELD_TYPES as t (t)}
-											<option value={t}>{t}</option>
-										{/each}
-									</select>
-								</div>
-								<div class="flex flex-col gap-0.5">
-									<span class="text-base-content/40 text-[10px]">example</span>
-									<input
-										class="input input-xs font-mono"
-										placeholder="ord-1234"
-										value={field.example ?? ''}
-										oninput={(e) =>
-											updateInputField(i, 'example', (e.target as HTMLInputElement).value)}
-									/>
-								</div>
-								<button
-									class="btn btn-ghost btn-xs btn-circle text-error self-end"
-									onclick={() => removeInputField(i)}
-									aria-label="Remove field"
-								>
-									<Trash2 size={10} />
-								</button>
-							</div>
-						{/each}
-					</div>
-				{/if}
 			</section>
 
 			<!-- ── $env variables ────────────────────────────────────────── -->
