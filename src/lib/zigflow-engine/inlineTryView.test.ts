@@ -5,6 +5,7 @@ import {
 	composeScopeForDisplay,
 	decomposeDisplayedScope,
 	computeLiveSyntheticEdges,
+	computeHiddenRealEdgeIds,
 	OWNER_SCOPE_TAG,
 	SYNTHETIC_TRY_EDGE_TAG
 } from './inlineTryView';
@@ -239,5 +240,98 @@ describe('computeLiveSyntheticEdges', () => {
 		const synthetic = computeLiveSyntheticEdges([tryNode, second, first], [laneEdge]);
 		const tryEdge = synthetic.find((e) => e.label === 'try');
 		expect(tryEdge?.target).toBe('first');
+	});
+
+	it('sources the catch edge and the continuation edge from the last try-lane node, not the control node — try/catch is a fallback path, not a fork', () => {
+		const tryKey = tryScopeKey(ROOT_SCOPE_ID, 'try1');
+		const catchKey = catchScopeKey(ROOT_SCOPE_ID, 'try1');
+		const tryNode: Node = {
+			id: 'try1',
+			type: 'try',
+			position: { x: 0, y: 0 },
+			data: { [OWNER_SCOPE_TAG]: ROOT_SCOPE_ID }
+		};
+		const httpCall: Node = {
+			id: 'httpCall',
+			type: 'call',
+			position: { x: 0, y: 0 },
+			data: { [OWNER_SCOPE_TAG]: tryKey }
+		};
+		const setCatch: Node = {
+			id: 'setCatch',
+			type: 'set',
+			position: { x: 0, y: 0 },
+			data: { [OWNER_SCOPE_TAG]: catchKey }
+		};
+		const endNode: Node = {
+			id: 'end',
+			type: 'end',
+			position: { x: 0, y: 0 },
+			data: { [OWNER_SCOPE_TAG]: ROOT_SCOPE_ID }
+		};
+		const nodes = [tryNode, httpCall, setCatch, endNode];
+		const realNextEdge: Edge = { id: 'e-try1-end', source: 'try1', target: 'end' };
+		const edges = [realNextEdge];
+
+		const synthetic = computeLiveSyntheticEdges(nodes, edges);
+		const tryEdge = synthetic.find((e) => e.label === 'try')!;
+		const catchEdge = synthetic.find((e) => e.label === 'catch')!;
+		const continueEdge = synthetic.find(
+			(e) => (e.data as { branch?: string })?.branch === 'continue'
+		)!;
+
+		expect(tryEdge.source).toBe('try1');
+		expect(tryEdge.target).toBe('httpCall');
+		// catch leaves the try body's own node, not the try/catch control node
+		expect(catchEdge.source).toBe('httpCall');
+		expect(catchEdge.target).toBe('setCatch');
+		expect(continueEdge).toBeDefined();
+		expect(continueEdge.source).toBe('httpCall');
+		expect(continueEdge.target).toBe('end');
+		expect(continueEdge.label).toBeUndefined();
+
+		const hidden = computeHiddenRealEdgeIds(nodes, edges);
+		expect(hidden.has('e-try1-end')).toBe(true);
+	});
+
+	it('falls back to the control node for catch when the try body is empty', () => {
+		const tryNode: Node = {
+			id: 'try1',
+			type: 'try',
+			position: { x: 0, y: 0 },
+			data: { [OWNER_SCOPE_TAG]: ROOT_SCOPE_ID }
+		};
+		const catchKey = catchScopeKey(ROOT_SCOPE_ID, 'try1');
+		const setCatch: Node = {
+			id: 'setCatch',
+			type: 'set',
+			position: { x: 0, y: 0 },
+			data: { [OWNER_SCOPE_TAG]: catchKey }
+		};
+		const synthetic = computeLiveSyntheticEdges([tryNode, setCatch], []);
+		const catchEdge = synthetic.find((e) => e.label === 'catch')!;
+		expect(catchEdge.source).toBe('try1');
+	});
+
+	it('does not hide or redirect anything when the try node has no outgoing main edge (last in chain, no End node present)', () => {
+		const tryKey = tryScopeKey(ROOT_SCOPE_ID, 'try1');
+		const tryNode: Node = {
+			id: 'try1',
+			type: 'try',
+			position: { x: 0, y: 0 },
+			data: { [OWNER_SCOPE_TAG]: ROOT_SCOPE_ID }
+		};
+		const httpCall: Node = {
+			id: 'httpCall',
+			type: 'call',
+			position: { x: 0, y: 0 },
+			data: { [OWNER_SCOPE_TAG]: tryKey }
+		};
+		const nodes = [tryNode, httpCall];
+		const synthetic = computeLiveSyntheticEdges(nodes, []);
+		expect(synthetic.some((e) => (e.data as { branch?: string })?.branch === 'continue')).toBe(
+			false
+		);
+		expect(computeHiddenRealEdgeIds(nodes, []).size).toBe(0);
 	});
 });

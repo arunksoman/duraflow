@@ -49,6 +49,7 @@
 		decomposeDisplayedScope,
 		computeLiveLaneBounds,
 		computeLiveSyntheticEdges,
+		computeHiddenRealEdgeIds,
 		OWNER_SCOPE_TAG
 	} from '$lib/zigflow-engine/inlineTryView';
 	import type { Diagnostic } from '@codemirror/lint';
@@ -120,9 +121,16 @@
 					position: { x: 200, y: 100 },
 					data: { type: 'start', label: 'Start', variables: [] },
 					deletable: false
+				},
+				{
+					id: 'end',
+					type: 'end',
+					position: { x: 200, y: 220 },
+					data: { type: 'end', label: 'End' },
+					deletable: false
 				}
 			],
-			edges: []
+			edges: [{ id: 'e-start-end', source: 'start', target: 'end' }]
 		}
 	});
 
@@ -170,13 +178,12 @@
 	// (same self-read guard as the mirror effect above) so reassigning it here can't re-trigger
 	// this same effect.
 	$effect(() => {
-		const synthetic = computeLiveSyntheticEdges(
-			nodes,
-			untrack(() => edges)
-		);
-		const real = untrack(() => edges).filter(
-			(e) => !(e.data as Record<string, unknown> | undefined)?.syntheticTryEdge
-		);
+		const currentEdges = untrack(() => edges);
+		const synthetic = computeLiveSyntheticEdges(nodes, currentEdges);
+		const hiddenIds = computeHiddenRealEdgeIds(nodes, currentEdges);
+		const real = currentEdges
+			.filter((e) => !(e.data as Record<string, unknown> | undefined)?.syntheticTryEdge)
+			.map((e) => ({ ...e, hidden: hiddenIds.has(e.id) }));
 		edges = [...real, ...synthetic];
 	});
 

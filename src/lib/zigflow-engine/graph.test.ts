@@ -27,8 +27,31 @@ describe('astToGraph', () => {
 		const { graph, header: hdr } = astToGraph(doc);
 		expect(hdr.workflowType).toBe('example');
 		const root = graph.scopes[ROOT_SCOPE_ID];
-		expect(root.nodes.map((n) => n.type)).toEqual(['start', 'set', 'call']);
-		expect(root.edges).toHaveLength(2);
+		expect(root.nodes.map((n) => n.type)).toEqual(['start', 'set', 'call', 'end']);
+		expect(root.edges).toHaveLength(3);
+	});
+
+	it('always terminates the root scope with a non-deletable End node wired from the last task', () => {
+		const doc: ZigflowDocument = {
+			document: header(),
+			do: [{ setup: { set: { id: '${ uuid }' } } }]
+		};
+		const { graph } = astToGraph(doc);
+		const root = graph.scopes[ROOT_SCOPE_ID];
+		const endNode = root.nodes.find((n) => n.type === 'end')!;
+		expect(endNode.deletable).toBe(false);
+		const setNode = root.nodes.find((n) => n.type === 'set')!;
+		expect(root.edges).toContainEqual(
+			expect.objectContaining({ source: setNode.id, target: 'end' })
+		);
+	});
+
+	it('wires Start straight to End for an empty task list', () => {
+		const doc: ZigflowDocument = { document: header(), do: [] };
+		const { graph } = astToGraph(doc);
+		const root = graph.scopes[ROOT_SCOPE_ID];
+		expect(root.nodes.map((n) => n.type)).toEqual(['start', 'end']);
+		expect(root.edges).toContainEqual(expect.objectContaining({ source: 'start', target: 'end' }));
 	});
 
 	it('builds a nested scope for a For task body', () => {
@@ -113,7 +136,8 @@ describe('astToGraph', () => {
 		const { graph } = astToGraph(doc);
 		expect(graph.scopes[ROOT_SCOPE_ID].nodes.map((n) => n.type)).toEqual([
 			'start',
-			'childWorkflow'
+			'childWorkflow',
+			'end'
 		]);
 	});
 

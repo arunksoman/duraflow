@@ -90,7 +90,9 @@ export function graphToAst(graph: WorkflowGraph, header: WorkflowHeaderFields): 
 		...(header.title ? { title: header.title } : {}),
 		...(header.summary ? { summary: header.summary } : {}),
 		...(header.tags && Object.keys(header.tags).length > 0 ? { tags: header.tags } : {}),
-		...(header.metadata && Object.keys(header.metadata).length > 0 ? { metadata: header.metadata } : {})
+		...(header.metadata && Object.keys(header.metadata).length > 0
+			? { metadata: header.metadata }
+			: {})
 	};
 	return { document: documentHeader, do: scopeToTaskList(graph, ROOT_SCOPE_ID) };
 }
@@ -434,6 +436,8 @@ function buildScope(list: TaskList, scopeId: string, scopesOut: Record<string, S
 	}
 
 	if (scopeId === ROOT_SCOPE_ID) {
+		const lastRealNode = nodes[nodes.length - 1];
+
 		const startNode: Node = {
 			id: 'start',
 			type: 'start',
@@ -445,6 +449,25 @@ function buildScope(list: TaskList, scopeId: string, scopesOut: Record<string, S
 		if (nodes.length > 1) {
 			edges.unshift({ id: `e-start-${nodes[1].id}`, source: 'start', target: nodes[1].id });
 		}
+
+		// Every workflow gets an explicit `End` node too, same as `Start` — otherwise the last real
+		// task's chain trails off with nothing after it, which reads as open-ended/unfinished rather
+		// than "this is where the workflow terminates". Purely a canvas convenience like `Start`:
+		// filtered out of the real task list in `scopeToTaskList` above, never touches the DSL.
+		const endNode: Node = {
+			id: 'end',
+			type: 'end',
+			position: { x: 0, y: 0 },
+			data: { type: 'end', label: 'End' },
+			deletable: false
+		};
+		const lastNodeBeforeEnd = lastRealNode ?? startNode;
+		nodes.push(endNode);
+		edges.push({
+			id: `e-${lastNodeBeforeEnd.id}-end`,
+			source: lastNodeBeforeEnd.id,
+			target: 'end'
+		});
 	}
 
 	layoutScope(nodes, edges);
