@@ -50,15 +50,8 @@ export function layoutScope(nodes: Node[], edges: Edge[], opts: LayoutOptions = 
 /** Matches `WorkflowNode.svelte`'s card width (`w-44` = 11rem @ 16px root = 176px). */
 export const NODE_CARD_WIDTH = 176;
 
-/** Horizontal offset (in flow coordinates) of a try node's inline try-lane; catch-lane is 2x this. */
+/** Horizontal pitch (in flow coordinates) between one inline lane/column and the next. */
 export const INLINE_LANE_OFFSET_X = 260;
-
-export interface InlineTryLane {
-	tryNodes: Node[];
-	tryEdges: Edge[];
-	catchNodes: Node[];
-	catchEdges: Edge[];
-}
 
 export interface LaneBounds {
 	x: number;
@@ -67,70 +60,110 @@ export interface LaneBounds {
 	width: number;
 }
 
-export interface InlineLayoutResult {
-	/** try-node id -> its try-lane's bounding box (absent if the lane is empty). */
-	tryBounds: Map<string, LaneBounds>;
-	/** try-node id -> its catch-lane's bounding box (absent if the lane is empty). */
-	catchBounds: Map<string, LaneBounds>;
+/**
+ * One inline lane belonging to a container node (a `for`/bare-`do`'s body, one of `try`'s two
+ * lanes, or one `fork` branch). `laneMap` is this lane's own nested lanes (empty if nothing inside
+ * this lane's chain itself has further nested lanes) — this is what lets `layoutScopeRecursive`
+ * recurse to arbitrary depth instead of stopping at one level.
+ */
+export interface ScopeLane {
+	key: string;
+	nodes: Node[];
+	edges: Edge[];
+	laneMap: LaneMap;
+}
+
+/** Owning node id -> its ordered list of lanes (1 for for/do, 2 for try, N for fork). */
+export type LaneMap = Map<string, ScopeLane[]>;
+
+interface ChainFootprint {
+	/** Rows this chain (including any of its own nested lanes) occupies vertically. */
+	rows: number;
+	/** Columns this chain (including any of its own nested lanes) occupies horizontally, in units of `INLINE_LANE_OFFSET_X`. */
+	columns: number;
 }
 
 /**
- * Lays out a scope's main chain exactly like `layoutScope`, except that for every node present
- * as a key in `tryLanes`, its try-lane and catch-lane nodes are laid out as two extra side columns
- * immediately below it, and the main chain's row cursor is bumped past whichever is taller (the
- * next main-chain row, or the lane extent) before resuming — so a second `try` node further down
- * the same chain never has its lanes collide with an earlier one's.
+ * Lays out a scope's main chain like `layoutScope`, except that for every node present as a key in
+ * `laneMap`, its lanes are laid out as extra side columns starting immediately to the right of it,
+ * recursing into each lane's own `laneMap` to place any further-nested containers (a `fork` branch
+ * that itself has a nested `for`, etc.) — to arbitrary depth. A lane's column footprint is measured
+ * bottom-up (via each recursive call's return value) *before* its next sibling lane is positioned,
+ * so a lane widened by deep nesting never overlaps the next lane over. The main chain's row cursor
+ * is bumped past whichever is taller (the next main-chain row, or the tallest sibling lane) before
+ * resuming, generalizing the row-bump idea to N lanes instead of a hardcoded 2.
+ *
+ * Returns one flat `Map<laneKey, LaneBounds>` (keyed by the lane's own scope key, e.g.
+ * `root/fork1/branch/abc` — already globally unique, so no owner-id prefix is needed) covering
+ * every lane at every depth, used for drag-and-drop hit-testing.
  */
-export function layoutScopeWithInlineTry(
+export function layoutScopeRecursive(
 	mainNodes: Node[],
 	mainEdges: Edge[],
-	tryLanes: Map<string, InlineTryLane>,
+	laneMap: LaneMap,
 	opts: LayoutOptions = {}
-): InlineLayoutResult {
+): Map<string, LaneBounds> {
 	const { originX = 200, originY = 80, rowHeight = 120 } = opts;
-	const laneOffsetX = INLINE_LANE_OFFSET_X;
-	const tryBounds = new Map<string, LaneBounds>();
-	const catchBounds = new Map<string, LaneBounds>();
+	const laneBounds = new Map<string, LaneBounds>();
+	positionChain(mainNodes, mainEdges, laneMap, originX, originY, rowHeight, laneBounds);
+	return laneBounds;
+}
 
-	const ordered = orderNodesInScope(mainNodes, mainEdges);
+function positionChain(
+	nodes: Node[],
+	edges: Edge[],
+	laneMap: LaneMap,
+	originX: number,
+	originY: number,
+	rowHeight: number,
+	laneBoundsOut: Map<string, LaneBounds>
+): ChainFootprint {
+	const ordered = orderNodesInScope(nodes, edges);
 	let row = 0;
+	let columns = 1;
 
 	for (const node of ordered) {
 		node.position = { x: originX, y: originY + row * rowHeight };
 		row++;
 
-		const lanes = tryLanes.get(node.id);
-		if (!lanes) continue;
+		const lanes = laneMap.get(node.id);
+		if (!lanes || lanes.length === 0) continue;
 
-		const tryOrdered = orderNodesInScope(lanes.tryNodes, lanes.tryEdges);
-		const catchOrdered = orderNodesInScope(lanes.catchNodes, lanes.catchEdges);
 		const laneStartRow = row;
+		let colOffset = 1;
+		// Reserve at least one row even when every lane is empty — otherwise there's no bounding
+		// box to drop-target until *something* is already in it (a chicken-and-egg gap: the very
+		// first node could never be dragged into a brand-new empty lane).
+		let maxLaneRows = 1;
 
-		tryOrdered.forEach((n, i) => {
-			n.position = { x: originX + laneOffsetX, y: originY + (laneStartRow + i) * rowHeight };
-		});
-		catchOrdered.forEach((n, i) => {
-			n.position = { x: originX + laneOffsetX * 2, y: originY + (laneStartRow + i) * rowHeight };
-		});
+		for (const lane of lanes) {
+			const laneX = originX + colOffset * INLINE_LANE_OFFSET_X;
+			const laneY = originY + laneStartRow * rowHeight;
+			const laneOrdered = orderNodesInScope(lane.nodes, lane.edges);
+			const footprint = positionChain(
+				lane.nodes,
+				lane.edges,
+				lane.laneMap,
+				laneX,
+				laneY,
+				rowHeight,
+				laneBoundsOut
+			);
 
-		// Reserve at least one row's worth of bounds even for an empty lane — otherwise there's no
-		// bounding box to drop-target until *something* is already in it (a chicken-and-egg gap:
-		// the very first node could never be dragged in).
-		tryBounds.set(node.id, {
-			x: originX + laneOffsetX,
-			yStart: originY + laneStartRow * rowHeight,
-			yEnd: originY + (laneStartRow + Math.max(tryOrdered.length, 1)) * rowHeight,
-			width: NODE_CARD_WIDTH
-		});
-		catchBounds.set(node.id, {
-			x: originX + laneOffsetX * 2,
-			yStart: originY + laneStartRow * rowHeight,
-			yEnd: originY + (laneStartRow + Math.max(catchOrdered.length, 1)) * rowHeight,
-			width: NODE_CARD_WIDTH
-		});
+			laneBoundsOut.set(lane.key, {
+				x: laneX,
+				yStart: laneY,
+				yEnd: laneY + Math.max(laneOrdered.length, 1) * rowHeight,
+				width: NODE_CARD_WIDTH
+			});
 
-		row += Math.max(tryOrdered.length, catchOrdered.length);
+			colOffset += footprint.columns;
+			maxLaneRows = Math.max(maxLaneRows, footprint.rows);
+		}
+
+		columns = Math.max(columns, colOffset);
+		row += maxLaneRows;
 	}
 
-	return { tryBounds, catchBounds };
+	return { rows: Math.max(row, 1), columns };
 }

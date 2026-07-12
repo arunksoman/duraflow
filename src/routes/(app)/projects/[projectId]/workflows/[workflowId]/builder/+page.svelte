@@ -13,15 +13,7 @@
 	import '@xyflow/svelte/dist/style.css';
 
 	import { page } from '$app/state';
-	import {
-		ArrowLeft,
-		ChevronRight,
-		CircleCheck,
-		Code2,
-		Save,
-		SlidersHorizontal,
-		Workflow
-	} from '@lucide/svelte';
+	import { ArrowLeft, CircleCheck, Code2, Save, SlidersHorizontal, Workflow } from '@lucide/svelte';
 	import ThemeToggle from '$lib/components/ThemeToggle.svelte';
 
 	import WorkflowNode from '$lib/components/builder/WorkflowNode.svelte';
@@ -38,20 +30,18 @@
 		deserializeZigflowDocument,
 		type DeserializeError
 	} from '$lib/zigflow-engine/deserialize';
-	import {
-		ROOT_SCOPE_ID,
-		forScopeKey,
-		tryScopeKey,
-		catchScopeKey
-	} from '$lib/zigflow-engine/scopeKey';
+	import { ROOT_SCOPE_ID, forkBranchScopeKey } from '$lib/zigflow-engine/scopeKey';
 	import {
 		composeScopeForDisplay,
 		decomposeDisplayedScope,
 		computeLiveLaneBounds,
 		computeLiveSyntheticEdges,
 		computeHiddenRealEdgeIds,
+		computeTerminalEdges,
+		collectDescendantScopeKeysForNode,
+		collectDescendantScopeKeysForLaneKey,
 		OWNER_SCOPE_TAG
-	} from '$lib/zigflow-engine/inlineTryView';
+	} from '$lib/zigflow-engine/inlineScopeView';
 	import type { Diagnostic } from '@codemirror/lint';
 	import type { WorkflowNodeType, WorkflowMeta } from '$lib/types';
 
@@ -134,18 +124,10 @@
 		}
 	});
 
-	/** Breadcrumb trail of scope ids — last entry is the scope currently shown on the canvas. */
-	let scopeStack = $state<string[]>([ROOT_SCOPE_ID]);
-	/** Human-readable labels for non-root scopes, set when drilling in. */
-	let scopeLabels = $state<Record<string, string>>({ [ROOT_SCOPE_ID]: 'Workflow' });
-
-	const currentScopeId = $derived(scopeStack[scopeStack.length - 1]);
-
-	// `nodes`/`edges` are the currently-displayed (composed) view of `currentScopeId` — for a
-	// scope containing `try` nodes, this is flattened to also include their try/catch lane nodes
-	// inline (see `inlineTryView.ts`), tagged with which real scope each node belongs to so edits
-	// demultiplex back correctly. For every other scope shape (for/fork/plain do), composing is a
-	// no-op passthrough.
+	// `nodes`/`edges` are the always-fully-composed view of the whole workflow, rooted at
+	// `ROOT_SCOPE_ID` — every `for`/`try`/`fork`/bare-`do` node's nested body renders inline as
+	// tagged sibling nodes (recursively, to arbitrary depth — see `inlineScopeView.ts`), so there is
+	// no separate "drilled-in" scope to switch to; the composed view IS the canvas.
 	let nodes: Node[] = $state.raw(
 		untrack(() => composeScopeForDisplay(scopes, ROOT_SCOPE_ID).nodes)
 	);
@@ -154,9 +136,9 @@
 	);
 
 	/**
-	 * Try/catch lane bounding boxes, used to target drag-and-drop — derived live from `nodes`'
-	 * actual current positions (not the one-off layout pass in `loadScope`), so it never goes
-	 * stale after a node is added or dragged without a full scope switch.
+	 * Inline-lane bounding boxes (one per lane, at any nesting depth), used to target
+	 * drag-and-drop — derived live from `nodes`' actual current positions (not the one-off layout
+	 * pass at initial load), so it never goes stale after a node is added or dragged.
 	 */
 	const currentLaneBounds = $derived(computeLiveLaneBounds(nodes));
 
@@ -172,7 +154,7 @@
 		scopes = { ...prevScopes, ...decomposeDisplayedScope(nodes, edges) };
 	});
 
-	// Refresh the synthetic "try"/"catch" labeled edges whenever `nodes` changes — e.g. a node
+	// Refresh the synthetic lane/continuation/terminal edges whenever `nodes` changes — e.g. a node
 	// just dropped into a lane needs a fresh edge pointing at it, since `composeScopeForDisplay`
 	// only computes these once, at scope-load time. Tracks `nodes` only; `edges` is read untracked
 	// (same self-read guard as the mirror effect above) so reassigning it here can't re-trigger
@@ -182,42 +164,17 @@
 		const synthetic = computeLiveSyntheticEdges(nodes, currentEdges);
 		const hiddenIds = computeHiddenRealEdgeIds(nodes, currentEdges);
 		const real = currentEdges
-			.filter((e) => !(e.data as Record<string, unknown> | undefined)?.syntheticTryEdge)
+			.filter((e) => !(e.data as Record<string, unknown> | undefined)?.syntheticScopeEdge)
 			.map((e) => ({ ...e, hidden: hiddenIds.has(e.id) }));
-		edges = [...real, ...synthetic];
+		const terminal = computeTerminalEdges(nodes, [...real, ...synthetic]);
+		edges = [...real, ...synthetic, ...terminal];
 	});
 
-	function loadScope(scopeId: string) {
-		const composed = composeScopeForDisplay(scopes, scopeId);
+	/** Recompose `nodes`/`edges` from `scopes` — only needed after `applyDslToCanvas` replaces `scopes` wholesale. */
+	function reloadFromScopes() {
+		const composed = composeScopeForDisplay(scopes, ROOT_SCOPE_ID);
 		nodes = composed.nodes;
 		edges = composed.edges;
-	}
-
-	/**
-	 * Flush `nodes`/`edges` into `scopes` synchronously (same partial-map merge as the mirror
-	 * effect above). The mirror `$effect` does this too, but only on its next microtask flush —
-	 * too late if we're about to switch scopes (and thus overwrite `nodes`/`edges`) in the same
-	 * synchronous call, e.g. right after adding a node and immediately auto-drilling into it.
-	 */
-	function persistCurrentScope() {
-		scopes = { ...scopes, ...decomposeDisplayedScope(nodes, edges) };
-	}
-
-	function drillInto(childScopeId: string, label: string) {
-		persistCurrentScope();
-		if (!scopes[childScopeId]) scopes = { ...scopes, [childScopeId]: { nodes: [], edges: [] } };
-		scopeLabels = { ...scopeLabels, [childScopeId]: label };
-		scopeStack = [...scopeStack, childScopeId];
-		configNodeId = null;
-		loadScope(childScopeId);
-	}
-
-	function goToBreadcrumb(index: number) {
-		if (index >= scopeStack.length - 1) return;
-		persistCurrentScope();
-		scopeStack = scopeStack.slice(0, index + 1);
-		configNodeId = null;
-		loadScope(currentScopeId);
 	}
 
 	// ── UI state ─────────────────────────────────────────────────────
@@ -239,7 +196,6 @@
 	let dslSyncEnabled = $state(true);
 	let dslDraft = $state('');
 	let dslErrors = $state<DeserializeError[]>([]);
-	let dslSyncNotice = $state('');
 	let dslDebounceHandle: ReturnType<typeof setTimeout> | undefined;
 
 	const dslDiagnostics = $derived<Diagnostic[]>(
@@ -257,7 +213,6 @@
 		if (!showDsl) {
 			dslDraft = dsl;
 			dslErrors = [];
-			dslSyncNotice = '';
 		}
 		showDsl = !showDsl;
 	}
@@ -265,7 +220,6 @@
 	function resetDslDraft() {
 		dslDraft = dsl;
 		dslErrors = [];
-		dslSyncNotice = '';
 	}
 
 	function applyDslToCanvas(text: string) {
@@ -276,16 +230,10 @@
 		}
 		dslErrors = [];
 		const { graph, header } = astToGraph(result.document);
-		const wasNested = scopeStack.length > 1;
 		scopes = graph.scopes;
-		scopeStack = [ROOT_SCOPE_ID];
-		scopeLabels = { [ROOT_SCOPE_ID]: 'Workflow' };
 		configNodeId = null;
 		workflowMeta = { ...workflowMeta, ...header };
-		loadScope(ROOT_SCOPE_ID);
-		dslSyncNotice = wasNested
-			? 'Canvas rebuilt from the edited DSL — returned to the root view.'
-			: '';
+		reloadFromScopes();
 	}
 
 	function handleDslChange(text: string) {
@@ -300,63 +248,34 @@
 
 	// ── Node operations ──────────────────────────────────────────────
 
-	/**
-	 * For nodes have a nested body but start out empty and easy to miss — jump straight into it
-	 * the moment the node is created, so authoring the body is the very next thing you do. Try no
-	 * longer drills in (its try/catch bodies render inline, see `inlineTryView.ts`). Fork has no
-	 * default scope to jump into (it starts with zero branches, added explicitly in its panel), so
-	 * both are left showing their own config panel like any other node.
-	 *
-	 * Only wired up for the palette's click-to-add gesture (see `addNode`), not drag-and-drop
-	 * (`handleDrop`) — dropping a node onto a specific canvas position reads as "place it here",
-	 * so immediately navigating away to an empty nested scope felt like the node had vanished.
-	 */
-	function maybeAutoDrillIn(node: Node) {
-		const meta = NODE_META[node.type as WorkflowNodeType];
-		const label = (node.data?.label as string) ?? meta.label;
-		if (meta.nestedScopes === 'do') {
-			drillInto(forScopeKey(currentScopeId, node.id), `${label} → body`);
-		}
-	}
-
 	function addNode(type: WorkflowNodeType) {
 		const meta = NODE_META[type];
 		const newNode: Node = {
 			id: `node-${crypto.randomUUID()}`,
 			type,
 			position: { x: 120 + Math.random() * 200, y: 120 + Math.random() * 200 },
-			data: { type, ...meta.defaultData, [OWNER_SCOPE_TAG]: currentScopeId }
+			data: { type, ...meta.defaultData, [OWNER_SCOPE_TAG]: ROOT_SCOPE_ID }
 		};
 		nodes = [...nodes, newNode];
-		maybeAutoDrillIn(newNode);
 	}
 
 	/**
 	 * Which real scope a drag-and-drop at `position` should target: the main flow, or — if the
-	 * drop lands inside a `try` node's inline try-lane/catch-lane bounding box (with some padding
-	 * tolerance so drops don't have to hit an existing node precisely) — that lane's scope.
+	 * drop lands inside an inline lane's bounding box (with some padding tolerance so drops don't
+	 * have to hit an existing node precisely) — that lane's own scope, at whatever nesting depth.
 	 */
 	function resolveDropOwnerScope(position: { x: number; y: number }): string {
 		const PADDING = 40;
-		for (const [tryId, bounds] of currentLaneBounds.tryBounds) {
+		for (const [laneKey, bounds] of currentLaneBounds) {
 			if (
 				position.x >= bounds.x - PADDING &&
 				position.x <= bounds.x + bounds.width + PADDING &&
 				position.y >= bounds.yStart - PADDING
 			) {
-				return tryScopeKey(currentScopeId, tryId);
+				return laneKey;
 			}
 		}
-		for (const [tryId, bounds] of currentLaneBounds.catchBounds) {
-			if (
-				position.x >= bounds.x - PADDING &&
-				position.x <= bounds.x + bounds.width + PADDING &&
-				position.y >= bounds.yStart - PADDING
-			) {
-				return catchScopeKey(currentScopeId, tryId);
-			}
-		}
-		return currentScopeId;
+		return ROOT_SCOPE_ID;
 	}
 
 	function handleDrop(e: DragEvent) {
@@ -398,30 +317,9 @@
 		);
 	}
 
-	/**
-	 * Deleting a `try` node leaves its inline try-lane/catch-lane nodes behind — xyflow's own
-	 * `deleteElements` only removes the node you selected plus edges touching it, not other nodes
-	 * that were merely tagged as "belonging" to it. Without this, they'd linger as stray
-	 * disconnected cards on the canvas (harmless for the DSL — `decomposeDisplayedScope` only ever
-	 * writes scopes actually reachable from the current view, so they'd never be serialized — but
-	 * visually messy) and their `scopes[...]` entries would leak forever. Only prunes try nodes
-	 * that belonged to the currently-viewed scope (a `try` placed inside another try's lane isn't
-	 * inlined recursively in this pass, so its scopes/lane nodes are left alone here too).
-	 */
-	function handleElementsDeleted(payload: { nodes: Node[]; edges: Edge[] }) {
-		const deletedTryIds = payload.nodes
-			.filter(
-				(n) =>
-					n.type === 'try' &&
-					(n.data as Record<string, unknown> | undefined)?.[OWNER_SCOPE_TAG] === currentScopeId
-			)
-			.map((n) => n.id);
-		if (deletedTryIds.length === 0) return;
-
-		const orphanScopeKeys = deletedTryIds.flatMap((tryId) => [
-			tryScopeKey(currentScopeId, tryId),
-			catchScopeKey(currentScopeId, tryId)
-		]);
+	/** Removes every scope key in `orphanScopeKeys` plus any now-orphaned lane nodes/edges still on the canvas. */
+	function pruneOrphanedScopes(orphanScopeKeys: string[]) {
+		if (orphanScopeKeys.length === 0) return;
 
 		const orphanNodeIds = nodes
 			.filter((n) =>
@@ -440,6 +338,36 @@
 		const next = { ...scopes };
 		for (const key of orphanScopeKeys) delete next[key];
 		scopes = next;
+	}
+
+	/**
+	 * Deleting a container node (`for`/`try`/`fork`/bare-`do`) leaves its inline lane nodes behind —
+	 * xyflow's own `deleteElements` only removes the node you selected plus edges touching it, not
+	 * other nodes that were merely tagged as "belonging" to it. Without this, they'd linger as
+	 * stray disconnected cards on the canvas (harmless for the DSL — `decomposeDisplayedScope` only
+	 * ever writes scopes actually reachable from the current view, so they'd never be serialized —
+	 * but visually messy) and their `scopes[...]` entries would leak forever. Recurses through every
+	 * descendant lane (a fork branch containing a nested for-loop, etc.), at any nesting depth.
+	 */
+	function handleElementsDeleted(payload: { nodes: Node[]; edges: Edge[] }) {
+		const orphanScopeKeys = payload.nodes.flatMap((n) => {
+			const ownerScopeId = (n.data as Record<string, unknown> | undefined)?.[OWNER_SCOPE_TAG] as
+				string | undefined;
+			if (!ownerScopeId) return [];
+			return collectDescendantScopeKeysForNode(n, ownerScopeId, nodes);
+		});
+		pruneOrphanedScopes(orphanScopeKeys);
+	}
+
+	/** A `fork` branch was removed (not the whole node) — prune just that branch's scope + descendants. */
+	function handleRemoveBranch(forkNodeId: string, branchId: string) {
+		const forkNode = nodes.find((n) => n.id === forkNodeId);
+		const ownerScopeId = (forkNode?.data as Record<string, unknown> | undefined)?.[
+			OWNER_SCOPE_TAG
+		] as string | undefined;
+		if (!ownerScopeId) return;
+		const laneKey = forkBranchScopeKey(ownerScopeId, forkNodeId, branchId);
+		pruneOrphanedScopes(collectDescendantScopeKeysForLaneKey(laneKey, nodes));
 	}
 
 	function handleSave() {
@@ -503,29 +431,6 @@
 		</button>
 	</header>
 
-	<!-- Breadcrumb — visible once drilled into a nested scope (For/Fork-branch/Try/Catch body) -->
-	{#if scopeStack.length > 1}
-		<div
-			class="bg-base-100 border-base-300 flex h-8 shrink-0 items-center gap-1 border-b px-3 text-xs"
-		>
-			{#each scopeStack as sid, i (sid)}
-				<button
-					type="button"
-					class="hover:text-primary shrink-0 {i === scopeStack.length - 1
-						? 'text-base-content font-semibold'
-						: 'text-base-content/50'}"
-					disabled={i === scopeStack.length - 1}
-					onclick={() => goToBreadcrumb(i)}
-				>
-					{scopeLabels[sid] ?? sid}
-				</button>
-				{#if i < scopeStack.length - 1}
-					<ChevronRight size={12} class="text-base-content/30 shrink-0" />
-				{/if}
-			{/each}
-		</div>
-	{/if}
-
 	<!-- Main area: palette | canvas | resize-handle | node panel -->
 	<div class="flex min-h-0 flex-1">
 		<!-- Node palette (left, collapsible) -->
@@ -575,11 +480,10 @@
 				{nodes}
 				{edges}
 				{workflowMeta}
-				scopeId={currentScopeId}
 				width={panelWidth}
 				onclose={() => (configNodeId = null)}
 				onupdate={updateNodeData}
-				ondrillin={drillInto}
+				onremovebranch={handleRemoveBranch}
 			/>
 		{/if}
 	</div>
@@ -632,12 +536,6 @@
 					>
 				</div>
 			</div>
-
-			{#if dslSyncNotice}
-				<div class="alert alert-info mb-2 shrink-0 py-1.5 text-xs">
-					<span>{dslSyncNotice}</span>
-				</div>
-			{/if}
 
 			<div class="border-base-300 min-h-0 flex-1 overflow-hidden rounded-lg border">
 				<CodeMirrorEditor

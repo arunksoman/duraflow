@@ -23,14 +23,15 @@
 		getBezierPath({ sourceX, sourceY, sourcePosition, targetX, targetY, targetPosition })
 	);
 
-	// Synthetic "try"/"catch" labeled edges (see inlineTryView.ts) are computed fresh on every
-	// render, not stored — they must never be draggable-to-reconnect, since that would let a user
-	// "detach" a try/catch body from its try node in a way the DSL can't represent. `deletable`/
+	// Synthetic inline-lane edges (see inlineScopeView.ts — "body"/"try"/"catch"/branch-name entry
+	// edges, plus try's relocated continuation edge) are computed fresh on every render, not
+	// stored — they must never be draggable-to-reconnect, since that would let a user "detach" a
+	// nested body from its owning node in a way the DSL can't represent. `deletable`/
 	// `selectable: false` (set on the edge itself) already block delete/select; reconnect isn't a
 	// per-edge field on this xyflow version, so it's blocked here instead by simply not rendering
 	// the reconnect anchors for tagged edges.
 	const isSynthetic = $derived(
-		Boolean((data as Record<string, unknown> | undefined)?.syntheticTryEdge)
+		Boolean((data as Record<string, unknown> | undefined)?.syntheticScopeEdge)
 	);
 </script>
 

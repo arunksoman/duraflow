@@ -61,9 +61,6 @@ export interface DataFlow {
 
 const EMPTY_FLOW: DataFlow = { if: '', outputAs: '', exportAs: '' };
 
-/** Marks which node types have a drill-in nested scope, and what shape it is. */
-export type NestedScopeKind = 'do' | 'try-catch' | 'fork-branches';
-
 export interface NodeMeta {
 	label: string;
 	description: string;
@@ -72,8 +69,6 @@ export interface NodeMeta {
 	category: 'action' | 'control' | 'event' | 'structure' | 'terminal';
 	showInPalette: boolean;
 	defaultData: Record<string, unknown>;
-	/** Undefined = no drill-in scope (most node types). */
-	nestedScopes?: NestedScopeKind;
 }
 
 export const NODE_META: Record<WorkflowNodeType, NodeMeta> = {
@@ -147,7 +142,6 @@ export const NODE_META: Record<WorkflowNodeType, NodeMeta> = {
 		color: '#14b8a6',
 		category: 'control',
 		showInPalette: true,
-		nestedScopes: 'do',
 		defaultData: {
 			label: 'For Each',
 			each: 'item',
@@ -164,7 +158,6 @@ export const NODE_META: Record<WorkflowNodeType, NodeMeta> = {
 		color: '#f97316',
 		category: 'control',
 		showInPalette: true,
-		nestedScopes: 'fork-branches',
 		defaultData: { label: 'Fork', compete: false, branches: [] as BranchEntry[], ...EMPTY_FLOW }
 	},
 	try: {
@@ -174,7 +167,6 @@ export const NODE_META: Record<WorkflowNodeType, NodeMeta> = {
 		color: '#ef4444',
 		category: 'control',
 		showInPalette: true,
-		nestedScopes: 'try-catch',
 		defaultData: { label: 'Try', catchAs: 'error', ...EMPTY_FLOW }
 	},
 	wait: {
@@ -252,7 +244,6 @@ export const NODE_META: Record<WorkflowNodeType, NodeMeta> = {
 		color: '#64748b',
 		category: 'control',
 		showInPalette: false,
-		nestedScopes: 'do',
 		defaultData: { label: 'Do', ...EMPTY_FLOW }
 	},
 	childWorkflow: {

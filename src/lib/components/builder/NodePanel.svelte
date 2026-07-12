@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { untrack } from 'svelte';
 	import type { Node, Edge } from '@xyflow/svelte';
-	import { Plus, Trash2, X, ArrowRight } from '@lucide/svelte';
+	import { Plus, Trash2, X } from '@lucide/svelte';
 	import type { WorkflowMeta } from '$lib/types';
 	import { NODE_META } from './builderConfig';
 	import type { VarEntry, CaseEntry, EventEntry, BranchEntry } from './builderConfig';
@@ -9,20 +9,17 @@
 	import ExpressionInput, { type AvailVar } from './ExpressionInput.svelte';
 	import ConditionBuilder from './ConditionBuilder.svelte';
 	import CodeMirrorEditor from '$lib/components/editor/CodeMirrorEditor.svelte';
-	import { forScopeKey, forkBranchScopeKey } from '$lib/zigflow-engine/scopeKey';
 
 	interface Props {
 		node: Node;
 		nodes: Node[];
 		edges: Edge[];
 		workflowMeta: WorkflowMeta;
-		/** The drill-in scope this panel's node lives in — used to compute nested scope keys. */
-		scopeId: string;
 		width?: number;
 		onclose: () => void;
 		onupdate: (id: string, patch: Record<string, unknown>) => void;
-		/** Push a new scope onto the breadcrumb stack, e.g. from a For/Try/Fork-branch "edit body" button. */
-		ondrillin: (childScopeId: string, label: string) => void;
+		/** A `fork` branch was removed — the parent must prune its scope (and any descendants). */
+		onremovebranch: (forkNodeId: string, branchId: string) => void;
 	}
 
 	let {
@@ -30,11 +27,10 @@
 		nodes,
 		edges,
 		workflowMeta,
-		scopeId,
 		width = 340,
 		onclose,
 		onupdate,
-		ondrillin
+		onremovebranch
 	}: Props = $props();
 
 	const nodeType = $derived<WorkflowNodeType>(
@@ -217,8 +213,10 @@
 		saveBranches();
 	}
 	function removeBranch(i: number) {
+		const removed = localBranches[i];
 		localBranches = localBranches.filter((_, j) => j !== i);
 		saveBranches();
+		onremovebranch(node.id, removed.id);
 	}
 	function updateBranchName(i: number, name: string) {
 		localBranches = localBranches.map((b, j) => (j === i ? { ...b, name } : b));
@@ -753,14 +751,9 @@
 						onchange={(v) => patch('while', v)}
 					/>
 				</div>
-				<button
-					type="button"
-					class="btn btn-sm btn-outline gap-1.5"
-					onclick={() =>
-						ondrillin(forScopeKey(scopeId, node.id), `${f('label') || 'For Each'} → body`)}
-				>
-					Edit loop body <ArrowRight size={12} />
-				</button>
+				<p class="text-base-content/30 text-[9px]">
+					The loop body is shown inline on the canvas, connected to this node.
+				</p>
 			{/if}
 
 			<!-- ── FORK ───────────────────────────────────────────────── -->
@@ -797,17 +790,6 @@
 									oninput={(e) => updateBranchName(i, (e.target as HTMLInputElement).value)}
 								/>
 								<button
-									type="button"
-									class="btn btn-ghost btn-xs gap-1"
-									onclick={() =>
-										ondrillin(
-											forkBranchScopeKey(scopeId, node.id, b.id),
-											`${f('label') || 'Fork'} → ${b.name}`
-										)}
-								>
-									Edit body <ArrowRight size={10} />
-								</button>
-								<button
 									class="btn btn-ghost btn-xs btn-circle text-error shrink-0"
 									onclick={() => removeBranch(i)}
 									aria-label="Remove branch"
@@ -818,7 +800,8 @@
 						{/each}
 					{/if}
 					<p class="text-base-content/30 text-[9px]">
-						Each branch runs concurrently as its own child workflow.
+						Each branch runs concurrently as its own child workflow. Every branch's body is shown
+						inline on the canvas, connected to this node.
 					</p>
 				</div>
 			{/if}
@@ -1187,13 +1170,9 @@
 
 			<!-- ── DO (grouping — usually only seen from hand-written DSL) ──── -->
 			{#if nodeType === 'do'}
-				<button
-					type="button"
-					class="btn btn-sm btn-outline gap-1.5"
-					onclick={() => ondrillin(forScopeKey(scopeId, node.id), `${f('label') || 'Do'} → body`)}
-				>
-					Edit body <ArrowRight size={12} />
-				</button>
+				<p class="text-base-content/30 py-2 text-center text-xs">
+					This group's body is shown inline on the canvas, connected to this node.
+				</p>
 			{/if}
 
 			<!-- ── END ────────────────────────────────────────────────── -->
