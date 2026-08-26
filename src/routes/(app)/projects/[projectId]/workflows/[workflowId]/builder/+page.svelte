@@ -454,6 +454,7 @@
 				{nodeTypes}
 				{edgeTypes}
 				fitView
+				fitViewOptions={{ maxZoom: 1.2 }}
 				style="width: 100%; height: 100%;"
 				deleteKey={['Delete', 'Backspace']}
 				onnodeclick={handleNodeClick}
