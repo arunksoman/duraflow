@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { astToGraph, graphToAst } from './graph';
+import type { WorkflowGraph } from './graph';
 import { serializeZigflowDocument } from './serialize';
 import { deserializeZigflowDocument } from './deserialize';
 import {
@@ -164,6 +165,47 @@ describe('astToGraph', () => {
 		const cases = switchNode.data?.cases as { then: string }[];
 		expect(cases[0].then).toBe(shipItNode.id);
 		expect(cases[1].then).toBe('end');
+	});
+	it('preserves a bare `for` fork branch instead of silently discarding its for/while wrapper', () => {
+		const doc: ZigflowDocument = {
+			document: header(),
+			do: [
+				{
+					parallel: {
+						fork: {
+							branches: [
+								{
+									loopbranch: {
+										for: { each: 'item', at: 'index', in: '${ $input.items }' },
+										do: [{ step: { set: { seen: '${ $data.item }' } } }]
+									}
+								}
+							]
+						}
+					}
+				}
+			]
+		};
+		const { graph, header: hdr } = astToGraph(doc);
+		const forkNode = graph.scopes[ROOT_SCOPE_ID].nodes.find((n) => n.type === 'fork')!;
+		const branches = forkNode.data?.branches as { id: string; name: string }[];
+		const branchScope =
+			graph.scopes[forkBranchScopeKey(ROOT_SCOPE_ID, forkNode.id, branches[0].id)];
+		// Before the fix, `'do' in branchTask` also matched the `for` task (it carries its own `do`
+		// body), so the branch silently collapsed to just its inner `set` node.
+		expect(branchScope.nodes.map((n) => n.type)).toEqual(['for']);
+
+		const rebuilt = graphToAst(graph, hdr);
+		const forkTask = rebuilt.do[0].parallel as {
+			fork: { branches: Record<string, unknown>[] };
+		};
+		const [branchName, branchTask] = Object.entries(forkTask.fork.branches[0])[0];
+		expect(branchName).toBe('loopbranch');
+		// emitted bare, matching the original shape — not re-wrapped as `{ do: [{ loopbranch: {...} }] }`
+		expect(branchTask).toMatchObject({
+			for: { each: 'item', at: 'index', in: '${ $input.items }' },
+			do: [{ step: { set: { seen: '${ $data.item }' } } }]
+		});
 	});
 });
 
@@ -339,5 +381,113 @@ describe('graphToAst', () => {
 		const rebuilt = graphToAst(graph, hdr);
 		expect(rebuilt.input).toBeUndefined();
 		expect(serializeZigflowDocument(rebuilt)).not.toContain('input:');
+	});
+
+	it('round-trips per-task metadata and input/output/export schema instead of dropping them', () => {
+		const doc: ZigflowDocument = {
+			document: header(),
+			do: [
+				{
+					charge: {
+						metadata: { activityOptions: { retryPolicy: { maximumAttempts: 3 } } },
+						input: {
+							schema: {
+								format: 'json',
+								document: { type: 'object', properties: { amount: { type: 'number' } } }
+							}
+						},
+						output: {
+							as: '${ . }',
+							schema: { format: 'json', document: { type: 'object' } }
+						},
+						export: {
+							as: '${ $context }',
+							schema: { format: 'json', document: { type: 'object' } }
+						},
+						set: { charged: 'yes' }
+					}
+				}
+			]
+		};
+		const { graph, header: hdr } = astToGraph(doc);
+		const rebuilt = graphToAst(graph, hdr);
+		expect(rebuilt.do[0]).toEqual(doc.do[0]);
+	});
+
+	it('round-trips run.container/script/shell fields beyond image/pullPolicy/command/language/code', () => {
+		const doc: ZigflowDocument = {
+			document: header(),
+			do: [
+				{
+					build: {
+						run: {
+							container: {
+								image: 'alpine:latest',
+								pullPolicy: 'always',
+								name: 'builder',
+								command: 'make build',
+								volumes: { '/data': 'shared-volume' },
+								environment: { CI: 'true' },
+								arguments: ['--flag'],
+								lifetime: { cleanup: 'always' }
+							}
+						}
+					}
+				},
+				{
+					runscript: {
+						run: {
+							script: {
+								language: 'python',
+								source: { endpoint: 'https://example.com/script.py' },
+								environment: { PYTHONPATH: '/app' },
+								arguments: ['--verbose']
+							}
+						}
+					}
+				},
+				{
+					runshell: {
+						run: {
+							shell: { command: 'echo hi', environment: { FOO: 'bar' }, arguments: ['a', 'b'] }
+						}
+					}
+				}
+			]
+		};
+		const { graph, header: hdr } = astToGraph(doc);
+		const rebuilt = graphToAst(graph, hdr);
+		expect(rebuilt.do[0]).toEqual(doc.do[0]);
+		expect(rebuilt.do[1]).toEqual(doc.do[1]);
+		expect(rebuilt.do[2]).toEqual(doc.do[2]);
+	});
+
+	it('falls back an unresolvable switch `then` to `continue` instead of emitting a raw node id', () => {
+		const graph: WorkflowGraph = {
+			scopes: {
+				[ROOT_SCOPE_ID]: {
+					nodes: [
+						{
+							id: 'node-switch',
+							type: 'switch',
+							position: { x: 0, y: 0 },
+							data: {
+								label: 'route',
+								cases: [{ name: 'case1', condition: '', then: 'node-outside-this-scope' }]
+							}
+						}
+					],
+					edges: []
+				}
+			}
+		};
+		const rebuilt = graphToAst(graph, {
+			workflowType: 'w',
+			taskQueue: 'zigflow',
+			version: '0.1.0'
+		});
+		const switchTask = rebuilt.do[0].route as { switch: Record<string, { then: string }>[] };
+		const [, body] = Object.entries(switchTask.switch[0])[0];
+		expect(body.then).toBe('continue');
 	});
 });

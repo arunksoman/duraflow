@@ -85,6 +85,30 @@ interface JsonSchemaProperty {
 	items?: { type?: string };
 }
 
+/** Best-effort JSON parse for opaque round-tripped fields (task `metadata`, `input`/`output`/`export`
+ * `.schema`, container `volumes`) — invalid/empty text is treated as "not set" rather than thrown. */
+function parseJsonField(raw: string | undefined): Record<string, unknown> | undefined {
+	const trimmed = (raw ?? '').trim();
+	if (!trimmed) return undefined;
+	try {
+		return JSON.parse(trimmed) as Record<string, unknown>;
+	} catch {
+		return undefined;
+	}
+}
+
+function stringifyJsonField(value: unknown): string {
+	return value !== undefined ? JSON.stringify(value) : '';
+}
+
+/** `run.{container,shell,script}` `arguments` — a UI-friendly one-per-line string, stored as an array in the DSL. */
+function argsFromText(raw: string | undefined): string[] {
+	return (raw ?? '')
+		.split('\n')
+		.map((s) => s.trim())
+		.filter(Boolean);
+}
+
 /** Inverse of `stringifyInputSchema` — the document-level `input.schema` -> the Start node's flat field-list UI model. */
 function parseInputSchema(input: InputConfig | undefined): InputField[] {
 	const doc = input?.schema?.document as
@@ -209,18 +233,11 @@ function nodeToTask(
 		case 'raise':
 			return { ...base, raise: raiseFromData(data) };
 		case 'run': {
+			// `run.workflow` tasks are exclusively authored via the dedicated `childWorkflow` node
+			// (below) — `taskKindToNodeType` always loads any `run.workflow` task back as that node
+			// type, never as `run`, so a `runType === 'workflow'` branch here was a dead end that could
+			// never round-trip back to itself. See `case 'childWorkflow'`.
 			const runType = (data.runType as string) ?? 'script';
-			if (runType === 'workflow') {
-				return {
-					...base,
-					run: {
-						workflow: definedEntries({
-							type: (data.workflowType as string) || 'child-workflow-type'
-						}) as never
-					},
-					...(data.await === false ? { await: false } : {})
-				};
-			}
 			return {
 				...base,
 				run: runConfigFromData(runType, data),
@@ -263,7 +280,18 @@ function nodeToTask(
 			const branches = (data.branches as BranchEntry[]) ?? [];
 			const branchList: TaskList = branches.map((b) => {
 				const childScope = forkBranchScopeKey(scopeId, node.id, b.id);
-				return { [toSlug(b.name) || 'branch']: { do: scopeToTaskList(graph, childScope) } };
+				const branchName = toSlug(b.name) || 'branch';
+				const body = scopeToTaskList(graph, childScope);
+				// A branch scope holding exactly one task named identically to the branch itself is how
+				// a bare (non-`do`-wrapped) branch task round-trips — e.g. a branch that's just a `for`
+				// or `run` task, not a `do:` grouping. Emitting it bare here mirrors the load-side
+				// detection in `dataFromTask`'s fork case below; anything else falls back to the
+				// conventional `{ do: [...] }` wrapper.
+				if (body.length === 1) {
+					const [taskName, task] = Object.entries(body[0])[0];
+					if (taskName === branchName) return { [branchName]: task };
+				}
+				return { [branchName]: { do: body } };
 			});
 			const forkTask: ForkTask = {
 				...base,
@@ -313,10 +341,27 @@ function taskBaseFromData(data: Record<string, unknown>): Record<string, unknown
 	const ifExpr = ((data.if as string) ?? '').trim();
 	const outputAs = parseAsField((data.outputAs as string) ?? '');
 	const exportAs = parseAsField((data.exportAs as string) ?? '');
+	// `metadata`/`input.schema`/`output.schema`/`export.schema` have no dedicated editor UI yet —
+	// round-tripped opaquely (via *ToData below) so hand-authored DSL loaded then re-saved from the
+	// canvas doesn't silently lose them.
+	const metadata = parseJsonField(data.metadataJson as string);
+	const inputSchema = parseJsonField(data.inputSchemaJson as string);
+	const outputSchema = parseJsonField(data.outputSchemaJson as string);
+	const exportSchema = parseJsonField(data.exportSchemaJson as string);
+	const output = {
+		...(outputAs !== undefined ? { as: outputAs } : {}),
+		...(outputSchema ? { schema: outputSchema } : {})
+	};
+	const exportCfg = {
+		...(exportAs !== undefined ? { as: exportAs } : {}),
+		...(exportSchema ? { schema: exportSchema } : {})
+	};
 	return {
 		...(ifExpr ? { if: ifExpr } : {}),
-		...(outputAs !== undefined ? { output: { as: outputAs } } : {}),
-		...(exportAs !== undefined ? { export: { as: exportAs } } : {})
+		...(inputSchema ? { input: { schema: inputSchema } } : {}),
+		...(Object.keys(output).length > 0 ? { output } : {}),
+		...(Object.keys(exportCfg).length > 0 ? { export: exportCfg } : {}),
+		...(metadata ? { metadata } : {})
 	};
 }
 
@@ -343,7 +388,13 @@ function setMapFromData(data: Record<string, unknown>): Record<string, unknown> 
 
 function resolveThenToAst(thenVal: string, idToName: Map<string, string>): FlowDirective {
 	if (thenVal === 'continue' || thenVal === 'exit' || thenVal === 'end') return thenVal;
-	return idToName.get(thenVal) ?? (thenVal || 'continue');
+	const resolved = idToName.get(thenVal);
+	if (resolved) return resolved;
+	// `thenVal` is an internal canvas node-id, not a real task name — either it was never a valid
+	// node-id reference, or (schema requires `then` targets stay within the same scope/depth) it
+	// points at a node outside this switch's own scope. Emitting the raw id would produce invalid
+	// DSL a Temporal worker can't resolve; falling back to `continue` keeps the workflow valid.
+	return 'continue';
 }
 
 function switchCasesFromData(
@@ -404,21 +455,49 @@ function raiseFromData(data: Record<string, unknown>) {
 }
 
 function runConfigFromData(runType: string, data: Record<string, unknown>): RunConfig {
+	const environment = recordFromEntries(
+		((data.environment as VarEntry[]) ?? []).filter((e) => e.key)
+	) as Record<string, string>;
+	const argumentsList = argsFromText(data.arguments as string);
+	const envEntry = Object.keys(environment).length > 0 ? { environment } : {};
+	const argsEntry = argumentsList.length > 0 ? { arguments: argumentsList } : {};
+
 	if (runType === 'container') {
+		const volumes = parseJsonField(data.volumesJson as string);
+		const cleanup = ((data.lifetimeCleanup as string) ?? '').trim();
+		const command = ((data.command as string) ?? '').trim();
+		const name = ((data.containerName as string) ?? '').trim();
 		return {
 			container: {
 				image: (data.image as string) || 'alpine:latest',
-				pullPolicy: ((data.pullPolicy as PullPolicy) || 'ifNotPresent') as PullPolicy
+				pullPolicy: ((data.pullPolicy as PullPolicy) || 'ifNotPresent') as PullPolicy,
+				...(name ? { name } : {}),
+				...(command ? { command } : {}),
+				...(volumes ? { volumes } : {}),
+				...envEntry,
+				...argsEntry,
+				...(cleanup ? { lifetime: { cleanup: cleanup as 'always' | 'never' } } : {})
 			}
 		};
 	}
 	if (runType === 'shell') {
-		return { shell: { command: (data.command as string) || 'echo hello' } };
+		return {
+			shell: {
+				command: (data.command as string) || 'echo hello',
+				...envEntry,
+				...argsEntry
+			}
+		};
 	}
+	const sourceEndpoint = ((data.sourceEndpoint as string) ?? '').trim();
 	return {
 		script: {
 			language: ((data.language as 'js' | 'python') || 'js') as 'js' | 'python',
-			code: (data.code as string) ?? ''
+			...(sourceEndpoint
+				? { source: { endpoint: sourceEndpoint } }
+				: { code: (data.code as string) ?? '' }),
+			...envEntry,
+			...argsEntry
 		}
 	};
 }
@@ -528,6 +607,26 @@ function buildScope(list: TaskList, scopeId: string, scopesOut: Record<string, S
 	scopesOut[scopeId] = { nodes, edges };
 }
 
+const TASK_DISCRIMINATOR_KEYS = [
+	'call',
+	'for',
+	'fork',
+	'listen',
+	'raise',
+	'run',
+	'set',
+	'switch',
+	'try',
+	'wait'
+] as const;
+
+/** True only for `{ do: taskList }` — a `for` task also has a `do` key (its body), so a real
+ * discriminator key present alongside `do` means this is a bare typed task, not the `do:` grouping
+ * convention used to author a fork/branch body directly as a list. */
+function isBareDoWrapper(task: TaskNode): task is TaskNode & { do: TaskList } {
+	return 'do' in task && !TASK_DISCRIMINATOR_KEYS.some((k) => k in task);
+}
+
 function taskKindToNodeType(task: TaskNode): WorkflowNodeType {
 	if ('call' in task) return 'call';
 	if ('for' in task) return 'for';
@@ -580,7 +679,13 @@ function dataFromTask(
 		const branches: BranchEntry[] = task.fork.branches.map((entry) => {
 			const [branchName, branchTask] = Object.entries(entry)[0];
 			const id = crypto.randomUUID();
-			const branchList = 'do' in branchTask ? branchTask.do : [{ [branchName]: branchTask }];
+			// A branch is the `{ do: [...] }` grouping convention only when `do` is its *sole*
+			// discriminator key — a `for` task also carries a `do` key (its body), so checking
+			// `'do' in branchTask` alone wrongly unwraps a bare-`for` branch and silently drops its
+			// `for`/`while` wrapper. Any other real task type present means this is a bare task branch.
+			const branchList = isBareDoWrapper(branchTask)
+				? branchTask.do
+				: [{ [branchName]: branchTask }];
 			buildScope(branchList, forkBranchScopeKey(scopeId, nodeId, id), scopesOut);
 			return { id, name: branchName };
 		});
@@ -620,7 +725,11 @@ function taskBaseToData(task: TaskNode): Record<string, unknown> {
 	return {
 		if: task.if ?? '',
 		outputAs: stringifyAsField(task.output?.as),
-		exportAs: stringifyAsField(task.export?.as)
+		exportAs: stringifyAsField(task.export?.as),
+		metadataJson: stringifyJsonField(task.metadata),
+		inputSchemaJson: stringifyJsonField(task.input?.schema),
+		outputSchemaJson: stringifyJsonField(task.output?.schema),
+		exportSchemaJson: stringifyJsonField(task.export?.schema)
 	};
 }
 
@@ -688,18 +797,36 @@ function raiseDataFromTask(task: RaiseTask): Record<string, unknown> {
 function runDataFromTask(task: RunTask): Record<string, unknown> {
 	const run = task.run;
 	if ('container' in run) {
+		const c = run.container;
 		return {
 			runType: 'container',
-			image: run.container.image,
-			pullPolicy: run.container.pullPolicy,
-			command: run.container.command ?? ''
+			image: c.image,
+			pullPolicy: c.pullPolicy,
+			command: c.command ?? '',
+			containerName: c.name ?? '',
+			environment: entriesFromRecord(c.environment),
+			arguments: (c.arguments ?? []).join('\n'),
+			volumesJson: stringifyJsonField(c.volumes),
+			lifetimeCleanup: c.lifetime?.cleanup ?? ''
 		};
 	}
 	if ('shell' in run) {
-		return { runType: 'shell', command: run.shell.command };
+		return {
+			runType: 'shell',
+			command: run.shell.command,
+			environment: entriesFromRecord(run.shell.environment),
+			arguments: (run.shell.arguments ?? []).join('\n')
+		};
 	}
 	if ('script' in run) {
-		return { runType: 'script', language: run.script.language, code: run.script.code ?? '' };
+		return {
+			runType: 'script',
+			language: run.script.language,
+			code: run.script.code ?? '',
+			sourceEndpoint: run.script.source?.endpoint ?? '',
+			environment: entriesFromRecord(run.script.environment),
+			arguments: (run.script.arguments ?? []).join('\n')
+		};
 	}
 	return { runType: 'script', language: 'js', code: '' };
 }

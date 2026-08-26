@@ -9,6 +9,7 @@
 	import ExpressionInput, { type AvailVar } from './ExpressionInput.svelte';
 	import ConditionBuilder from './ConditionBuilder.svelte';
 	import CodeMirrorEditor from '$lib/components/editor/CodeMirrorEditor.svelte';
+	import { OWNER_SCOPE_TAG } from '$lib/zigflow-engine/inlineScopeView';
 
 	interface Props {
 		node: Node;
@@ -84,6 +85,13 @@
 		)
 	);
 	let runType = $state<string>(untrack(() => (node?.data?.runType as string) ?? 'script'));
+	let localRunEnv = $state<VarEntry[]>(
+		untrack(() =>
+			Array.isArray(node?.data?.environment)
+				? (node.data.environment as VarEntry[]).map((e) => ({ ...e }))
+				: []
+		)
+	);
 	let bodyRawMode = $state(false);
 	let waitMode = $state<string>(untrack(() => (node?.data?.waitMode as string) ?? 'duration'));
 	// Backs the Start node's `$input` schema editor — lives on `workflowMeta`, not this node's own
@@ -107,6 +115,48 @@
 	}
 	function patch(key: string, value: unknown) {
 		onupdate(node.id, { [key]: value });
+	}
+
+	// ── activity options (metadata.activityOptions: heartbeat, retries) ────
+	// Structural editing over the opaque `metadataJson` blob — only the fields below are ever
+	// read/written here, any other hand-authored metadata key is preserved untouched.
+
+	function metadataObj(): Record<string, unknown> {
+		try {
+			return JSON.parse(f('metadataJson') || '{}') as Record<string, unknown>;
+		} catch {
+			return {};
+		}
+	}
+	function activityOptionsObj(): Record<string, unknown> {
+		return (metadataObj().activityOptions as Record<string, unknown>) ?? {};
+	}
+	function retryPolicyObj(): Record<string, unknown> {
+		return (activityOptionsObj().retryPolicy as Record<string, unknown>) ?? {};
+	}
+	function patchActivityOption(key: string, value: unknown) {
+		const m = metadataObj();
+		const ao = { ...activityOptionsObj() };
+		if (value === undefined) delete ao[key];
+		else ao[key] = value;
+		const merged: Record<string, unknown> = { ...m };
+		if (Object.keys(ao).length > 0) merged.activityOptions = ao;
+		else delete merged.activityOptions;
+		patch('metadataJson', Object.keys(merged).length > 0 ? JSON.stringify(merged) : '');
+	}
+	function patchRetryPolicy(key: string, value: unknown) {
+		const rp = { ...retryPolicyObj() };
+		if (value === undefined) delete rp[key];
+		else rp[key] = value;
+		patchActivityOption('retryPolicy', Object.keys(rp).length > 0 ? rp : undefined);
+	}
+	function durationSeconds(rec: Record<string, unknown>, key: string): string {
+		const v = rec[key] as { seconds?: number } | undefined;
+		return typeof v?.seconds === 'number' ? String(v.seconds) : '';
+	}
+	function parseSeconds(raw: string): number | undefined {
+		const n = Number(raw.trim());
+		return raw.trim() !== '' && !Number.isNaN(n) ? n : undefined;
 	}
 
 	// ── array editors ─────────────────────────────────────────────────
@@ -188,6 +238,25 @@
 	function updateQuery(i: number, k: keyof VarEntry, v: string) {
 		localQuery = localQuery.map((q, j) => (j === i ? { ...q, [k]: v } : q));
 		saveQuery();
+	}
+
+	function saveRunEnv() {
+		patch(
+			'environment',
+			localRunEnv.map((e) => ({ ...e }))
+		);
+	}
+	function addRunEnv() {
+		localRunEnv = [...localRunEnv, { key: '', value: '' }];
+		saveRunEnv();
+	}
+	function removeRunEnv(i: number) {
+		localRunEnv = localRunEnv.filter((_, j) => j !== i);
+		saveRunEnv();
+	}
+	function updateRunEnv(i: number, k: keyof VarEntry, v: string) {
+		localRunEnv = localRunEnv.map((e, j) => (j === i ? { ...e, [k]: v } : e));
+		saveRunEnv();
 	}
 
 	function saveEvents() {
@@ -387,8 +456,18 @@
 			{ value: 'end', label: 'end — terminate workflow' },
 			{ value: 'exit', label: 'exit — leave current scope' }
 		];
+		// A `switch` case's `then` can only target a task in the same scope/nesting depth as the
+		// switch itself (Zigflow spec) — the canvas renders every scope inlined as one flat node
+		// list, so without this filter the dropdown would offer nodes the DSL can never actually
+		// reach, silently producing an invalid `then` reference on save.
+		const ownScope = (node.data as Record<string, unknown> | undefined)?.[OWNER_SCOPE_TAG];
 		const nodeOptions = nodes
-			.filter((n) => n.id !== node.id && n.type !== 'start')
+			.filter(
+				(n) =>
+					n.id !== node.id &&
+					n.type !== 'start' &&
+					(n.data as Record<string, unknown> | undefined)?.[OWNER_SCOPE_TAG] === ownScope
+			)
 			.map((n) => ({
 				value: n.id,
 				label: `${n.data?.label ?? n.type} (${n.type})`
@@ -1152,8 +1231,10 @@
 						<option value="script">Script (JS / Python)</option>
 						<option value="shell">Shell command</option>
 						<option value="container">Container</option>
-						<option value="workflow">Child Workflow</option>
 					</select>
+					<p class="text-base-content/30 pt-1 text-[10px]">
+						Need to run another workflow instead? Use a "Child Workflow" node.
+					</p>
 				</div>
 
 				{#if runType === 'script'}
@@ -1174,16 +1255,31 @@
 						</div>
 					</div>
 					<div class="flex flex-col gap-1">
-						<span class="text-base-content/50 text-[10px] font-semibold uppercase">Inline code</span
+						<label class="text-base-content/50 text-[10px] font-semibold uppercase" for="np-srcep"
+							>External source endpoint (optional — overrides inline code below)</label
 						>
-						<div class="border-base-300 h-40 overflow-hidden rounded-lg border">
-							<CodeMirrorEditor
-								value={f('code')}
-								language={(f('language') || 'js') === 'python' ? 'python' : 'javascript'}
-								onchange={(v) => patch('code', v)}
-							/>
-						</div>
+						<input
+							id="np-srcep"
+							class="input input-xs font-mono w-full"
+							placeholder="$env.SCRIPT_BASE + &quot;/script.js&quot;"
+							value={f('sourceEndpoint')}
+							oninput={(e) => patch('sourceEndpoint', (e.target as HTMLInputElement).value)}
+						/>
 					</div>
+					{#if !f('sourceEndpoint')}
+						<div class="flex flex-col gap-1">
+							<span class="text-base-content/50 text-[10px] font-semibold uppercase"
+								>Inline code</span
+							>
+							<div class="border-base-300 h-40 overflow-hidden rounded-lg border">
+								<CodeMirrorEditor
+									value={f('code')}
+									language={(f('language') || 'js') === 'python' ? 'python' : 'javascript'}
+									onchange={(v) => patch('code', v)}
+								/>
+							</div>
+						</div>
+					{/if}
 				{/if}
 
 				{#if runType === 'shell'}
@@ -1228,23 +1324,104 @@
 								<option value="never">never</option>
 							</select>
 						</div>
+						<div class="flex flex-col gap-1">
+							<label class="text-base-content/50 text-[10px] font-semibold uppercase" for="np-cname"
+								>Container name (optional)</label
+							>
+							<input
+								id="np-cname"
+								class="input input-xs font-mono w-full"
+								value={f('containerName')}
+								oninput={(e) => patch('containerName', (e.target as HTMLInputElement).value)}
+							/>
+						</div>
+						<div class="flex flex-col gap-1">
+							<span class="text-base-content/50 text-[10px] font-semibold uppercase">Command</span>
+							<div class="border-base-300 h-16 overflow-hidden rounded-lg border">
+								<CodeMirrorEditor
+									value={f('command')}
+									language="shell"
+									onchange={(v) => patch('command', v)}
+								/>
+							</div>
+						</div>
+						<div class="flex flex-col gap-1">
+							<label class="text-base-content/50 text-[10px] font-semibold uppercase" for="np-vols"
+								>Volumes (JSON object, optional)</label
+							>
+							<textarea
+								id="np-vols"
+								class="textarea textarea-xs font-mono w-full"
+								rows="2"
+								placeholder={'{ "/data": "shared-volume" }'}
+								value={f('volumesJson')}
+								oninput={(e) => patch('volumesJson', (e.target as HTMLTextAreaElement).value)}
+							></textarea>
+						</div>
+						<div class="flex flex-col gap-1">
+							<label class="text-base-content/50 text-[10px] font-semibold uppercase" for="np-life"
+								>Lifetime cleanup</label
+							>
+							<select
+								id="np-life"
+								class="select select-xs w-full"
+								value={f('lifetimeCleanup')}
+								onchange={(e) => patch('lifetimeCleanup', (e.target as HTMLSelectElement).value)}
+							>
+								<option value="">(default)</option>
+								<option value="always">always</option>
+								<option value="never">never</option>
+							</select>
+						</div>
 					</div>
 				{/if}
 
-				{#if runType === 'workflow'}
-					<div class="flex flex-col gap-2">
-						<div class="flex flex-col gap-1">
-							<label class="text-base-content/50 text-[10px] font-semibold uppercase" for="np-rwft"
-								>Workflow type</label
+				{#if runType === 'container' || runType === 'shell' || runType === 'script'}
+					<div class="flex flex-col gap-1">
+						<span class="text-base-content/50 text-[10px] font-semibold uppercase">Arguments</span>
+						<textarea
+							class="textarea textarea-xs font-mono w-full"
+							rows="2"
+							placeholder="one argument per line"
+							value={f('arguments')}
+							oninput={(e) => patch('arguments', (e.target as HTMLTextAreaElement).value)}
+						></textarea>
+					</div>
+
+					<div class="flex flex-col gap-1.5">
+						<div class="flex items-center justify-between">
+							<span class="text-base-content/50 text-[10px] font-semibold uppercase tracking-wider"
+								>Environment</span
 							>
-							<input
-								id="np-rwft"
-								class="input input-xs font-mono w-full"
-								placeholder="my-child-workflow"
-								value={f('workflowType')}
-								oninput={(e) => patch('workflowType', (e.target as HTMLInputElement).value)}
-							/>
+							<button class="btn btn-ghost btn-xs gap-1" onclick={addRunEnv}
+								><Plus size={9} />Add</button
+							>
 						</div>
+						{#each localRunEnv as e, i (i)}
+							<div class="flex items-start gap-1.5">
+								<input
+									class="input input-xs w-32 shrink-0 font-mono"
+									placeholder="VAR_NAME"
+									value={e.key}
+									oninput={(ev) => updateRunEnv(i, 'key', (ev.target as HTMLInputElement).value)}
+								/>
+								<div class="min-w-0 flex-1">
+									<ExpressionInput
+										value={e.value}
+										placeholder="value or expression"
+										availVars={availableVars}
+										onchange={(val) => updateRunEnv(i, 'value', val)}
+									/>
+								</div>
+								<button
+									class="btn btn-ghost btn-xs btn-circle text-error mt-0.5 shrink-0"
+									onclick={() => removeRunEnv(i)}
+									aria-label="Remove"
+								>
+									<Trash2 size={9} />
+								</button>
+							</div>
+						{/each}
 					</div>
 				{/if}
 			{/if}
@@ -1347,6 +1524,120 @@
 							Accumulated into $context — readable by any downstream task
 						</p>
 					</div>
+				</div>
+			</div>
+		{/if}
+		<!-- ── ACTIVITY OPTIONS (metadata.activityOptions) ──────────────── -->
+		{#if hasDataFlow}
+			<div class="border-base-200 border-t p-3">
+				<p class="text-base-content/50 mb-2 text-[10px] font-semibold uppercase tracking-wider">
+					Activity Options
+				</p>
+				<div class="flex flex-col gap-2">
+					<div class="flex flex-col gap-0.5">
+						<label class="text-base-content/40 font-mono text-[10px]" for="np-heartbeat"
+							>heartbeatTimeout (seconds)</label
+						>
+						<input
+							id="np-heartbeat"
+							type="number"
+							min="0"
+							class="input input-xs w-full font-mono"
+							placeholder="e.g. 30"
+							value={durationSeconds(activityOptionsObj(), 'heartbeatTimeout')}
+							oninput={(e) => {
+								const secs = parseSeconds((e.target as HTMLInputElement).value);
+								patchActivityOption(
+									'heartbeatTimeout',
+									secs !== undefined ? { seconds: secs } : undefined
+								);
+							}}
+						/>
+						<p class="text-base-content/25 text-[9px]">
+							A heartbeat must be sent before this interval passes, or the activity is considered
+							failed.
+						</p>
+					</div>
+					<p class="text-base-content/40 mt-1 font-mono text-[10px]">retryPolicy</p>
+					<div class="grid grid-cols-2 gap-1.5">
+						<div class="flex flex-col gap-0.5">
+							<label class="text-base-content/40 text-[9px]" for="np-rp-attempts"
+								>Max attempts</label
+							>
+							<input
+								id="np-rp-attempts"
+								type="number"
+								min="0"
+								class="input input-xs w-full font-mono"
+								placeholder="5"
+								value={(retryPolicyObj().maximumAttempts as number | undefined) ?? ''}
+								oninput={(e) => {
+									const n = parseSeconds((e.target as HTMLInputElement).value);
+									patchRetryPolicy('maximumAttempts', n !== undefined ? Math.trunc(n) : undefined);
+								}}
+							/>
+						</div>
+						<div class="flex flex-col gap-0.5">
+							<label class="text-base-content/40 text-[9px]" for="np-rp-backoff"
+								>Backoff coefficient</label
+							>
+							<input
+								id="np-rp-backoff"
+								type="number"
+								min="1"
+								step="0.1"
+								class="input input-xs w-full font-mono"
+								placeholder="2.0"
+								value={(retryPolicyObj().backoffCoefficient as number | undefined) ?? ''}
+								oninput={(e) => {
+									const n = parseSeconds((e.target as HTMLInputElement).value);
+									patchRetryPolicy('backoffCoefficient', n);
+								}}
+							/>
+						</div>
+						<div class="flex flex-col gap-0.5">
+							<label class="text-base-content/40 text-[9px]" for="np-rp-initial"
+								>Initial interval (s)</label
+							>
+							<input
+								id="np-rp-initial"
+								type="number"
+								min="0"
+								class="input input-xs w-full font-mono"
+								placeholder="1"
+								value={durationSeconds(retryPolicyObj(), 'initialInterval')}
+								oninput={(e) => {
+									const secs = parseSeconds((e.target as HTMLInputElement).value);
+									patchRetryPolicy(
+										'initialInterval',
+										secs !== undefined ? { seconds: secs } : undefined
+									);
+								}}
+							/>
+						</div>
+						<div class="flex flex-col gap-0.5">
+							<label class="text-base-content/40 text-[9px]" for="np-rp-max">Max interval (s)</label
+							>
+							<input
+								id="np-rp-max"
+								type="number"
+								min="0"
+								class="input input-xs w-full font-mono"
+								placeholder="100"
+								value={durationSeconds(retryPolicyObj(), 'maximumInterval')}
+								oninput={(e) => {
+									const secs = parseSeconds((e.target as HTMLInputElement).value);
+									patchRetryPolicy(
+										'maximumInterval',
+										secs !== undefined ? { seconds: secs } : undefined
+									);
+								}}
+							/>
+						</div>
+					</div>
+					<p class="text-base-content/25 text-[9px]">
+						Leave blank to use Temporal's defaults (5 attempts, 2x backoff).
+					</p>
 				</div>
 			</div>
 		{/if}
