@@ -15,11 +15,14 @@ import (
 
 	"duraflow/backend/internal/auth"
 	"duraflow/backend/internal/config"
+	"duraflow/backend/internal/temporalexec"
 )
 
 type Deps struct {
-	Cfg *config.Config
-	DB  *gorm.DB
+	Cfg      *config.Config
+	DB       *gorm.DB
+	Temporal *temporalexec.LazyClient
+	Workers  *temporalexec.WorkerManager
 }
 
 type ctxKey string

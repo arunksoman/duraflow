@@ -7,6 +7,9 @@ import (
 	"time"
 
 	"github.com/danielgtaylor/huma/v2"
+	"github.com/google/uuid"
+	"go.temporal.io/sdk/client"
+	"gopkg.in/yaml.v3"
 
 	"duraflow/backend/internal/models"
 )
@@ -23,6 +26,7 @@ type executionDTO struct {
 	Input             map[string]any         `json:"input,omitempty"`
 	Output            map[string]any         `json:"output,omitempty"`
 	ParentExecutionID *string                `json:"parentExecutionId,omitempty"`
+	TemporalRunID     string                 `json:"temporalRunId,omitempty"`
 }
 
 func toExecutionDTO(e models.Execution, workflowName string) executionDTO {
@@ -34,6 +38,7 @@ func toExecutionDTO(e models.Execution, workflowName string) executionDTO {
 		StartedAt:         e.StartedAt,
 		CompletedAt:       e.CompletedAt,
 		ParentExecutionID: e.ParentExecutionID,
+		TemporalRunID:     e.TemporalRunID,
 	}
 	if len(e.Input) > 0 {
 		_ = json.Unmarshal(e.Input, &dto.Input)
@@ -48,6 +53,24 @@ func workflowName(deps *Deps, ctx context.Context, workflowID string) string {
 	var workflow models.Workflow
 	deps.DB.WithContext(ctx).Select("name").First(&workflow, "id = ?", workflowID)
 	return workflow.Name
+}
+
+// dslDocumentHeader extracts just the `document.taskQueue`/`document.workflowType` fields a
+// Temporal client needs to start an execution — the same fields the zigflow-engine's DSL header
+// requires (see frontend's zigflow.schema.json), parsed here without pulling in the full engine.
+type dslDocumentHeader struct {
+	Document struct {
+		TaskQueue    string `yaml:"taskQueue"`
+		WorkflowType string `yaml:"workflowType"`
+	} `yaml:"document"`
+}
+
+func parseDSLHeader(dsl string) (taskQueue, workflowType string, err error) {
+	var doc dslDocumentHeader
+	if err := yaml.Unmarshal([]byte(dsl), &doc); err != nil {
+		return "", "", err
+	}
+	return doc.Document.TaskQueue, doc.Document.WorkflowType, nil
 }
 
 type listExecutionsInput struct {
@@ -111,20 +134,48 @@ func registerExecutionRoutes(api huma.API, deps *Deps, base string) {
 		Tags:          []string{"Executions"},
 		Security:      authSecurity(),
 		DefaultStatus: http.StatusCreated,
-		Errors:        []int{404},
+		Errors:        []int{404, 422, 502},
 	}, func(ctx context.Context, in *createExecutionInput) (*executionOutput, error) {
 		var wf models.Workflow
 		if err := deps.DB.WithContext(ctx).First(&wf, "id = ?", in.WorkflowID).Error; err != nil {
 			return nil, huma.Error404NotFound("workflow not found")
 		}
 
+		taskQueue, workflowType, err := parseDSLHeader(wf.DSL)
+		if err != nil || taskQueue == "" || workflowType == "" {
+			return nil, huma.Error422UnprocessableEntity(
+				"workflow has no valid document.taskQueue/document.workflowType to run — save a DSL first",
+			)
+		}
+
+		temporalClient, err := deps.Temporal.Get()
+		if err != nil {
+			return nil, huma.Error502BadGateway("temporal is unreachable", err)
+		}
+
 		inputJSON, _ := json.Marshal(in.Body.Input)
 		execution := models.Execution{
+			Base:       models.Base{ID: uuid.NewString()},
 			WorkflowID: in.WorkflowID,
 			Status:     models.ExecutionRunning,
 			StartedAt:  time.Now(),
 			Input:      inputJSON,
 		}
+
+		run, err := temporalClient.ExecuteWorkflow(
+			ctx,
+			client.StartWorkflowOptions{ID: execution.ID, TaskQueue: taskQueue},
+			workflowType,
+			in.Body.Input,
+		)
+		if err != nil {
+			return nil, huma.Error502BadGateway(
+				"failed to start the Temporal execution — is a zigflow worker running for this workflow?",
+				err,
+			)
+		}
+		execution.TemporalRunID = run.GetRunID()
+
 		if err := deps.DB.WithContext(ctx).Create(&execution).Error; err != nil {
 			return nil, huma.Error500InternalServerError("failed to create execution", err)
 		}

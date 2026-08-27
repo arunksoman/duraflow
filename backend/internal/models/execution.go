@@ -26,6 +26,7 @@ type Execution struct {
 	Input             datatypes.JSON  `json:"input,omitempty"`
 	Output            datatypes.JSON  `json:"output,omitempty"`
 	ParentExecutionID *string         `json:"parentExecutionId,omitempty"`
+	TemporalRunID     string          `json:"temporalRunId,omitempty"`
 
 	// WorkflowName is computed via join at query time, never stored.
 	WorkflowName string `gorm:"-" json:"workflowName"`

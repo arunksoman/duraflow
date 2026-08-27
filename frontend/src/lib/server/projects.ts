@@ -37,3 +37,17 @@ export async function createProject(
 	}
 	return response.json();
 }
+
+export async function getProject(token: string | undefined, id: string): Promise<Project> {
+	let response: Response;
+	try {
+		response = await fetch(`${API_BASE_URL}/projects/${id}`, { headers: authHeaders(token) });
+	} catch {
+		throw new ProjectsApiError('Unable to reach the projects service');
+	}
+
+	if (!response.ok) {
+		throw new ProjectsApiError('Unable to load the project');
+	}
+	return response.json();
+}

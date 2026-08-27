@@ -15,6 +15,7 @@ type Config struct {
 	Database  DatabaseConfig  `mapstructure:"database"`
 	Auth      AuthConfig      `mapstructure:"auth"`
 	SeedAdmin SeedAdminConfig `mapstructure:"seedAdmin"`
+	Temporal  TemporalConfig  `mapstructure:"temporal"`
 }
 
 type ServerConfig struct {
@@ -38,6 +39,15 @@ type SeedAdminConfig struct {
 	Email    string `mapstructure:"email"`
 	Password string `mapstructure:"password"`
 	Name     string `mapstructure:"name"`
+}
+
+type TemporalConfig struct {
+	// Address of the Temporal frontend gRPC service, e.g. localhost:7233.
+	Address string `mapstructure:"address"`
+	// ZigflowBinary is the `zigflow` executable to run — a bare name resolves via PATH.
+	ZigflowBinary string `mapstructure:"zigflowBinary"`
+	// WorkflowsDir is where each workflow's DSL is materialized to a YAML file for `zigflow run -f`.
+	WorkflowsDir string `mapstructure:"workflowsDir"`
 }
 
 // Load reads backend/config/config.yaml relative to the working directory,

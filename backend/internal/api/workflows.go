@@ -85,6 +85,7 @@ func registerWorkflowRoutes(api huma.API, deps *Deps, base string) {
 		if err := deps.DB.WithContext(ctx).Create(&workflow).Error; err != nil {
 			return nil, huma.Error500InternalServerError("failed to create workflow", err)
 		}
+		deps.Workers.Sync(workflow.ID, workflow.Name, workflow.DSL)
 		return &workflowOutput{Body: workflow}, nil
 	})
 
@@ -130,6 +131,7 @@ func registerWorkflowRoutes(api huma.API, deps *Deps, base string) {
 		if err := deps.DB.WithContext(ctx).Save(&workflow).Error; err != nil {
 			return nil, huma.Error500InternalServerError("failed to update workflow", err)
 		}
+		deps.Workers.Sync(workflow.ID, workflow.Name, workflow.DSL)
 		return &workflowOutput{Body: workflow}, nil
 	})
 
@@ -150,6 +152,7 @@ func registerWorkflowRoutes(api huma.API, deps *Deps, base string) {
 		if result.RowsAffected == 0 {
 			return nil, huma.Error404NotFound("workflow not found")
 		}
+		deps.Workers.Stop(in.ID)
 		return nil, nil
 	})
 }

@@ -21,3 +21,9 @@ seedAdmin:
   email: admin@duraflow.local
   password: changeme123
   name: Admin
+
+temporal:
+  address: 'localhost:7233'
+  # bare name resolves via PATH — `go install github.com/zigflow/zigflow@latest`
+  zigflowBinary: 'zigflow'
+  workflowsDir: './data/workflows'

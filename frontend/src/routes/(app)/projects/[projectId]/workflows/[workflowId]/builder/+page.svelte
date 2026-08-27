@@ -13,6 +13,7 @@
 	import '@xyflow/svelte/dist/style.css';
 
 	import { page } from '$app/state';
+	import { enhance } from '$app/forms';
 	import { ArrowLeft, CircleCheck, Code2, Save, SlidersHorizontal, Workflow } from '@lucide/svelte';
 	import ThemeToggle from '$lib/components/ThemeToggle.svelte';
 
@@ -31,6 +32,7 @@
 		type DeserializeError
 	} from '$lib/zigflow-engine/deserialize';
 	import { ROOT_SCOPE_ID, forkBranchScopeKey } from '$lib/zigflow-engine/scopeKey';
+	import { toSlug } from '$lib/zigflow-engine/slug';
 	import {
 		composeScopeForDisplay,
 		decomposeDisplayedScope,
@@ -44,24 +46,31 @@
 	} from '$lib/zigflow-engine/inlineScopeView';
 	import type { Diagnostic } from '@codemirror/lint';
 	import type { WorkflowNodeType, WorkflowMeta } from '$lib/types';
+	import type { PageProps } from './$types';
+
+	let { data }: PageProps = $props();
 
 	const projectId = $derived(page.params.projectId);
 	const workflowId = $derived(page.params.workflowId);
-	const projectName = $derived(projectId === 'demo' ? 'Demo Project' : 'Project');
-	const workflowName = $derived(workflowId === 'demo' ? 'Order Fulfillment' : 'New Workflow');
+	const projectName = $derived(data.project.name);
+	const workflowName = $derived(data.workflow.name);
 
 	const nodeTypes = Object.fromEntries(NODE_TYPES.map((t) => [t, WorkflowNode]));
 	const edgeTypes = { default: ReconnectableEdge };
 
 	// ── Workflow metadata & variables ────────────────────────────────
 
-	let workflowMeta = $state<WorkflowMeta>({
-		workflowType: '',
-		taskQueue: 'default',
-		version: '0.1.0',
-		inputSchema: [],
-		envVars: []
-	});
+	// A brand-new workflow (no DSL saved yet) gets a sensible default workflowType/taskQueue so it's
+	// already valid to run; an existing one gets these overwritten by applyDslToCanvas below.
+	let workflowMeta = $state<WorkflowMeta>(
+		untrack(() => ({
+			workflowType: toSlug(data.workflow.name),
+			taskQueue: toSlug(data.project.name),
+			version: '0.1.0',
+			inputSchema: [],
+			envVars: []
+		}))
+	);
 
 	function updateWorkflowMeta(patch: Partial<WorkflowMeta>) {
 		workflowMeta = { ...workflowMeta, ...patch };
@@ -236,6 +245,14 @@
 		reloadFromScopes();
 	}
 
+	// Seed the canvas from the persisted DSL, once, on mount — plain top-level script code runs
+	// exactly once per component instance, so this needs no $effect/guard.
+	untrack(() => {
+		if (data.workflow.dsl) {
+			applyDslToCanvas(data.workflow.dsl);
+		}
+	});
+
 	function handleDslChange(text: string) {
 		dslDraft = text;
 		if (!dslSyncEnabled) {
@@ -370,10 +387,7 @@
 		pruneOrphanedScopes(collectDescendantScopeKeysForLaneKey(laneKey, nodes));
 	}
 
-	function handleSave() {
-		saved = true;
-		setTimeout(() => (saved = false), 2000);
-	}
+	let saving = $state(false);
 
 	function onFlowReady(fn: (pos: { x: number; y: number }) => { x: number; y: number }) {
 		screenToFlowPosition = fn;
@@ -387,14 +401,21 @@
 <div class="bg-base-200 flex h-screen flex-col overflow-hidden">
 	<!-- Toolbar -->
 	<header class="bg-base-100 border-base-300 flex h-12 shrink-0 items-center gap-2 border-b px-3">
-		<a href="/dashboard" class="btn btn-ghost btn-sm btn-circle" title="Back to dashboard">
+		<a
+			href="/projects/{projectId}"
+			class="btn btn-ghost btn-sm btn-circle"
+			title="Back to project"
+		>
 			<ArrowLeft size={16} />
 		</a>
 		<div class="bg-primary/10 text-primary rounded p-1">
 			<Workflow size={15} />
 		</div>
 		<div class="flex items-center gap-1">
-			<a href="/dashboard" class="text-base-content/50 hover:text-base-content text-xs transition">
+			<a
+				href="/projects/{projectId}"
+				class="text-base-content/50 hover:text-base-content text-xs transition"
+			>
 				{projectName}
 			</a>
 			<span class="text-base-content/30 text-xs">/</span>
@@ -420,15 +441,31 @@
 			<Code2 size={14} />
 			DSL
 		</button>
-		<button class="btn btn-sm" class:btn-success={saved} onclick={handleSave}>
-			{#if saved}
-				<CircleCheck size={14} />
-				Saved
-			{:else}
-				<Save size={14} />
-				Save
-			{/if}
-		</button>
+		<form
+			method="POST"
+			action="?/save"
+			use:enhance={() => {
+				saving = true;
+				return async ({ result }) => {
+					saving = false;
+					if (result.type === 'success') {
+						saved = true;
+						setTimeout(() => (saved = false), 2000);
+					}
+				};
+			}}
+		>
+			<input type="hidden" name="dsl" value={dsl} />
+			<button type="submit" class="btn btn-sm" class:btn-success={saved} disabled={saving}>
+				{#if saved}
+					<CircleCheck size={14} />
+					Saved
+				{:else}
+					<Save size={14} />
+					{saving ? 'Saving…' : 'Save'}
+				{/if}
+			</button>
+		</form>
 	</header>
 
 	<!-- Main area: palette | canvas | resize-handle | node panel -->
