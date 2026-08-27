@@ -1,36 +1,34 @@
 # Duraflow
 
-A workflow builder: SvelteKit frontend + Go backend, monorepo.
+A workflow builder: SvelteKit frontend + Go backend + Temporal/Zigflow execution, monorepo.
 
 ```
 frontend/   SvelteKit app (builder canvas, Zigflow DSL engine) — see frontend/README.md, frontend/CLAUDE.md
 backend/    Go API (Huma + Echo, GORM, SQLite/Postgres-ready) — see backend/CLAUDE.md
+docker/     Supporting images (currently just the Temporal dev server)
 ```
 
-## Quickstart
-
-Run both at once (PowerShell, Windows): `.\dev.ps1` — opens backend + frontend each in their own window. Add `-SameWindow` to run both as background jobs with interleaved output in one window instead.
-
-Or run them separately:
-
-**Backend** (Go 1.22+):
+## Quickstart (Docker)
 
 ```sh
-cd backend
-go run ./cmd/server
+docker compose up --build
 ```
 
-Starts on `http://localhost:8000`. Interactive API docs (Scalar, auto-generated from the code) at `http://localhost:8000/docs`; raw OpenAPI spec at `/openapi.json`. A default admin user is seeded on first boot — see `backend/config/config.yaml`'s `seedAdmin` section for credentials, and change `auth.jwtSecret` before deploying anywhere real.
+Brings up three services: `temporal` (dev server — web UI at `http://localhost:8233`, gRPC at `localhost:7233`), `backend` (`http://localhost:8000`, docs at `/docs`), and `frontend` (`http://localhost:5173`). The backend's SQLite database and per-workflow DSL files persist on the host at `backend/data/` (bind-mounted). Log in with the seeded admin — see `backend/config/config.yaml`'s `seedAdmin` section for credentials, and change `auth.jwtSecret` before deploying anywhere real.
 
-**Frontend** (Node 20+, pnpm):
+To rebuild after a dependency change: `docker compose up --build`. To reset the database: stop the stack and delete `backend/data/duraflow.db`.
+
+## Quickstart (without Docker)
+
+Needs Go 1.22+, Node 20+/pnpm, the [Temporal CLI](https://github.com/temporalio/cli/releases) and the [Zigflow CLI](https://github.com/zigflow/zigflow) (`go install github.com/zigflow/zigflow@latest`) on `PATH`.
 
 ```sh
-cd frontend
-pnpm install
-pnpm dev
+temporal server start-dev          # Temporal dev server — localhost:7233, UI at :8233
+cd backend && go run ./cmd/server  # localhost:8000, docs at /docs
+cd frontend && pnpm install && pnpm dev  # localhost:5173
 ```
 
-Starts on `http://localhost:5173` and talks to the backend at `http://localhost:8000/api` by default (see `frontend/.env.example` to override via `API_BASE_URL`). Log in with the seeded admin.
+The frontend talks to the backend at `http://localhost:8000/api` by default (see `frontend/.env.example` to override via `API_BASE_URL`); the backend talks to Temporal at `localhost:7233` by default (see `backend/config/config.yaml`'s `temporal` section, or the `DURAFLOW_TEMPORAL_*` env vars).
 
 ## Database
 

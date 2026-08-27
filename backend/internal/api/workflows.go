@@ -43,6 +43,30 @@ type updateWorkflowInput struct {
 	}
 }
 
+// syncWorkerRegistration starts/updates the workflow's zigflow worker process and reflects its
+// presence in the `workers` table (best-effort — a workflow whose DSL doesn't yet have a valid
+// document.taskQueue just doesn't get a row), so the Workers page shows real spawned processes
+// rather than staying permanently empty.
+func syncWorkerRegistration(deps *Deps, ctx context.Context, workflow models.Workflow) {
+	deps.Workers.Sync(workflow.ID, workflow.Name, workflow.DSL)
+
+	taskQueue, _, err := parseDSLHeader(workflow.DSL)
+	if err != nil || taskQueue == "" {
+		return
+	}
+	upsertWorker(deps, ctx, workflow.Name, taskQueue, models.WorkerOnline)
+}
+
+func stopWorkerRegistration(deps *Deps, ctx context.Context, workflow models.Workflow) {
+	deps.Workers.Stop(workflow.ID)
+
+	taskQueue, _, err := parseDSLHeader(workflow.DSL)
+	if err != nil || taskQueue == "" {
+		return
+	}
+	upsertWorker(deps, ctx, workflow.Name, taskQueue, models.WorkerOffline)
+}
+
 func registerWorkflowRoutes(api huma.API, deps *Deps, base string) {
 	huma.Register(api, huma.Operation{
 		OperationID: "list-workflows",
@@ -85,7 +109,7 @@ func registerWorkflowRoutes(api huma.API, deps *Deps, base string) {
 		if err := deps.DB.WithContext(ctx).Create(&workflow).Error; err != nil {
 			return nil, huma.Error500InternalServerError("failed to create workflow", err)
 		}
-		deps.Workers.Sync(workflow.ID, workflow.Name, workflow.DSL)
+		syncWorkerRegistration(deps, ctx, workflow)
 		return &workflowOutput{Body: workflow}, nil
 	})
 
@@ -131,7 +155,7 @@ func registerWorkflowRoutes(api huma.API, deps *Deps, base string) {
 		if err := deps.DB.WithContext(ctx).Save(&workflow).Error; err != nil {
 			return nil, huma.Error500InternalServerError("failed to update workflow", err)
 		}
-		deps.Workers.Sync(workflow.ID, workflow.Name, workflow.DSL)
+		syncWorkerRegistration(deps, ctx, workflow)
 		return &workflowOutput{Body: workflow}, nil
 	})
 
@@ -145,14 +169,15 @@ func registerWorkflowRoutes(api huma.API, deps *Deps, base string) {
 		DefaultStatus: http.StatusNoContent,
 		Errors:        []int{404},
 	}, func(ctx context.Context, in *workflowIDInput) (*struct{}, error) {
-		result := deps.DB.WithContext(ctx).Delete(&models.Workflow{}, "id = ?", in.ID)
-		if result.Error != nil {
-			return nil, huma.Error500InternalServerError("failed to delete workflow", result.Error)
-		}
-		if result.RowsAffected == 0 {
+		var workflow models.Workflow
+		if err := deps.DB.WithContext(ctx).First(&workflow, "id = ?", in.ID).Error; err != nil {
 			return nil, huma.Error404NotFound("workflow not found")
 		}
-		deps.Workers.Stop(in.ID)
+
+		if err := deps.DB.WithContext(ctx).Delete(&models.Workflow{}, "id = ?", in.ID).Error; err != nil {
+			return nil, huma.Error500InternalServerError("failed to delete workflow", err)
+		}
+		stopWorkerRegistration(deps, ctx, workflow)
 		return nil, nil
 	})
 }

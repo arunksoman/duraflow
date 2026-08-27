@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -17,15 +18,16 @@ import (
 // document.workflowType on its document.taskQueue. `zigflow run` has no hot-reload, so a DSL
 // change means killing and restarting the process against the rewritten file.
 type WorkerManager struct {
-	binary       string
-	workflowsDir string
-	available    bool
+	binary          string
+	workflowsDir    string
+	temporalAddress string
+	available       bool
 
 	mu      sync.Mutex
 	workers map[string]*exec.Cmd
 }
 
-func NewWorkerManager(binary, workflowsDir string) *WorkerManager {
+func NewWorkerManager(binary, workflowsDir, temporalAddress string) *WorkerManager {
 	available := true
 	if _, err := exec.LookPath(binary); err != nil {
 		log.Printf(
@@ -40,10 +42,11 @@ func NewWorkerManager(binary, workflowsDir string) *WorkerManager {
 	}
 
 	return &WorkerManager{
-		binary:       binary,
-		workflowsDir: workflowsDir,
-		available:    available,
-		workers:      map[string]*exec.Cmd{},
+		binary:          binary,
+		workflowsDir:    workflowsDir,
+		temporalAddress: temporalAddress,
+		available:       available,
+		workers:         map[string]*exec.Cmd{},
 	}
 }
 
@@ -72,8 +75,28 @@ func (m *WorkerManager) Sync(id, name, dsl string) {
 	defer m.mu.Unlock()
 	m.stopLocked(id)
 
+	// Each `zigflow run` process starts its own Prometheus metrics server (:9090) and health
+	// server (:3000) by default — fine for one worker, but every worker beyond the first on the
+	// same host would fail to bind them and crash (fatal, not just a warning). Give each an
+	// OS-assigned free port instead; nothing scrapes these in dev.
+	metricsAddr, err := freeLoopbackAddr()
+	if err != nil {
+		log.Printf("[worker:%s] picking a metrics port: %v", name, err)
+		return
+	}
+	healthAddr, err := freeLoopbackAddr()
+	if err != nil {
+		log.Printf("[worker:%s] picking a health-check port: %v", name, err)
+		return
+	}
+
 	prefix := fmt.Sprintf("[worker:%s]", name)
-	cmd := exec.Command(m.binary, "run", "-f", path)
+	cmd := exec.Command(
+		m.binary, "run", "-f", path,
+		"--temporal-address", m.temporalAddress,
+		"--metrics-listen-address", metricsAddr,
+		"--health-listen-address", healthAddr,
+	)
 	stdout := prefixedWriter(prefix)
 	stderr := prefixedWriter(prefix)
 	cmd.Stdout = stdout
@@ -125,6 +148,18 @@ func (m *WorkerManager) StopAll() {
 		}
 		delete(m.workers, id)
 	}
+}
+
+// freeLoopbackAddr returns "127.0.0.1:<port>" for an OS-assigned free port, by briefly binding
+// and releasing a listener — there's a small race if something else grabs the port before the
+// caller does, but that's an acceptable risk for a dev-grade metrics endpoint nothing scrapes.
+func freeLoopbackAddr() (string, error) {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return "", err
+	}
+	defer l.Close()
+	return l.Addr().String(), nil
 }
 
 // prefixedWriter logs each line written to it, prefixed, via a pipe — safe to hand to

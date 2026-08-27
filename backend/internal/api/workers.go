@@ -25,6 +25,31 @@ type registerWorkerInput struct {
 	}
 }
 
+// upsertWorker records a worker's presence — identity+taskQueue is the natural key, matching
+// how zigflow workers self-identify. Used both by the register-worker endpoint below and by
+// workflows.go, which calls it whenever a workflow's zigflow worker process is started/stopped.
+func upsertWorker(deps *Deps, ctx context.Context, identity, taskQueue string, status models.WorkerStatus) {
+	if identity == "" || taskQueue == "" {
+		return
+	}
+
+	var worker models.Worker
+	err := deps.DB.WithContext(ctx).
+		Where("identity = ? AND task_queue = ?", identity, taskQueue).
+		First(&worker).Error
+
+	worker.Identity = identity
+	worker.TaskQueue = taskQueue
+	worker.Status = status
+	worker.LastHeartbeatAt = time.Now()
+
+	if err != nil {
+		_ = deps.DB.WithContext(ctx).Create(&worker).Error
+	} else {
+		_ = deps.DB.WithContext(ctx).Save(&worker).Error
+	}
+}
+
 func registerWorkerRoutes(api huma.API, deps *Deps, base string) {
 	huma.Register(api, huma.Operation{
 		OperationID: "list-workers",
@@ -49,24 +74,14 @@ func registerWorkerRoutes(api huma.API, deps *Deps, base string) {
 		Tags:        []string{"Workers"},
 		Security:    authSecurity(),
 	}, func(ctx context.Context, in *registerWorkerInput) (*workerOutput, error) {
+		upsertWorker(deps, ctx, in.Body.Identity, in.Body.TaskQueue, models.WorkerOnline)
+
 		var worker models.Worker
-		err := deps.DB.WithContext(ctx).
+		if err := deps.DB.WithContext(ctx).
 			Where("identity = ? AND task_queue = ?", in.Body.Identity, in.Body.TaskQueue).
-			First(&worker).Error
-
-		worker.Identity = in.Body.Identity
-		worker.TaskQueue = in.Body.TaskQueue
-		worker.Status = models.WorkerOnline
-		worker.LastHeartbeatAt = time.Now()
-
-		if err != nil {
-			if createErr := deps.DB.WithContext(ctx).Create(&worker).Error; createErr != nil {
-				return nil, huma.Error500InternalServerError("failed to register worker", createErr)
-			}
-		} else if saveErr := deps.DB.WithContext(ctx).Save(&worker).Error; saveErr != nil {
-			return nil, huma.Error500InternalServerError("failed to update worker", saveErr)
+			First(&worker).Error; err != nil {
+			return nil, huma.Error500InternalServerError("failed to register worker", err)
 		}
-
 		return &workerOutput{Body: worker}, nil
 	})
 }

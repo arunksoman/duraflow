@@ -70,7 +70,7 @@ There is no separate e2e test command; manual Playwright smoke-testing has been 
 
 ### Auth & data flow
 
-The backend lives in `../backend` (Go, see its CLAUDE.md) — this app has no database of its own. `src/lib/server/http.ts` points `API_BASE_URL` (default `http://localhost:8000/api`, matching the backend's default `port: 8000` + `basePath: /api`) at it; `src/lib/server/auth.ts` and `src/lib/server/projects.ts` are thin fetch wrappers around it, throwing typed `AuthError`/`ProjectsApiError` on failure. Session state is a bearer token in a `session` cookie, resolved to `locals.user` in `src/hooks.server.ts`'s `handleAuth`. `src/routes/(app)/+layout.server.ts` gates the whole `(app)` route group, redirecting to `/login?redirectTo=...` when unauthenticated.
+The backend lives in `../backend` (Go, see its CLAUDE.md) — this app has no database of its own. `src/lib/server/http.ts` points `API_BASE_URL` (default `http://localhost:8000/api`, matching the backend's default `port: 8000` + `basePath: /api`) at it; `src/lib/server/{auth,projects,workflows,schedules,workers,executions}.ts` are thin fetch wrappers around it, one per resource, each throwing a typed `*ApiError` on failure (same pattern throughout — copy the nearest existing one for a new resource). Session state is a bearer token in a `session` cookie, resolved to `locals.user` in `src/hooks.server.ts`'s `handleAuth`. `src/routes/(app)/+layout.server.ts` gates the whole `(app)` route group, redirecting to `/login?redirectTo=...` when unauthenticated.
 
 In dev only, `getSessionUser` special-cases the literal cookie value `dev-bypass` (`DEV_BYPASS_TOKEN` in `auth.ts`) to log in as a fake `dev-user` without hitting the real API — this branch is statically dead in production builds (`dev` from `$app/environment`).
 
@@ -78,11 +78,11 @@ In dev only, `getSessionUser` special-cases the literal cookie value `dev-bypass
 
 Shared domain types (`User`, `Project`, `Workflow`, `Execution`, `Schedule`, `Worker`, `WorkflowMeta`, etc.) live in `src/lib/types/index.ts` and are used on both client and server. The backend's GORM models and DTOs (`../backend/internal/models`, `../backend/internal/api`) mirror these field-for-field (camelCase JSON tags) — keep them in sync when either side changes.
 
-Note: the backend now exposes full CRUD for `workflows`/`executions`/`schedules`/`workers` (see `../backend/CLAUDE.md`), but the frontend doesn't call any of it yet beyond `auth`/`projects` — no `src/lib/server/workflows.ts` etc. exists, and the builder still doesn't persist the DSL anywhere. That wiring is a separate, not-yet-done piece of work.
+Every domain type has a real page now: `/dashboard` and `/projects/[projectId]` (projects + workflow list/create/delete), the builder (load/save DSL — see below), `/workers`, `/schedules`, `/executions` (all three top-level, aggregating across every project client-side in their `+page.server.ts` `load` since the backend has no cross-project list endpoints — see those files for the `Promise.all` fan-out pattern). `Sidebar.svelte`'s `navItems` no longer has any `enabled: false` entries. **Known gap**: the Executions page is a flat, sortable list with expandable input/output JSON — no timeline/graph visualization or child-workflow drill-down (`parentExecutionId` is shown as a small badge, not a navigable link). Flagged as a deliberate scope cut, not an oversight.
 
 ### Workflow builder & the Zigflow DSL engine
 
-The builder route is `/projects/[projectId]/workflows/[workflowId]/builder` (uses `+layout@.svelte` to reset the `(app)` chrome; no `+page.server.ts` — it's pure frontend, fetching/saving the workflow's DSL client-side).
+The builder route is `/projects/[projectId]/workflows/[workflowId]/builder` (uses `+layout@.svelte` to reset the `(app)` chrome). `+page.server.ts` loads the workflow (and project, for the breadcrumb) and exposes a `?/save` form action that PATCHes the current DSL; the toolbar's Save button is a real `<form use:enhance>`, not a client-only flash. On mount, a non-reactive top-level script statement (see the comment above it — plain script code runs exactly once per component instance, no `$effect` needed) seeds the canvas from `data.workflow.dsl` via the existing `applyDslToCanvas` if present.
 
 The canonical persisted form of a workflow is Zigflow YAML text (`Workflow.dsl`), **not** the canvas — the canvas is always derived from the DSL. `src/lib/zigflow-engine/` is a plain-TypeScript, UI-independent module (no Svelte imports) that owns everything DSL-shaped:
 

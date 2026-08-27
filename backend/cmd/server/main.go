@@ -37,7 +37,7 @@ func main() {
 	temporalClient := temporalexec.NewLazyClient(cfg.Temporal.Address)
 	defer temporalClient.Close()
 
-	workers := temporalexec.NewWorkerManager(cfg.Temporal.ZigflowBinary, cfg.Temporal.WorkflowsDir)
+	workers := temporalexec.NewWorkerManager(cfg.Temporal.ZigflowBinary, cfg.Temporal.WorkflowsDir, cfg.Temporal.Address)
 	defer workers.StopAll()
 	startWorkflowWorkers(conn, workers)
 

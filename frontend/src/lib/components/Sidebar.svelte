@@ -4,9 +4,9 @@
 
 	const navItems = [
 		{ href: '/dashboard', label: 'Dashboard', icon: LayoutDashboard, enabled: true },
-		{ href: '/workers', label: 'Workers', icon: Server, enabled: false },
-		{ href: '/schedules', label: 'Schedules', icon: CalendarClock, enabled: false },
-		{ href: '/executions', label: 'Executions', icon: ListChecks, enabled: false }
+		{ href: '/workers', label: 'Workers', icon: Server, enabled: true },
+		{ href: '/schedules', label: 'Schedules', icon: CalendarClock, enabled: true },
+		{ href: '/executions', label: 'Executions', icon: ListChecks, enabled: true }
 	];
 </script>
 
