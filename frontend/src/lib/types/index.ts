@@ -29,6 +29,7 @@ export type WorkflowNodeType =
 	| 'start'
 	| 'end'
 	| 'call'
+	| 'grpcCall'
 	| 'do'
 	| 'for'
 	| 'fork'

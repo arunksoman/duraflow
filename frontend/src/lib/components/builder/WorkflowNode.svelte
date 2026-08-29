@@ -75,7 +75,7 @@
 	</div>
 	<div class="border-base-200 flex items-center border-t px-2.5 py-1.5">
 		<span class="text-base-content/40 font-mono text-[10px] uppercase tracking-wide">
-			{nodeType === 'childWorkflow' ? 'child-flow' : nodeType}
+			{nodeType === 'childWorkflow' ? 'child-flow' : nodeType === 'grpcCall' ? 'grpc-call' : nodeType}
 		</span>
 	</div>
 </div>

@@ -1,6 +1,7 @@
 import { Document, Scalar } from 'yaml';
 import type {
 	CallTask,
+	GrpcCallTask,
 	EventConsumptionStrategy,
 	EventFilter,
 	ForTask,
@@ -68,7 +69,7 @@ function buildTask(task: TaskNode, path: PathSegment[], ctx: BuildCtx): Record<s
 	const base = task as TaskBase;
 	let body: Record<string, unknown>;
 
-	if ('call' in task) body = buildCall(task, path, ctx);
+	if ('call' in task) body = task.call === 'grpc' ? buildGrpcCall(task) : buildCall(task, path, ctx);
 	else if ('for' in task) body = buildFor(task, path, ctx);
 	else if ('fork' in task) body = buildFork(task, path, ctx);
 	else if ('listen' in task) body = buildListen(task);
@@ -111,6 +112,21 @@ function buildCall(task: CallTask, path: PathSegment[], ctx: BuildCtx): Record<s
 			body,
 			output: output && output !== 'content' ? output : undefined,
 			redirect: redirect === true ? true : undefined
+		})
+	};
+}
+
+// ── Call (grpc) ────────────────────────────────────────────────────────────
+
+function buildGrpcCall(task: GrpcCallTask): Record<string, unknown> {
+	const { proto, service, method, arguments: args } = task.with;
+	return {
+		call: 'grpc',
+		with: definedEntries({
+			proto,
+			service: definedEntries({ host: service.host, name: service.name, port: service.port }),
+			method,
+			arguments: args
 		})
 	};
 }

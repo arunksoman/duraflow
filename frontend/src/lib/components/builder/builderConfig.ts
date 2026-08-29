@@ -8,6 +8,7 @@ import {
 	GitBranch,
 	GitFork,
 	Globe,
+	Network,
 	OctagonX,
 	Pencil,
 	Repeat,
@@ -106,6 +107,24 @@ export const NODE_META: Record<WorkflowNodeType, NodeMeta> = {
 			body: '',
 			output: 'content',
 			redirect: false,
+			...EMPTY_FLOW
+		}
+	},
+	grpcCall: {
+		label: 'gRPC',
+		description: 'gRPC service call — supports $env, $input, $data, $context in all fields',
+		icon: Network,
+		color: '#0ea5e9',
+		category: 'action',
+		showInPalette: true,
+		defaultData: {
+			label: 'gRPC Call',
+			protoEndpoint: '',
+			serviceHost: '',
+			serviceName: '',
+			servicePort: undefined,
+			method: '',
+			argumentsJson: '',
 			...EMPTY_FLOW
 		}
 	},

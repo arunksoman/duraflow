@@ -32,6 +32,37 @@ describe('astToGraph', () => {
 		expect(root.edges).toHaveLength(3);
 	});
 
+	it('loads a `call: grpc` task as a distinct `grpcCall` node type', () => {
+		const doc: ZigflowDocument = {
+			document: header(),
+			do: [
+				{
+					getUser: {
+						call: 'grpc',
+						with: {
+							proto: { endpoint: 'https://example.com/user.proto' },
+							service: { host: 'grpc.example.com', name: 'user.UserService', port: 443 },
+							method: 'GetUser',
+							arguments: { id: '${ $input.id }' }
+						}
+					}
+				}
+			]
+		};
+		const { graph } = astToGraph(doc);
+		const root = graph.scopes[ROOT_SCOPE_ID];
+		expect(root.nodes.map((n) => n.type)).toEqual(['start', 'grpcCall', 'end']);
+		const node = root.nodes.find((n) => n.type === 'grpcCall')!;
+		expect(node.data).toMatchObject({
+			protoEndpoint: 'https://example.com/user.proto',
+			serviceHost: 'grpc.example.com',
+			serviceName: 'user.UserService',
+			servicePort: 443,
+			method: 'GetUser'
+		});
+		expect(JSON.parse(node.data.argumentsJson as string)).toEqual({ id: '${ $input.id }' });
+	});
+
 	it('always terminates the root scope with a non-deletable End node wired from the last task', () => {
 		const doc: ZigflowDocument = {
 			document: header(),
@@ -250,6 +281,46 @@ describe('graphToAst', () => {
 		const loop = result.document.do[1].loop as unknown as { for: { in: string }; do: unknown[] };
 		expect(loop.for.in).toBe('${ $input.items }');
 		expect(loop.do).toHaveLength(1);
+	});
+
+	it('round-trips a `call: grpc` task through astToGraph -> graphToAst -> serialize -> deserialize', () => {
+		const original: ZigflowDocument = {
+			document: header(),
+			do: [
+				{
+					getUser: {
+						call: 'grpc',
+						with: {
+							proto: { endpoint: 'https://example.com/user.proto' },
+							service: { host: 'grpc.example.com', name: 'user.UserService', port: 443 },
+							method: 'GetUser',
+							arguments: { id: '${ $input.id }' }
+						}
+					}
+				}
+			]
+		};
+		const { graph, header: hdr } = astToGraph(original);
+		const rebuilt = graphToAst(graph, hdr);
+		// Task names are re-slugged from the node label (lowercased) on save — "getUser" -> "getuser".
+		expect(rebuilt.do[0]).toMatchObject({
+			getuser: {
+				call: 'grpc',
+				with: {
+					proto: { endpoint: 'https://example.com/user.proto' },
+					service: { host: 'grpc.example.com', name: 'user.UserService', port: 443 },
+					method: 'GetUser',
+					arguments: { id: '${ $input.id }' }
+				}
+			}
+		});
+		const yamlText = serializeZigflowDocument(rebuilt);
+		const result = deserializeZigflowDocument(yamlText);
+		expect(result.ok).toBe(true);
+		if (!result.ok) return;
+		const [name, task] = Object.entries(result.document.do[0])[0];
+		expect(name).toBe('getuser');
+		expect(task).toMatchObject(Object.values(original.do[0])[0]);
 	});
 
 	it('emits a synthetic `init` set task from Start node variables', () => {
