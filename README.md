@@ -14,7 +14,7 @@ docker/     Supporting images (currently just the Temporal dev server)
 docker compose up --build
 ```
 
-Brings up three services: `temporal` (dev server — web UI at `http://localhost:8233`, gRPC at `localhost:7233`), `backend` (`http://localhost:8000`, docs at `/docs`), and `frontend` (`http://localhost:5173`). The backend's SQLite database and per-workflow DSL files persist on the host at `backend/data/` (bind-mounted). Log in with the seeded admin — see `backend/config/config.yaml`'s `seedAdmin` section for credentials, and change `auth.jwtSecret` before deploying anywhere real.
+Brings up three services: `temporal` (dev server — web UI at `http://localhost:8233`, gRPC at `localhost:7233`), `backend` (`http://localhost:8000`, docs at `/docs`), and `frontend` (`http://localhost:5173`). The backend's SQLite database and per-workflow DSL files persist on the host at `backend/data/` (bind-mounted). Log in with the seeded admin — see `docker-compose.yml`'s `backend.environment` for credentials and the JWT secret; change both before running this anywhere but a local machine. Accessing the frontend at anything other than `http://localhost:5173` (a different host/port) also needs `frontend.environment.ORIGIN` updated to match, or form submissions fail with a CSRF error.
 
 To rebuild after a dependency change: `docker compose up --build`. To reset the database: stop the stack and delete `backend/data/duraflow.db`.
 
@@ -28,8 +28,12 @@ cd backend && go run ./cmd/server  # localhost:8000, docs at /docs
 cd frontend && pnpm install && pnpm dev  # localhost:5173
 ```
 
-The frontend talks to the backend at `http://localhost:8000/api` by default (see `frontend/.env.example` to override via `API_BASE_URL`); the backend talks to Temporal at `localhost:7233` by default (see `backend/config/config.yaml`'s `temporal` section, or the `DURAFLOW_TEMPORAL_*` env vars).
+The frontend talks to the backend at `http://localhost:8000/api` by default (see `frontend/.env.example` to override via `API_BASE_URL`); the backend talks to Temporal at `localhost:7233` by default.
+
+## Backend configuration
+
+`backend/internal/config/config.go`'s `Load()` applies, in increasing precedence: built-in defaults → `backend/config/config.yaml` if present → `DURAFLOW_*` env vars. The env vars are the only thing `docker compose up` sets (see `docker-compose.yml`) — the config file is optional and only really useful for local `go run`, so there's no image to rebuild just to change a setting in Docker. A YAML key like `seedAdmin.password` becomes `DURAFLOW_SEEDADMIN_PASSWORD`; `temporal.address` becomes `DURAFLOW_TEMPORAL_ADDRESS`, etc. (dots → underscores, uppercased).
 
 ## Database
 
-SQLite by default, file at `backend/data/duraflow.db` (gitignored), schema auto-migrated on every backend startup. To switch to Postgres later, set `database.driver: postgres` and `database.dsn: "<connection string>"` in `backend/config/config.yaml` (or the `DURAFLOW_DATABASE_*` env vars) — no code or migration changes needed.
+SQLite by default, file at `backend/data/duraflow.db` (gitignored), schema auto-migrated on every backend startup. To switch to Postgres later, set `DURAFLOW_DATABASE_DRIVER=postgres` and `DURAFLOW_DATABASE_DSN="<connection string>"` (env vars, or the equivalent keys in `backend/config/config.yaml` for local dev) — no code or migration changes needed.

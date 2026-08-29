@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **Web framework**: [Huma v2](https://huma.rocks/) (OpenAPI-first — request/response structs auto-generate the OpenAPI 3.1 spec, no annotations to keep in sync) on top of [Echo](https://echo.labstack.com/) via the `humaecho` adapter
 - **ORM**: [GORM](https://gorm.io/) — `AutoMigrate` on every startup, no separate migration tooling
 - **Database**: SQLite by default (`github.com/glebarez/sqlite`, pure Go, no CGO); Postgres wired and ready (`gorm.io/driver/postgres`) — flip `database.driver: postgres` + a DSN in config
-- **Config**: [viper](https://github.com/spf13/viper), `config/config.yaml` + `DURAFLOW_*` env overrides
+- **Config**: [viper](https://github.com/spf13/viper) — built-in defaults → optional `config/config.yaml` → `DURAFLOW_*` env overrides (increasing precedence). Docker sets everything via env vars in `docker-compose.yml`; the yaml file is only for local `go run` convenience, not required
 - **API docs**: auto-generated OpenAPI 3.1 at `/openapi.json`, rendered with [Scalar](https://scalar.com/) at `/docs`
 - **Execution**: [Temporal](https://temporal.io/) via `go.temporal.io/sdk`, actually running workflows via the [Zigflow CLI](https://github.com/zigflow/zigflow) (`go install github.com/zigflow/zigflow@latest`) — see the Execution section below
 
@@ -44,8 +44,8 @@ internal/
                             # and owns the bearer-auth Huma middleware (checks Operation.Security)
     auth.go / projects.go / workflows.go / executions.go / schedules.go / workers.go
                             # one file per resource, each a registerXRoutes(api, deps, base) function
-config/config.yaml         # defaults: port 8000, basePath /api, sqlite ./data/duraflow.db, seed admin,
-                            # temporal.address localhost:7233
+config/config.yaml         # optional local-dev overrides (not baked into the Docker image —
+                            # see internal/config/config.go's Load() for the built-in defaults)
 data/                      # sqlite file + per-workflow DSL YAML files live here (gitignored)
 Dockerfile                 # multi-stage: builds both the server binary and the zigflow CLI into
                             # one runtime image, since WorkerManager spawns zigflow as a subprocess

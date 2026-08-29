@@ -18,7 +18,9 @@ RUN apk add --no-cache ca-certificates
 
 COPY --from=build /out/server /usr/local/bin/server
 COPY --from=build /out/zigflow /usr/local/bin/zigflow
-COPY config /app/config
+# No config/ here on purpose — Load() has built-in defaults, and docker-compose.yml sets every
+# value that actually needs to differ (secrets, temporal.address) via DURAFLOW_* env vars, so
+# changing them doesn't require rebuilding this image. config/config.yaml is only for `go run`.
 
 WORKDIR /app
 EXPOSE 8000
