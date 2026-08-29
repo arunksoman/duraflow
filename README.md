@@ -32,8 +32,8 @@ The frontend talks to the backend at `http://localhost:8000/api` by default (see
 
 ## Backend configuration
 
-`backend/internal/config/config.go`'s `Load()` applies, in increasing precedence: built-in defaults → `backend/config/config.yaml` if present → `DURAFLOW_*` env vars. The env vars are the only thing `docker compose up` sets (see `docker-compose.yml`) — the config file is optional and only really useful for local `go run`, so there's no image to rebuild just to change a setting in Docker. A YAML key like `seedAdmin.password` becomes `DURAFLOW_SEEDADMIN_PASSWORD`; `temporal.address` becomes `DURAFLOW_TEMPORAL_ADDRESS`, etc. (dots → underscores, uppercased).
+`backend/internal/config/config.go`'s `Load()` applies, in increasing precedence: built-in defaults → an optional `backend/config/config.yaml` (not present by default — nothing reads it unless you create one) → `DURAFLOW_*` env vars. `docker-compose.yml` sets everything that matters via env vars — there's no config file to keep in sync and no image to rebuild just to change a setting. A YAML key like `seedAdmin.password` becomes env var `DURAFLOW_SEEDADMIN_PASSWORD`; `temporal.address` becomes `DURAFLOW_TEMPORAL_ADDRESS`, etc. (dots → underscores, uppercased). For local `go run` without Docker, either export the `DURAFLOW_*` vars you want to override, or drop a `config/config.yaml` back in.
 
 ## Database
 
-SQLite by default, file at `backend/data/duraflow.db` (gitignored), schema auto-migrated on every backend startup. To switch to Postgres later, set `DURAFLOW_DATABASE_DRIVER=postgres` and `DURAFLOW_DATABASE_DSN="<connection string>"` (env vars, or the equivalent keys in `backend/config/config.yaml` for local dev) — no code or migration changes needed.
+SQLite by default, file at `backend/data/duraflow.db` (gitignored), schema auto-migrated on every backend startup. To switch to Postgres later, set `DURAFLOW_DATABASE_DRIVER=postgres` and `DURAFLOW_DATABASE_DSN="<connection string>"` — no code or migration changes needed.

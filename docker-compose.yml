@@ -19,8 +19,8 @@ services:
     environment:
       DURAFLOW_TEMPORAL_ADDRESS: 'temporal:7233'
       # Dev-only values — change these (or set real secrets via a .env file / your orchestrator)
-      # before running this anywhere but a local machine. Nothing here needs backend/config/config.yaml
-      # or an image rebuild to change; see backend/internal/config/config.go's Load().
+      # before running this anywhere but a local machine. No config file or image rebuild needed
+      # to change any of these; see backend/internal/config/config.go's Load().
       DURAFLOW_AUTH_JWTSECRET: 'dev-only-change-me'
       DURAFLOW_SEEDADMIN_EMAIL: 'admin@duraflow.local'
       DURAFLOW_SEEDADMIN_PASSWORD: 'changeme123'
