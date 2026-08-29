@@ -9,6 +9,7 @@
 	import ExpressionInput, { type AvailVar } from './ExpressionInput.svelte';
 	import ConditionBuilder from './ConditionBuilder.svelte';
 	import CodeMirrorEditor from '$lib/components/editor/CodeMirrorEditor.svelte';
+	import Accordion from './Accordion.svelte';
 	import { OWNER_SCOPE_TAG } from '$lib/zigflow-engine/inlineScopeView';
 
 	interface Props {
@@ -112,6 +113,10 @@
 	function bool(key: string, fallback = false): boolean {
 		const v = node?.data[key];
 		return typeof v === 'boolean' ? v : fallback;
+	}
+	function numOrEmpty(key: string): number | '' {
+		const v = node?.data[key];
+		return typeof v === 'number' ? v : '';
 	}
 	function patch(key: string, value: unknown) {
 		onupdate(node.id, { [key]: value });
@@ -526,186 +531,279 @@
 
 			<!-- ── REST (call: http) ─────────────────────────────────── -->
 			{#if nodeType === 'call'}
-				<!-- Endpoint -->
-				<div class="flex flex-col gap-0.5">
-					<span class="text-base-content/50 text-[10px] font-semibold uppercase tracking-wider"
-						>Endpoint</span
-					>
-					<div class="flex items-center gap-1">
-						<select
-							class="select select-xs w-20 shrink-0 font-mono font-bold"
-							value={f('method') || 'get'}
-							onchange={(e) => patch('method', (e.target as HTMLSelectElement).value)}
+				<Accordion title="Configuration" defaultOpen={true}>
+					<div class="flex flex-col gap-0.5">
+						<span class="text-base-content/50 text-[10px] font-semibold uppercase tracking-wider"
+							>Endpoint</span
 						>
-							{#each ['get', 'post', 'put', 'patch', 'delete'] as m (m)}
-								<option value={m}>{m.toUpperCase()}</option>
-							{/each}
-						</select>
-						<div class="min-w-0 flex-1">
+						<div class="flex items-center gap-1">
+							<select
+								class="select select-xs w-20 shrink-0 font-mono font-bold"
+								value={f('method') || 'get'}
+								onchange={(e) => patch('method', (e.target as HTMLSelectElement).value)}
+							>
+								{#each ['get', 'post', 'put', 'patch', 'delete'] as m (m)}
+									<option value={m}>{m.toUpperCase()}</option>
+								{/each}
+							</select>
+							<div class="min-w-0 flex-1">
+								<ExpressionInput
+									value={f('endpoint')}
+									placeholder="$env.API_BASE + &quot;/path&quot;"
+									availVars={availableVars}
+									onchange={(v) => patch('endpoint', v)}
+								/>
+							</div>
+						</div>
+					</div>
+				</Accordion>
+
+				<Accordion title="Headers" defaultOpen={localHeaders.length > 0}>
+					<div class="flex flex-col gap-1.5">
+						<div class="flex items-center justify-between">
+							<span class="text-base-content/40 text-[10px]">Sent with the request</span>
+							<button class="btn btn-ghost btn-xs gap-1" onclick={addHeader}
+								><Plus size={9} />Add</button
+							>
+						</div>
+						{#each localHeaders as h, i (i)}
+							<div class="flex items-start gap-1.5">
+								<input
+									class="input input-xs w-32 shrink-0 font-mono"
+									placeholder="Header-Name"
+									value={h.key}
+									oninput={(e) => updateHeader(i, 'key', (e.target as HTMLInputElement).value)}
+								/>
+								<div class="min-w-0 flex-1">
+									<ExpressionInput
+										value={h.value}
+										placeholder="value or expression"
+										availVars={availableVars}
+										onchange={(val) => updateHeader(i, 'value', val)}
+									/>
+								</div>
+								<button
+									class="btn btn-ghost btn-xs btn-circle text-error mt-0.5 shrink-0"
+									onclick={() => removeHeader(i)}
+									aria-label="Remove"
+								>
+									<Trash2 size={9} />
+								</button>
+							</div>
+						{/each}
+					</div>
+				</Accordion>
+
+				<Accordion title="Request Body" defaultOpen={!!f('body')}>
+					<div class="flex flex-col gap-1">
+						<div class="flex items-center justify-between">
+							<span class="text-base-content/40 text-[10px]">JSON or expression</span>
+							<button
+								type="button"
+								class="font-mono text-[9px] text-base-content/30 hover:text-base-content/70"
+								onclick={() => (bodyRawMode = !bodyRawMode)}
+								>{bodyRawMode ? 'expression' : '{ } json'}</button
+							>
+						</div>
+						{#if bodyRawMode}
+							<div class="border-base-300 h-32 overflow-hidden rounded-lg border">
+								<CodeMirrorEditor
+									value={f('body')}
+									language="json"
+									onchange={(v) => patch('body', v)}
+								/>
+							</div>
+						{:else}
 							<ExpressionInput
-								value={f('endpoint')}
-								placeholder="$env.API_BASE + &quot;/path&quot;"
-								availVars={availableVars}
-								onchange={(v) => patch('endpoint', v)}
-							/>
-						</div>
-					</div>
-				</div>
-
-				<!-- Headers -->
-				<div class="flex flex-col gap-1.5">
-					<div class="flex items-center justify-between">
-						<span class="text-base-content/50 text-[10px] font-semibold uppercase tracking-wider"
-							>Headers</span
-						>
-						<button class="btn btn-ghost btn-xs gap-1" onclick={addHeader}
-							><Plus size={9} />Add</button
-						>
-					</div>
-					{#each localHeaders as h, i (i)}
-						<div class="flex items-start gap-1.5">
-							<input
-								class="input input-xs w-32 shrink-0 font-mono"
-								placeholder="Header-Name"
-								value={h.key}
-								oninput={(e) => updateHeader(i, 'key', (e.target as HTMLInputElement).value)}
-							/>
-							<div class="min-w-0 flex-1">
-								<ExpressionInput
-									value={h.value}
-									placeholder="value or expression"
-									availVars={availableVars}
-									onchange={(val) => updateHeader(i, 'value', val)}
-								/>
-							</div>
-							<button
-								class="btn btn-ghost btn-xs btn-circle text-error mt-0.5 shrink-0"
-								onclick={() => removeHeader(i)}
-								aria-label="Remove"
-							>
-								<Trash2 size={9} />
-							</button>
-						</div>
-					{/each}
-				</div>
-
-				<!-- Query params -->
-				<div class="flex flex-col gap-1.5">
-					<div class="flex items-center justify-between">
-						<span class="text-base-content/50 text-[10px] font-semibold uppercase tracking-wider"
-							>Query Params</span
-						>
-						<button class="btn btn-ghost btn-xs gap-1" onclick={addQuery}
-							><Plus size={9} />Add</button
-						>
-					</div>
-					{#each localQuery as q, i (i)}
-						<div class="flex items-start gap-1.5">
-							<input
-								class="input input-xs w-32 shrink-0 font-mono"
-								placeholder="param"
-								value={q.key}
-								oninput={(e) => updateQuery(i, 'key', (e.target as HTMLInputElement).value)}
-							/>
-							<div class="min-w-0 flex-1">
-								<ExpressionInput
-									value={q.value}
-									placeholder="value or expression"
-									availVars={availableVars}
-									onchange={(val) => updateQuery(i, 'value', val)}
-								/>
-							</div>
-							<button
-								class="btn btn-ghost btn-xs btn-circle text-error mt-0.5 shrink-0"
-								onclick={() => removeQuery(i)}
-								aria-label="Remove"
-							>
-								<Trash2 size={9} />
-							</button>
-						</div>
-					{/each}
-				</div>
-
-				<!-- Body -->
-				<div class="flex flex-col gap-1">
-					<div class="flex items-center justify-between">
-						<span class="text-base-content/50 text-[10px] font-semibold uppercase tracking-wider">
-							Body <span class="text-base-content/30 normal-case font-normal"
-								>— JSON or expression</span
-							>
-						</span>
-						<button
-							type="button"
-							class="font-mono text-[9px] text-base-content/30 hover:text-base-content/70"
-							onclick={() => (bodyRawMode = !bodyRawMode)}
-							>{bodyRawMode ? 'expression' : '{ } json'}</button
-						>
-					</div>
-					{#if bodyRawMode}
-						<div class="border-base-300 h-32 overflow-hidden rounded-lg border">
-							<CodeMirrorEditor
 								value={f('body')}
-								language="json"
+								placeholder={'{ "key": "value" } or ${ . }'}
+								multiline={true}
+								rows={4}
+								availVars={availableVars}
 								onchange={(v) => patch('body', v)}
 							/>
-						</div>
-					{:else}
-						<ExpressionInput
-							value={f('body')}
-							placeholder={'{ "key": "value" } or ${ . }'}
-							multiline={true}
-							rows={4}
-							availVars={availableVars}
-							onchange={(v) => patch('body', v)}
-						/>
-					{/if}
-				</div>
-
-				<!-- Response -->
-				<div class="flex flex-col gap-2">
-					<span class="text-base-content/50 text-[10px] font-semibold uppercase tracking-wider"
-						>Response</span
-					>
-					<div class="flex items-center gap-2">
-						<span class="text-base-content/40 w-16 shrink-0 text-xs">Output</span>
-						<select
-							class="select select-xs flex-1"
-							value={f('output') || 'content'}
-							onchange={(e) => patch('output', (e.target as HTMLSelectElement).value)}
-						>
-							<option value="content">content — deserialized body</option>
-							<option value="raw">raw — base64 encoded</option>
-							<option value="response">response — full HTTP response</option>
-						</select>
+						{/if}
 					</div>
-					<label class="flex cursor-pointer items-center gap-2 text-xs">
+				</Accordion>
+
+				<Accordion
+					title="Advanced Settings"
+					defaultOpen={localQuery.length > 0 ||
+						(!!f('output') && f('output') !== 'content') ||
+						bool('redirect')}
+				>
+					<div class="flex flex-col gap-1.5">
+						<div class="flex items-center justify-between">
+							<span class="text-base-content/50 text-[10px] font-semibold uppercase tracking-wider"
+								>Query Params</span
+							>
+							<button class="btn btn-ghost btn-xs gap-1" onclick={addQuery}
+								><Plus size={9} />Add</button
+							>
+						</div>
+						{#each localQuery as q, i (i)}
+							<div class="flex items-start gap-1.5">
+								<input
+									class="input input-xs w-32 shrink-0 font-mono"
+									placeholder="param"
+									value={q.key}
+									oninput={(e) => updateQuery(i, 'key', (e.target as HTMLInputElement).value)}
+								/>
+								<div class="min-w-0 flex-1">
+									<ExpressionInput
+										value={q.value}
+										placeholder="value or expression"
+										availVars={availableVars}
+										onchange={(val) => updateQuery(i, 'value', val)}
+									/>
+								</div>
+								<button
+									class="btn btn-ghost btn-xs btn-circle text-error mt-0.5 shrink-0"
+									onclick={() => removeQuery(i)}
+									aria-label="Remove"
+								>
+									<Trash2 size={9} />
+								</button>
+							</div>
+						{/each}
+					</div>
+
+					<div class="flex flex-col gap-2">
+						<span class="text-base-content/50 text-[10px] font-semibold uppercase tracking-wider"
+							>Response</span
+						>
+						<div class="flex items-center gap-2">
+							<span class="text-base-content/40 w-16 shrink-0 text-xs">Output</span>
+							<select
+								class="select select-xs flex-1"
+								value={f('output') || 'content'}
+								onchange={(e) => patch('output', (e.target as HTMLSelectElement).value)}
+							>
+								<option value="content">content — deserialized body</option>
+								<option value="raw">raw — base64 encoded</option>
+								<option value="response">response — full HTTP response</option>
+							</select>
+						</div>
+						<label class="flex cursor-pointer items-center gap-2 text-xs">
+							<input
+								type="checkbox"
+								class="checkbox checkbox-xs"
+								checked={bool('redirect')}
+								onchange={(e) => patch('redirect', (e.target as HTMLInputElement).checked)}
+							/>
+							Follow 3xx redirects
+						</label>
+						<p class="text-base-content/25 text-[10px]">
+							4xx → non-retryable · 5xx → retryable · 408/429 → retryable
+						</p>
+					</div>
+				</Accordion>
+			{/if}
+
+			<!-- ── gRPC CALL (call: grpc) ─────────────────────────────── -->
+			{#if nodeType === 'grpcCall'}
+				<Accordion title="Configuration" defaultOpen={true}>
+					<div class="grid grid-cols-2 gap-2">
+						<div class="flex flex-col gap-1">
+							<label class="text-base-content/50 text-[10px] font-semibold uppercase" for="np-svc-host"
+								>Service host</label
+							>
+							<input
+								id="np-svc-host"
+								class="input input-xs w-full font-mono"
+								placeholder="grpc.example.com"
+								value={f('serviceHost')}
+								oninput={(e) => patch('serviceHost', (e.target as HTMLInputElement).value)}
+							/>
+						</div>
+						<div class="flex flex-col gap-1">
+							<label class="text-base-content/50 text-[10px] font-semibold uppercase" for="np-svc-port"
+								>Port (optional)</label
+							>
+							<input
+								id="np-svc-port"
+								type="number"
+								min="0"
+								max="65535"
+								class="input input-xs w-full font-mono"
+								placeholder="443"
+								value={numOrEmpty('servicePort')}
+								oninput={(e) => {
+									const raw = (e.target as HTMLInputElement).value;
+									patch('servicePort', raw === '' ? undefined : Number(raw));
+								}}
+							/>
+						</div>
+					</div>
+					<div class="flex flex-col gap-1">
+						<label class="text-base-content/50 text-[10px] font-semibold uppercase" for="np-svc-name"
+							>Service name</label
+						>
 						<input
-							type="checkbox"
-							class="checkbox checkbox-xs"
-							checked={bool('redirect')}
-							onchange={(e) => patch('redirect', (e.target as HTMLInputElement).checked)}
+							id="np-svc-name"
+							class="input input-xs w-full font-mono"
+							placeholder="myservice.UserService"
+							value={f('serviceName')}
+							oninput={(e) => patch('serviceName', (e.target as HTMLInputElement).value)}
 						/>
-						Follow 3xx redirects
-					</label>
-					<p class="text-base-content/25 text-[10px]">
-						4xx → non-retryable · 5xx → retryable · 408/429 → retryable
-					</p>
-				</div>
+					</div>
+					<div class="flex flex-col gap-1">
+						<label class="text-base-content/50 text-[10px] font-semibold uppercase" for="np-grpc-method"
+							>Method</label
+						>
+						<input
+							id="np-grpc-method"
+							class="input input-xs w-full font-mono"
+							placeholder="GetUser"
+							value={f('method')}
+							oninput={(e) => patch('method', (e.target as HTMLInputElement).value)}
+						/>
+					</div>
+				</Accordion>
+
+				<Accordion title="Proto Resource" defaultOpen={!!f('protoEndpoint')}>
+					<div class="flex flex-col gap-1">
+						<span class="text-base-content/50 text-[10px] font-semibold uppercase tracking-wider"
+							>Endpoint</span
+						>
+						<ExpressionInput
+							value={f('protoEndpoint')}
+							placeholder="$env.PROTO_BASE + &quot;/user.proto&quot;"
+							availVars={availableVars}
+							onchange={(v) => patch('protoEndpoint', v)}
+						/>
+						<p class="text-base-content/30 text-[9px]">
+							Resource describing the GRPC service to call.
+						</p>
+					</div>
+				</Accordion>
+
+				<Accordion title="Arguments" defaultOpen={!!f('argumentsJson')}>
+					<div class="flex flex-col gap-1">
+						<label class="text-base-content/50 text-[10px] font-semibold uppercase" for="np-grpc-args"
+							>Arguments (JSON object, optional)</label
+						>
+						<textarea
+							id="np-grpc-args"
+							class="textarea textarea-xs font-mono w-full"
+							rows="3"
+							placeholder={'{ "userId": "${ $data.id }" }'}
+							value={f('argumentsJson')}
+							oninput={(e) => patch('argumentsJson', (e.target as HTMLTextAreaElement).value)}
+						></textarea>
+					</div>
+				</Accordion>
 			{/if}
 
 			<!-- ── START: $input SCHEMA ────────────────────────────────── -->
 			{#if nodeType === 'start'}
+			<Accordion title="$input Schema" defaultOpen={localInputSchema.length > 0}>
 				<div class="flex flex-col gap-1.5">
 					<div class="flex items-center justify-between">
-						<div>
-							<span class="text-base-content/50 text-[10px] font-semibold uppercase tracking-wider">
-								<code class="text-primary font-mono">$input</code> Schema
-							</span>
-							<p class="text-base-content/30 text-[9px]">
-								Fields the caller supplies when triggering this workflow (or a parent workflow
-								invoking it as a child) — read-only at runtime.
-							</p>
-						</div>
+						<p class="text-base-content/30 text-[9px]">
+							Fields the caller supplies when triggering this workflow (or a parent workflow
+							invoking it as a child) — read-only at runtime.
+						</p>
 						<button class="btn btn-ghost btn-xs gap-1" onclick={addInputField}
 							><Plus size={9} />Add</button
 						>
@@ -786,22 +884,20 @@
 						{/each}
 					{/if}
 				</div>
+			</Accordion>
 			{/if}
 
 			<!-- ── SET ───────────────────────────────────────────────── -->
 			{#if nodeType === 'set' || nodeType === 'start'}
+			<Accordion
+				title={nodeType === 'start' ? 'Init Variables' : 'Variables'}
+				defaultOpen={true}
+			>
 				<div class="flex flex-col gap-1.5">
 					<div class="flex items-center justify-between">
-						<div>
-							<span class="text-base-content/50 text-[10px] font-semibold uppercase tracking-wider">
-								{nodeType === 'start' ? 'Init Variables' : 'Variables → $data'}
-							</span>
-							{#if nodeType === 'set'}
-								<p class="text-base-content/30 text-[9px]">
-									Readable as ${'${ $data.<key> }'} downstream
-								</p>
-							{/if}
-						</div>
+						<p class="text-base-content/30 text-[9px]">
+							{nodeType === 'set' ? 'Readable as ${ $data.<key> } downstream' : ''}
+						</p>
 						<button class="btn btn-ghost btn-xs gap-1" onclick={addVar}><Plus size={9} />Add</button
 						>
 					</div>
@@ -838,14 +934,16 @@
 						</p>
 					{/if}
 				</div>
+			</Accordion>
 			{/if}
 
 			<!-- ── SWITCH ─────────────────────────────────────────────── -->
 			{#if nodeType === 'switch'}
+			<Accordion title="Cases" defaultOpen={true}>
 				<div class="flex flex-col gap-2">
 					<div class="flex items-center justify-between">
-						<span class="text-base-content/50 text-[10px] font-semibold uppercase tracking-wider"
-							>Cases</span
+						<span class="text-base-content/40 text-[10px]"
+							>Evaluated top-to-bottom, first match wins</span
 						>
 						<button class="btn btn-ghost btn-xs gap-1" onclick={addCase}
 							><Plus size={9} />Add case</button
@@ -894,10 +992,12 @@
 						Cases evaluated top-to-bottom. First match wins. Blank "when" = default.
 					</p>
 				</div>
+			</Accordion>
 			{/if}
 
 			<!-- ── FOR ────────────────────────────────────────────────── -->
 			{#if nodeType === 'for'}
+			<Accordion title="Configuration" defaultOpen={true}>
 				<div class="grid grid-cols-2 gap-2">
 					<div class="flex flex-col gap-1">
 						<label class="text-base-content/50 text-[10px] font-semibold uppercase" for="np-each"
@@ -952,10 +1052,12 @@
 				<p class="text-base-content/30 text-[9px]">
 					The loop body is shown inline on the canvas, connected to this node.
 				</p>
+			</Accordion>
 			{/if}
 
 			<!-- ── FORK ───────────────────────────────────────────────── -->
 			{#if nodeType === 'fork'}
+			<Accordion title="Configuration" defaultOpen={true}>
 				<label class="flex cursor-pointer items-center gap-2 text-xs">
 					<input
 						type="checkbox"
@@ -965,11 +1067,10 @@
 					/>
 					<span>Compete mode — return only the fastest branch</span>
 				</label>
+			</Accordion>
+			<Accordion title="Branches" defaultOpen={true}>
 				<div class="flex flex-col gap-1.5">
-					<div class="flex items-center justify-between">
-						<span class="text-base-content/50 text-[10px] font-semibold uppercase tracking-wider"
-							>Branches</span
-						>
+					<div class="flex items-center justify-end">
 						<button class="btn btn-ghost btn-xs gap-1" onclick={addBranch}
 							><Plus size={9} />Add branch</button
 						>
@@ -1002,10 +1103,12 @@
 						inline on the canvas, connected to this node.
 					</p>
 				</div>
+			</Accordion>
 			{/if}
 
 			<!-- ── TRY ────────────────────────────────────────────────── -->
 			{#if nodeType === 'try'}
+			<Accordion title="Configuration" defaultOpen={true}>
 				<div class="flex flex-col gap-1">
 					<label class="text-base-content/50 text-[10px] font-semibold uppercase" for="np-catchas"
 						>catch error as</label
@@ -1022,10 +1125,12 @@
 						body are shown inline on the canvas, connected to this node.
 					</p>
 				</div>
+			</Accordion>
 			{/if}
 
 			<!-- ── WAIT ───────────────────────────────────────────────── -->
 			{#if nodeType === 'wait'}
+			<Accordion title="Configuration" defaultOpen={true}>
 				<div class="flex gap-2">
 					{#each ['duration', 'until'] as mode (mode)}
 						<label class="flex cursor-pointer items-center gap-1.5 text-xs">
@@ -1080,10 +1185,12 @@
 						</p>
 					</div>
 				{/if}
+			</Accordion>
 			{/if}
 
 			<!-- ── LISTEN ─────────────────────────────────────────────── -->
 			{#if nodeType === 'listen'}
+			<Accordion title="Configuration" defaultOpen={true}>
 				<div class="flex flex-col gap-1">
 					<span class="text-base-content/50 text-[10px] font-semibold uppercase">Strategy</span>
 					<div class="flex gap-3">
@@ -1142,10 +1249,12 @@
 						</div>
 					{/each}
 				</div>
+			</Accordion>
 			{/if}
 
 			<!-- ── RAISE ──────────────────────────────────────────────── -->
 			{#if nodeType === 'raise'}
+			<Accordion title="Configuration" defaultOpen={true}>
 				<div class="flex flex-col gap-2">
 					<div class="flex flex-col gap-1">
 						<label class="text-base-content/50 text-[10px] font-semibold uppercase" for="np-errtype"
@@ -1211,10 +1320,12 @@
 						/>
 					</div>
 				</div>
+			</Accordion>
 			{/if}
 
 			<!-- ── BYOC (run) ─────────────────────────────────────────── -->
 			{#if nodeType === 'run'}
+			<Accordion title="Configuration" defaultOpen={true}>
 				<div class="flex flex-col gap-1">
 					<label class="text-base-content/50 text-[10px] font-semibold uppercase" for="np-rtype"
 						>Type</label
@@ -1375,59 +1486,66 @@
 						</div>
 					</div>
 				{/if}
+			</Accordion>
 
-				{#if runType === 'container' || runType === 'shell' || runType === 'script'}
-					<div class="flex flex-col gap-1">
-						<span class="text-base-content/50 text-[10px] font-semibold uppercase">Arguments</span>
-						<textarea
-							class="textarea textarea-xs font-mono w-full"
-							rows="2"
-							placeholder="one argument per line"
-							value={f('arguments')}
-							oninput={(e) => patch('arguments', (e.target as HTMLTextAreaElement).value)}
-						></textarea>
+			{#if runType === 'container' || runType === 'shell' || runType === 'script'}
+			<Accordion
+				title="Arguments & Environment"
+				defaultOpen={!!f('arguments') || localRunEnv.length > 0}
+			>
+				<div class="flex flex-col gap-1">
+					<span class="text-base-content/50 text-[10px] font-semibold uppercase">Arguments</span>
+					<textarea
+						class="textarea textarea-xs font-mono w-full"
+						rows="2"
+						placeholder="one argument per line"
+						value={f('arguments')}
+						oninput={(e) => patch('arguments', (e.target as HTMLTextAreaElement).value)}
+					></textarea>
+				</div>
+
+				<div class="flex flex-col gap-1.5">
+					<div class="flex items-center justify-between">
+						<span class="text-base-content/50 text-[10px] font-semibold uppercase tracking-wider"
+							>Environment</span
+						>
+						<button class="btn btn-ghost btn-xs gap-1" onclick={addRunEnv}
+							><Plus size={9} />Add</button
+						>
 					</div>
-
-					<div class="flex flex-col gap-1.5">
-						<div class="flex items-center justify-between">
-							<span class="text-base-content/50 text-[10px] font-semibold uppercase tracking-wider"
-								>Environment</span
-							>
-							<button class="btn btn-ghost btn-xs gap-1" onclick={addRunEnv}
-								><Plus size={9} />Add</button
-							>
-						</div>
-						{#each localRunEnv as e, i (i)}
-							<div class="flex items-start gap-1.5">
-								<input
-									class="input input-xs w-32 shrink-0 font-mono"
-									placeholder="VAR_NAME"
-									value={e.key}
-									oninput={(ev) => updateRunEnv(i, 'key', (ev.target as HTMLInputElement).value)}
+					{#each localRunEnv as e, i (i)}
+						<div class="flex items-start gap-1.5">
+							<input
+								class="input input-xs w-32 shrink-0 font-mono"
+								placeholder="VAR_NAME"
+								value={e.key}
+								oninput={(ev) => updateRunEnv(i, 'key', (ev.target as HTMLInputElement).value)}
+							/>
+							<div class="min-w-0 flex-1">
+								<ExpressionInput
+									value={e.value}
+									placeholder="value or expression"
+									availVars={availableVars}
+									onchange={(val) => updateRunEnv(i, 'value', val)}
 								/>
-								<div class="min-w-0 flex-1">
-									<ExpressionInput
-										value={e.value}
-										placeholder="value or expression"
-										availVars={availableVars}
-										onchange={(val) => updateRunEnv(i, 'value', val)}
-									/>
-								</div>
-								<button
-									class="btn btn-ghost btn-xs btn-circle text-error mt-0.5 shrink-0"
-									onclick={() => removeRunEnv(i)}
-									aria-label="Remove"
-								>
-									<Trash2 size={9} />
-								</button>
 							</div>
-						{/each}
-					</div>
-				{/if}
+							<button
+								class="btn btn-ghost btn-xs btn-circle text-error mt-0.5 shrink-0"
+								onclick={() => removeRunEnv(i)}
+								aria-label="Remove"
+							>
+								<Trash2 size={9} />
+							</button>
+						</div>
+					{/each}
+				</div>
+			</Accordion>
+			{/if}
 			{/if}
 
 			<!-- ── CHILD WORKFLOW ─────────────────────────────────────── -->
 			{#if nodeType === 'childWorkflow'}
+			<Accordion title="Configuration" defaultOpen={true}>
 				<div class="flex flex-col gap-2">
 					<div class="flex flex-col gap-1">
 						<label class="text-base-content/50 text-[10px] font-semibold uppercase" for="np-cwft"
@@ -1462,6 +1580,7 @@
 						Await completion
 					</label>
 				</div>
+			</Accordion>
 			{/if}
 
 			<!-- ── DO (grouping — usually only seen from hand-written DSL) ──── -->
@@ -1479,166 +1598,164 @@
 			{/if}
 		</div>
 
-		<!-- ── GUARD SECTION (shared `if:` — skip this task unless truthy) ──── -->
+		<!-- ── SHARED SECTIONS (guard / data flow / activity options) ────── -->
 		{#if hasDataFlow}
-			<div class="border-base-200 border-t p-3">
-				<p class="text-base-content/50 mb-2 text-[10px] font-semibold uppercase tracking-wider">
-					Run only if
-				</p>
-				<ConditionBuilder
-					value={f('if')}
-					availVars={availableVars}
-					onchange={(v) => patch('if', v)}
-				/>
-				<p class="text-base-content/30 mt-1 text-[9px]">
-					This task runs only when the jq expression is truthy. Leave blank to always run.
-				</p>
-			</div>
-		{/if}
-
-		<!-- ── DATA FLOW SECTION ─────────────────────────────────────────── -->
-		{#if hasDataFlow}
-			<div class="border-base-200 border-t p-3">
-				<p class="text-base-content/50 mb-2 text-[10px] font-semibold uppercase tracking-wider">
-					Data Flow
-				</p>
-				<div class="flex flex-col gap-2">
-					<div class="flex flex-col gap-0.5">
-						<span class="text-base-content/40 font-mono text-[10px]">output.as</span>
-						<ExpressionInput
-							value={f('outputAs')}
-							placeholder={'${ { key: .field } }  (reshape $output)'}
-							availVars={availableVars}
-							onchange={(v) => patch('outputAs', v)}
-						/>
-					</div>
-					<div class="flex flex-col gap-0.5">
-						<span class="text-base-content/40 font-mono text-[10px]">export.as</span>
-						<ExpressionInput
-							value={f('exportAs')}
-							placeholder={'${ $context + { key: $output } }'}
-							availVars={availableVars}
-							onchange={(v) => patch('exportAs', v)}
-						/>
-						<p class="text-base-content/25 text-[9px]">
-							Accumulated into $context — readable by any downstream task
-						</p>
-					</div>
-				</div>
-			</div>
-		{/if}
-		<!-- ── ACTIVITY OPTIONS (metadata.activityOptions) ──────────────── -->
-		{#if hasDataFlow}
-			<div class="border-base-200 border-t p-3">
-				<p class="text-base-content/50 mb-2 text-[10px] font-semibold uppercase tracking-wider">
-					Activity Options
-				</p>
-				<div class="flex flex-col gap-2">
-					<div class="flex flex-col gap-0.5">
-						<label class="text-base-content/40 font-mono text-[10px]" for="np-heartbeat"
-							>heartbeatTimeout (seconds)</label
-						>
-						<input
-							id="np-heartbeat"
-							type="number"
-							min="0"
-							class="input input-xs w-full font-mono"
-							placeholder="e.g. 30"
-							value={durationSeconds(activityOptionsObj(), 'heartbeatTimeout')}
-							oninput={(e) => {
-								const secs = parseSeconds((e.target as HTMLInputElement).value);
-								patchActivityOption(
-									'heartbeatTimeout',
-									secs !== undefined ? { seconds: secs } : undefined
-								);
-							}}
-						/>
-						<p class="text-base-content/25 text-[9px]">
-							A heartbeat must be sent before this interval passes, or the activity is considered
-							failed.
-						</p>
-					</div>
-					<p class="text-base-content/40 mt-1 font-mono text-[10px]">retryPolicy</p>
-					<div class="grid grid-cols-2 gap-1.5">
-						<div class="flex flex-col gap-0.5">
-							<label class="text-base-content/40 text-[9px]" for="np-rp-attempts"
-								>Max attempts</label
-							>
-							<input
-								id="np-rp-attempts"
-								type="number"
-								min="0"
-								class="input input-xs w-full font-mono"
-								placeholder="5"
-								value={(retryPolicyObj().maximumAttempts as number | undefined) ?? ''}
-								oninput={(e) => {
-									const n = parseSeconds((e.target as HTMLInputElement).value);
-									patchRetryPolicy('maximumAttempts', n !== undefined ? Math.trunc(n) : undefined);
-								}}
-							/>
-						</div>
-						<div class="flex flex-col gap-0.5">
-							<label class="text-base-content/40 text-[9px]" for="np-rp-backoff"
-								>Backoff coefficient</label
-							>
-							<input
-								id="np-rp-backoff"
-								type="number"
-								min="1"
-								step="0.1"
-								class="input input-xs w-full font-mono"
-								placeholder="2.0"
-								value={(retryPolicyObj().backoffCoefficient as number | undefined) ?? ''}
-								oninput={(e) => {
-									const n = parseSeconds((e.target as HTMLInputElement).value);
-									patchRetryPolicy('backoffCoefficient', n);
-								}}
-							/>
-						</div>
-						<div class="flex flex-col gap-0.5">
-							<label class="text-base-content/40 text-[9px]" for="np-rp-initial"
-								>Initial interval (s)</label
-							>
-							<input
-								id="np-rp-initial"
-								type="number"
-								min="0"
-								class="input input-xs w-full font-mono"
-								placeholder="1"
-								value={durationSeconds(retryPolicyObj(), 'initialInterval')}
-								oninput={(e) => {
-									const secs = parseSeconds((e.target as HTMLInputElement).value);
-									patchRetryPolicy(
-										'initialInterval',
-										secs !== undefined ? { seconds: secs } : undefined
-									);
-								}}
-							/>
-						</div>
-						<div class="flex flex-col gap-0.5">
-							<label class="text-base-content/40 text-[9px]" for="np-rp-max">Max interval (s)</label
-							>
-							<input
-								id="np-rp-max"
-								type="number"
-								min="0"
-								class="input input-xs w-full font-mono"
-								placeholder="100"
-								value={durationSeconds(retryPolicyObj(), 'maximumInterval')}
-								oninput={(e) => {
-									const secs = parseSeconds((e.target as HTMLInputElement).value);
-									patchRetryPolicy(
-										'maximumInterval',
-										secs !== undefined ? { seconds: secs } : undefined
-									);
-								}}
-							/>
-						</div>
-					</div>
-					<p class="text-base-content/25 text-[9px]">
-						Leave blank to use Temporal's defaults (5 attempts, 2x backoff).
+			<div class="border-base-200 border-t px-3">
+				<!-- ── GUARD (shared `if:` — skip this task unless truthy) ──── -->
+				<Accordion title="Run only if" defaultOpen={!!f('if')}>
+					<ConditionBuilder
+						value={f('if')}
+						availVars={availableVars}
+						onchange={(v) => patch('if', v)}
+					/>
+					<p class="text-base-content/30 mt-1 text-[9px]">
+						This task runs only when the jq expression is truthy. Leave blank to always run.
 					</p>
-				</div>
+				</Accordion>
+
+				<!-- ── DATA FLOW ──────────────────────────────────────────── -->
+				<Accordion title="Data Flow" defaultOpen={!!f('outputAs') || !!f('exportAs')}>
+					<div class="flex flex-col gap-2">
+						<div class="flex flex-col gap-0.5">
+							<span class="text-base-content/40 font-mono text-[10px]">output.as</span>
+							<ExpressionInput
+								value={f('outputAs')}
+								placeholder={'${ { key: .field } }  (reshape $output)'}
+								availVars={availableVars}
+								onchange={(v) => patch('outputAs', v)}
+							/>
+						</div>
+						<div class="flex flex-col gap-0.5">
+							<span class="text-base-content/40 font-mono text-[10px]">export.as</span>
+							<ExpressionInput
+								value={f('exportAs')}
+								placeholder={'${ $context + { key: $output } }'}
+								availVars={availableVars}
+								onchange={(v) => patch('exportAs', v)}
+							/>
+							<p class="text-base-content/25 text-[9px]">
+								Accumulated into $context — readable by any downstream task
+							</p>
+						</div>
+					</div>
+				</Accordion>
+
+				<!-- ── ACTIVITY OPTIONS (metadata.activityOptions) ────────── -->
+				<Accordion
+					title="Activity Options"
+					defaultOpen={Object.keys(activityOptionsObj()).length > 0}
+				>
+					<div class="flex flex-col gap-2">
+						<div class="flex flex-col gap-0.5">
+							<label class="text-base-content/40 font-mono text-[10px]" for="np-heartbeat"
+								>heartbeatTimeout (seconds)</label
+							>
+							<input
+								id="np-heartbeat"
+								type="number"
+								min="0"
+								class="input input-xs w-full font-mono"
+								placeholder="e.g. 30"
+								value={durationSeconds(activityOptionsObj(), 'heartbeatTimeout')}
+								oninput={(e) => {
+									const secs = parseSeconds((e.target as HTMLInputElement).value);
+									patchActivityOption(
+										'heartbeatTimeout',
+										secs !== undefined ? { seconds: secs } : undefined
+									);
+								}}
+							/>
+							<p class="text-base-content/25 text-[9px]">
+								A heartbeat must be sent before this interval passes, or the activity is
+								considered failed.
+							</p>
+						</div>
+						<p class="text-base-content/40 mt-1 font-mono text-[10px]">retryPolicy</p>
+						<div class="grid grid-cols-2 gap-1.5">
+							<div class="flex flex-col gap-0.5">
+								<label class="text-base-content/40 text-[9px]" for="np-rp-attempts"
+									>Max attempts</label
+								>
+								<input
+									id="np-rp-attempts"
+									type="number"
+									min="0"
+									class="input input-xs w-full font-mono"
+									placeholder="5"
+									value={(retryPolicyObj().maximumAttempts as number | undefined) ?? ''}
+									oninput={(e) => {
+										const n = parseSeconds((e.target as HTMLInputElement).value);
+										patchRetryPolicy(
+											'maximumAttempts',
+											n !== undefined ? Math.trunc(n) : undefined
+										);
+									}}
+								/>
+							</div>
+							<div class="flex flex-col gap-0.5">
+								<label class="text-base-content/40 text-[9px]" for="np-rp-backoff"
+									>Backoff coefficient</label
+								>
+								<input
+									id="np-rp-backoff"
+									type="number"
+									min="1"
+									step="0.1"
+									class="input input-xs w-full font-mono"
+									placeholder="2.0"
+									value={(retryPolicyObj().backoffCoefficient as number | undefined) ?? ''}
+									oninput={(e) => {
+										const n = parseSeconds((e.target as HTMLInputElement).value);
+										patchRetryPolicy('backoffCoefficient', n);
+									}}
+								/>
+							</div>
+							<div class="flex flex-col gap-0.5">
+								<label class="text-base-content/40 text-[9px]" for="np-rp-initial"
+									>Initial interval (s)</label
+								>
+								<input
+									id="np-rp-initial"
+									type="number"
+									min="0"
+									class="input input-xs w-full font-mono"
+									placeholder="1"
+									value={durationSeconds(retryPolicyObj(), 'initialInterval')}
+									oninput={(e) => {
+										const secs = parseSeconds((e.target as HTMLInputElement).value);
+										patchRetryPolicy(
+											'initialInterval',
+											secs !== undefined ? { seconds: secs } : undefined
+										);
+									}}
+								/>
+							</div>
+							<div class="flex flex-col gap-0.5">
+								<label class="text-base-content/40 text-[9px]" for="np-rp-max"
+									>Max interval (s)</label
+								>
+								<input
+									id="np-rp-max"
+									type="number"
+									min="0"
+									class="input input-xs w-full font-mono"
+									placeholder="100"
+									value={durationSeconds(retryPolicyObj(), 'maximumInterval')}
+									oninput={(e) => {
+										const secs = parseSeconds((e.target as HTMLInputElement).value);
+										patchRetryPolicy(
+											'maximumInterval',
+											secs !== undefined ? { seconds: secs } : undefined
+										);
+									}}
+								/>
+							</div>
+						</div>
+						<p class="text-base-content/25 text-[9px]">
+							Leave blank to use Temporal's defaults (5 attempts, 2x backoff).
+						</p>
+					</div>
+				</Accordion>
 			</div>
 		{/if}
 	</div>

@@ -222,6 +222,8 @@ function nodeToTask(
 	switch (type) {
 		case 'call':
 			return { ...base, call: 'http', with: httpWithFromData(data) };
+		case 'grpcCall':
+			return { ...base, call: 'grpc', with: grpcWithFromData(data) };
 		case 'set':
 			return { ...base, set: setMapFromData(data) };
 		case 'switch':
@@ -378,6 +380,21 @@ function httpWithFromData(data: Record<string, unknown>) {
 			? { output: data.output as 'raw' | 'response' }
 			: {}),
 		...(data.redirect === true ? { redirect: true } : {})
+	};
+}
+
+function grpcWithFromData(data: Record<string, unknown>) {
+	const args = parseJsonField(data.argumentsJson as string);
+	const port = data.servicePort;
+	return {
+		proto: { endpoint: (data.protoEndpoint as string) || '' },
+		service: {
+			host: (data.serviceHost as string) || '',
+			name: (data.serviceName as string) || '',
+			...(typeof port === 'number' ? { port } : {})
+		},
+		method: (data.method as string) || '',
+		...(args ? { arguments: args } : {})
 	};
 }
 
@@ -628,7 +645,7 @@ function isBareDoWrapper(task: TaskNode): task is TaskNode & { do: TaskList } {
 }
 
 function taskKindToNodeType(task: TaskNode): WorkflowNodeType {
-	if ('call' in task) return 'call';
+	if ('call' in task) return task.call === 'grpc' ? 'grpcCall' : 'call';
 	if ('for' in task) return 'for';
 	if ('fork' in task) return 'fork';
 	if ('listen' in task) return 'listen';
@@ -651,6 +668,18 @@ function dataFromTask(
 ): Record<string, unknown> {
 	const base = taskBaseToData(task);
 
+	if ('call' in task && task.call === 'grpc') {
+		const w = task.with;
+		return {
+			...base,
+			protoEndpoint: w.proto.endpoint,
+			serviceHost: w.service.host,
+			serviceName: w.service.name,
+			servicePort: w.service.port,
+			method: w.method,
+			argumentsJson: stringifyJsonField(w.arguments)
+		};
+	}
 	if ('call' in task) {
 		const w = task.with;
 		return {

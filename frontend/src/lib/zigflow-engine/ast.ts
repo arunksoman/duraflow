@@ -67,10 +67,19 @@ export interface HttpCallWith {
 
 /**
  * The schema's CallTask is a discriminated union of activity/grpc/http.
- * This app only constructs `http` today (product decision), but keeps the
- * union open so activity/grpc can be added later without a breaking change.
+ * This app constructs `http` and `grpc` (as two distinct canvas node types —
+ * see `graph.ts`'s `taskKindToNodeType`); `activity` is left for a future pass.
  */
 export type CallTask = TaskBase & { call: 'http'; with: HttpCallWith };
+
+export interface GrpcCallWith {
+	proto: ExternalResource;
+	service: { host: string; name: string; port?: number };
+	method: string;
+	arguments?: Record<string, unknown>;
+}
+
+export type GrpcCallTask = TaskBase & { call: 'grpc'; with: GrpcCallWith };
 
 // ── Do / For / Fork ──────────────────────────────────────────────────────
 
@@ -201,6 +210,7 @@ export type WaitTask = TaskBase & { wait: DurationFields | { until: string } };
 
 export type TaskNode =
 	| CallTask
+	| GrpcCallTask
 	| DoTask
 	| ForTask
 	| ForkTask
