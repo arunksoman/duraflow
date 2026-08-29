@@ -14,7 +14,7 @@ import (
 
 // Open connects to the database driver named in cfg and runs AutoMigrate for
 // every model. This is the entire migration story for now — swapping to
-// Postgres later is just database.driver: postgres + a DSN in config.yaml.
+// Postgres later is just DURAFLOW_DATABASE_DRIVER=postgres + a DSN.
 func Open(cfg config.DatabaseConfig) (*gorm.DB, error) {
 	var dialector gorm.Dialector
 	switch cfg.Driver {

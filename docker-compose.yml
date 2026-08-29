@@ -18,6 +18,13 @@ services:
       - ./backend/data:/app/data
     environment:
       DURAFLOW_TEMPORAL_ADDRESS: 'temporal:7233'
+      # Dev-only values — change these (or set real secrets via a .env file / your orchestrator)
+      # before running this anywhere but a local machine. No config file or image rebuild needed
+      # to change any of these; see backend/internal/config/config.go's Load().
+      DURAFLOW_AUTH_JWTSECRET: 'dev-only-change-me'
+      DURAFLOW_SEEDADMIN_EMAIL: 'admin'
+      DURAFLOW_SEEDADMIN_PASSWORD: 'admin'
+      DURAFLOW_SEEDADMIN_NAME: 'Admin'
     depends_on:
       temporal:
         condition: service_healthy
@@ -30,5 +37,11 @@ services:
       API_BASE_URL: 'http://backend:8000/api'
       PORT: '5173'
       HOST: '0.0.0.0'
+      # Without this, adapter-node infers the origin as https://<host> (see get_origin() in
+      # @sveltejs/adapter-node's handler.js, which defaults the protocol to "https" absent a
+      # PROTOCOL_HEADER), which doesn't match the plain-http Origin header the browser actually
+      # sends — SvelteKit's CSRF check then rejects every form POST. Must match how the app is
+      # actually reached in the browser; update this if you publish on a different host/port.
+      ORIGIN: 'http://localhost:5173'
     depends_on:
       - backend
