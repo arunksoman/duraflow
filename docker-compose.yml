@@ -22,8 +22,8 @@ services:
       # before running this anywhere but a local machine. No config file or image rebuild needed
       # to change any of these; see backend/internal/config/config.go's Load().
       DURAFLOW_AUTH_JWTSECRET: 'dev-only-change-me'
-      DURAFLOW_SEEDADMIN_EMAIL: 'admin'
-      DURAFLOW_SEEDADMIN_PASSWORD: 'admin'
+      DURAFLOW_SEEDADMIN_EMAIL: 'admin@duraflow.local'
+      DURAFLOW_SEEDADMIN_PASSWORD: 'changeme123'
       DURAFLOW_SEEDADMIN_NAME: 'Admin'
     depends_on:
       temporal:
