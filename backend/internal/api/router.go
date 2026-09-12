@@ -15,6 +15,7 @@ import (
 
 	"duraflow/backend/internal/auth"
 	"duraflow/backend/internal/config"
+	"duraflow/backend/internal/events"
 	"duraflow/backend/internal/temporalexec"
 )
 
@@ -23,6 +24,10 @@ type Deps struct {
 	DB       *gorm.DB
 	Temporal *temporalexec.LazyClient
 	Workers  *temporalexec.WorkerManager
+	// Bus fans live run events out to everyone watching an execution.
+	Bus *events.Broker
+	// Resolver maps the Temporal workflow executions those events come from back to runs.
+	Resolver *temporalexec.Resolver
 }
 
 type ctxKey string
@@ -60,6 +65,7 @@ func NewRouter(deps *Deps) *echo.Echo {
 	registerExecutionRoutes(api, deps, base)
 	registerScheduleRoutes(api, deps, base)
 	registerWorkerRoutes(api, deps, base)
+	registerTelemetryRoutes(api, deps, base)
 
 	return e
 }

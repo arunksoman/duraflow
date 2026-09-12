@@ -110,7 +110,7 @@ function argsFromText(raw: string | undefined): string[] {
 }
 
 /** Inverse of `stringifyInputSchema` — the document-level `input.schema` -> the Start node's flat field-list UI model. */
-function parseInputSchema(input: InputConfig | undefined): InputField[] {
+export function parseInputSchema(input: InputConfig | undefined): InputField[] {
 	const doc = input?.schema?.document as
 		{ properties?: Record<string, JsonSchemaProperty>; required?: string[] } | undefined;
 	if (!doc?.properties) return [];

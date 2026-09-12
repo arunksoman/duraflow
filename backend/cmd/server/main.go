@@ -13,6 +13,7 @@ import (
 	"duraflow/backend/internal/auth"
 	"duraflow/backend/internal/config"
 	"duraflow/backend/internal/db"
+	"duraflow/backend/internal/events"
 	"duraflow/backend/internal/models"
 	"duraflow/backend/internal/temporalexec"
 )
@@ -37,11 +38,36 @@ func main() {
 	temporalClient := temporalexec.NewLazyClient(cfg.Temporal.Address)
 	defer temporalClient.Close()
 
-	workers := temporalexec.NewWorkerManager(cfg.Temporal.ZigflowBinary, cfg.Temporal.WorkflowsDir, cfg.Temporal.Address)
+	workers := temporalexec.NewWorkerManager(cfg.Temporal, cfg.Telemetry)
 	defer workers.StopAll()
-	startWorkflowWorkers(conn, workers)
 
-	router := api.NewRouter(&api.Deps{Cfg: cfg, DB: conn, Temporal: temporalClient, Workers: workers})
+	bus := events.NewBroker()
+	resolver := temporalexec.NewResolver(conn, temporalClient, bus, cfg.Telemetry.RetentionPerExecution)
+
+	deps := &api.Deps{
+		Cfg:      cfg,
+		DB:       conn,
+		Temporal: temporalClient,
+		Workers:  workers,
+		Bus:      bus,
+		Resolver: resolver,
+	}
+
+	// A child workflow only becomes visible once its first event arrives, so this is where its
+	// completion watcher gets started.
+	resolver.OnExecutionDiscovered = func(execution models.Execution) {
+		go api.WatchExecutionUntilClosed(deps, execution.ID)
+	}
+
+	resolverCtx, stopResolver := context.WithCancel(context.Background())
+	defer stopResolver()
+	go resolver.Run(resolverCtx)
+
+	backfillWorkflowHeaders(conn)
+	startWorkflowWorkers(conn, workers)
+	resumeRunningExecutions(conn, deps)
+
+	router := api.NewRouter(deps)
 
 	log.Printf("duraflow backend listening on %s (docs at %s/docs, api at %s)",
 		cfg.Server.Addr(), cfg.Server.Addr(), cfg.Server.BasePath)
@@ -102,5 +128,40 @@ func startWorkflowWorkers(conn *gorm.DB, workers *temporalexec.WorkerManager) {
 	}
 	for _, wf := range workflows {
 		workers.Sync(wf.ID, wf.Name, wf.DSL)
+	}
+}
+
+// backfillWorkflowHeaders fills the workflowType/taskQueue columns denormalized from the DSL for
+// workflows stored before those columns existed. Without them, a child workflow discovered at
+// runtime can't be matched back to the workflow it belongs to.
+func backfillWorkflowHeaders(conn *gorm.DB) {
+	var workflows []models.Workflow
+	if err := conn.Where("dsl <> '' AND (workflow_type IS NULL OR workflow_type = '')").
+		Find(&workflows).Error; err != nil {
+		log.Printf("backfilling workflow headers: %v", err)
+		return
+	}
+	for _, wf := range workflows {
+		taskQueue, workflowType, err := api.ParseDSLHeader(wf.DSL)
+		if err != nil || workflowType == "" {
+			continue
+		}
+		if err := conn.Model(&models.Workflow{}).Where("id = ?", wf.ID).
+			Updates(map[string]any{"workflow_type": workflowType, "task_queue": taskQueue}).Error; err != nil {
+			log.Printf("backfilling workflow %s header: %v", wf.ID, err)
+		}
+	}
+}
+
+// resumeRunningExecutions re-attaches a completion watcher to every execution still marked
+// running, so a backend restart mid-run doesn't leave it stuck at "running" forever.
+func resumeRunningExecutions(conn *gorm.DB, deps *api.Deps) {
+	var executions []models.Execution
+	if err := conn.Where("status = ?", models.ExecutionRunning).Find(&executions).Error; err != nil {
+		log.Printf("resuming running executions: %v", err)
+		return
+	}
+	for _, execution := range executions {
+		go api.WatchExecutionUntilClosed(deps, execution.ID)
 	}
 }

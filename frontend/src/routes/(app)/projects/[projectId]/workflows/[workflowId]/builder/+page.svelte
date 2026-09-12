@@ -14,7 +14,16 @@
 
 	import { page } from '$app/state';
 	import { enhance } from '$app/forms';
-	import { ArrowLeft, CircleCheck, Code2, Save, SlidersHorizontal, Workflow } from '@lucide/svelte';
+	import {
+		ArrowLeft,
+		CircleCheck,
+		Code2,
+		Play,
+		Save,
+		ScrollText,
+		SlidersHorizontal,
+		Workflow
+	} from '@lucide/svelte';
 	import ThemeToggle from '$lib/components/ThemeToggle.svelte';
 
 	import WorkflowNode from '$lib/components/builder/WorkflowNode.svelte';
@@ -26,6 +35,15 @@
 	import CodeMirrorEditor from '$lib/components/editor/CodeMirrorEditor.svelte';
 	import { NODE_META, NODE_TYPES } from '$lib/components/builder/builderConfig';
 	import { astToGraph, graphToAst, type ScopeGraph } from '$lib/zigflow-engine/graph';
+	import { buildRunIndex, type RunIndex } from '$lib/zigflow-engine/runIndex';
+	import {
+		buildInputSkeleton,
+		coerceInput,
+		validateInput
+	} from '$lib/zigflow-engine/inputSchema';
+	import { RunSession } from '$lib/runtime/runSession.svelte';
+	import RunView from '$lib/components/execution/RunView.svelte';
+	import WorkflowInputForm from '$lib/components/execution/WorkflowInputForm.svelte';
 	import { serializeZigflowDocument } from '$lib/zigflow-engine/serialize';
 	import {
 		deserializeZigflowDocument,
@@ -45,7 +63,7 @@
 		OWNER_SCOPE_TAG
 	} from '$lib/zigflow-engine/inlineScopeView';
 	import type { Diagnostic } from '@codemirror/lint';
-	import type { WorkflowNodeType, WorkflowMeta } from '$lib/types';
+	import type { WorkflowNodeType, WorkflowMeta, InputField } from '$lib/types';
 	import type { PageProps } from './$types';
 
 	let { data }: PageProps = $props();
@@ -191,6 +209,121 @@
 	let saved = $state(false);
 	let showDsl = $state(false);
 	let showVariables = $state(false);
+
+	// ── Run — live per-node state, log and results while an execution runs ────
+
+	const session = new RunSession();
+	let runError = $state<string | null>(null);
+	let showRunInput = $state(false);
+	let runInput = $state<Record<string, unknown>>({});
+	let runInputErrors = $state<Record<string, string>>({});
+	let runInputJsonError = $state<string | null>(null);
+	let runFormEl: HTMLFormElement | undefined = $state();
+	let showRunPanel = $state(false);
+	let runPanelHeight = $state(280);
+
+	/**
+	 * The task-name-to-node mapping used to interpret a run's events. Frozen for the duration of
+	 * the run: it has to describe the DSL that was actually submitted, so editing the canvas
+	 * mid-run must not change how incoming events are attributed.
+	 */
+	let runIndex = $state<RunIndex>(buildRunIndex({ scopes: {} }));
+	let runDsl = $state<string | null>(null);
+
+	const running = $derived(session.status === 'starting' || session.status === 'running');
+
+	$effect(() => {
+		return () => session.stop();
+	});
+
+	// Project run state onto the canvas. Reads `nodes` untracked — it writes `nodes`, and a tracked
+	// read of the same state in the same effect is an infinite-loop trap.
+	$effect(() => {
+		const byNode = session.run.byNode;
+		const current = untrack(() => nodes);
+		let changed = false;
+
+		const next = current.map((node) => {
+			const detail = byNode[node.id];
+			const data = node.data as Record<string, unknown>;
+			const nextState = detail?.state;
+			const nextAttempts = detail?.attempts ?? 0;
+			const nextChild = detail?.childExecutionId;
+
+			if (
+				data.runState === nextState &&
+				data.runAttempts === nextAttempts &&
+				data.childExecutionId === nextChild
+			) {
+				return node;
+			}
+			changed = true;
+			return {
+				...node,
+				data: {
+					...data,
+					runState: nextState,
+					runAttempts: nextAttempts,
+					childExecutionId: nextChild
+				}
+			};
+		});
+
+		if (changed) nodes = next;
+	});
+
+	/**
+	 * A run always executes the DSL currently on screen, so the schema to collect input against is
+	 * the one on screen too. The modal is shown even when nothing is declared, so there is one
+	 * consistent confirm step before a run starts.
+	 */
+	function startRun() {
+		runError = null;
+		runInputErrors = {};
+		runInputJsonError = null;
+		runInput = buildInputSkeleton(workflowMeta.inputSchema ?? []);
+		showRunInput = true;
+	}
+
+	function confirmRunInput() {
+		const fields = workflowMeta.inputSchema ?? [];
+		const coerced = coerceInput(fields, runInput);
+		runInputErrors = validateInput(fields, coerced);
+		if (Object.keys(runInputErrors).length > 0 || runInputJsonError) return;
+
+		runInput = coerced;
+		showRunInput = false;
+		showRunPanel = true;
+		runIndex = buildRunIndex({ scopes });
+		runDsl = dsl;
+		session.beginStarting(runIndex);
+		runFormEl?.requestSubmit();
+	}
+
+	function selectNodeFromRun(nodeId: string) {
+		configNodeId = nodeId;
+		nodes = nodes.map((n) => ({ ...n, selected: n.id === nodeId }));
+	}
+
+	function startRunPanelResize(e: MouseEvent) {
+		e.preventDefault();
+		const startY = e.clientY;
+		const startH = runPanelHeight;
+		document.body.style.cursor = 'row-resize';
+		document.body.style.userSelect = 'none';
+
+		function onMove(ev: MouseEvent) {
+			runPanelHeight = Math.max(140, Math.min(600, startH + (startY - ev.clientY)));
+		}
+		function onUp() {
+			document.body.style.cursor = '';
+			document.body.style.userSelect = '';
+			window.removeEventListener('mousemove', onMove);
+			window.removeEventListener('mouseup', onUp);
+		}
+		window.addEventListener('mousemove', onMove);
+		window.addEventListener('mouseup', onUp);
+	}
 	let configNodeId = $state<string | null>(null);
 	let screenToFlowPosition:
 		((pos: { x: number; y: number }) => { x: number; y: number }) | undefined = $state();
@@ -199,6 +332,11 @@
 		configNodeId ? (nodes.find((n) => n.id === configNodeId) ?? null) : null
 	);
 	const dsl = $derived(serializeZigflowDocument(graphToAst({ scopes }, workflowMeta)));
+
+	/** True once the canvas has moved on from the DSL the in-flight run is actually executing. */
+	const canvasEditedDuringRun = $derived(
+		session.status === 'running' && runDsl !== null && runDsl !== dsl
+	);
 
 	// ── DSL panel — bidirectional editor, gated by grammar validation ─
 
@@ -432,6 +570,56 @@
 			Variables
 		</button>
 		<ThemeToggle />
+		<form
+			method="POST"
+			action="?/run"
+			bind:this={runFormEl}
+			use:enhance={({ formData }) => {
+				// Filled here rather than mirrored into hidden inputs: `confirmRunInput` submits the
+				// form in the same tick it sets the values, and hidden-input bindings don't update
+				// until after the request has already gone out.
+				formData.set('dsl', dsl);
+				formData.set('input', JSON.stringify(runInput));
+				runError = null;
+
+				return async ({ result }) => {
+					const execution = (result as { data?: { execution?: { id: string } } }).data?.execution;
+					if (result.type === 'success' && execution) {
+						session.start(execution.id, runIndex);
+					} else {
+						session.stop();
+						session.status = 'idle';
+						runError =
+							result.type === 'failure'
+								? ((result.data as { error?: string })?.error ?? 'Failed to start the run')
+								: 'Failed to start the run';
+					}
+				};
+			}}
+		>
+			<button
+				type="button"
+				class="btn btn-primary btn-sm gap-1.5"
+				disabled={running}
+				onclick={startRun}
+				title="Save and run this workflow"
+			>
+				<Play size={14} />
+				{running ? 'Running…' : 'Run'}
+			</button>
+		</form>
+		<button
+			class="btn btn-ghost btn-sm gap-1.5"
+			class:btn-active={showRunPanel}
+			onclick={() => (showRunPanel = !showRunPanel)}
+			title="Show this run's log, per-node input/output and child runs"
+		>
+			<ScrollText size={14} />
+			Run log
+		</button>
+		{#if runError}
+			<span class="text-error max-w-48 truncate text-xs" title={runError}>{runError}</span>
+		{/if}
 		<button
 			class="btn btn-ghost btn-sm gap-1.5"
 			class:btn-active={showDsl}
@@ -518,6 +706,7 @@
 				{nodes}
 				{edges}
 				{workflowMeta}
+				siblingWorkflows={data.siblingWorkflows}
 				width={panelWidth}
 				onclose={() => (configNodeId = null)}
 				onupdate={updateNodeData}
@@ -526,7 +715,67 @@
 			/>
 		{/if}
 	</div>
+
+	<!-- Run panel — what the run did, docked under the canvas -->
+	{#if showRunPanel}
+		<button
+			class="bg-base-300 hover:bg-primary/40 active:bg-primary/60 h-1 w-full shrink-0 cursor-row-resize border-0 p-0 transition-colors"
+			onmousedown={startRunPanelResize}
+			aria-label="Drag to resize the run panel"
+		></button>
+		<div class="shrink-0" style:height="{runPanelHeight}px">
+			{#if canvasEditedDuringRun}
+				<div class="alert alert-warning rounded-none py-1.5 text-xs">
+					<span>
+						The canvas changed since this run started — highlighting reflects the DSL that was run.
+					</span>
+				</div>
+			{/if}
+			<RunView
+				{session}
+				index={runIndex}
+				{nodes}
+				selectedNodeId={configNodeId}
+				onselectnode={selectNodeFromRun}
+				fullRunHref={session.executionId ? `/executions/${session.executionId}` : undefined}
+			/>
+		</div>
+	{/if}
 </div>
+
+<!-- Run input modal — the one confirm step before a run, schema or not -->
+{#if showRunInput}
+	<div class="modal modal-open z-50">
+		<div class="modal-box max-w-2xl">
+			<h3 class="text-lg font-semibold">Run "{workflowName}"</h3>
+			<p class="text-base-content/60 mt-1 text-sm">
+				The canvas is saved and then executed. Values below are passed as <code>$input</code>.
+			</p>
+
+			<div class="mt-4">
+				<WorkflowInputForm
+					fields={workflowMeta.inputSchema ?? []}
+					bind:value={runInput}
+					errors={runInputErrors}
+					onjsonerror={(message) => (runInputJsonError = message)}
+				/>
+			</div>
+
+			<div class="modal-action">
+				<button type="button" class="btn" onclick={() => (showRunInput = false)}>Cancel</button>
+				<button
+					type="button"
+					class="btn btn-primary"
+					disabled={!!runInputJsonError}
+					onclick={confirmRunInput}
+				>
+					<Play size={14} />
+					Run
+				</button>
+			</div>
+		</div>
+	</div>
+{/if}
 
 <!-- Workflow Variables modal -->
 {#if showVariables}

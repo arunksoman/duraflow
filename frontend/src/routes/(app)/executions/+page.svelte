@@ -1,6 +1,8 @@
 <script lang="ts">
 	import { enhance } from '$app/forms';
 	import { ListChecks, Play } from '@lucide/svelte';
+	import WorkflowInputForm from '$lib/components/execution/WorkflowInputForm.svelte';
+	import { coerceInput, validateInput } from '$lib/zigflow-engine/inputSchema';
 	import type { PageProps } from './$types';
 	import type { ExecutionStatus } from '$lib/types';
 
@@ -8,6 +10,23 @@
 
 	let dialogEl: HTMLDialogElement | undefined;
 	let running = $state(false);
+
+	// The input form is built from the selected workflow's declared fields, so the dialog can't
+	// render it until one is chosen.
+	let selectedWorkflowId = $state('');
+	let runInput = $state<Record<string, unknown>>({});
+	let runInputErrors = $state<Record<string, string>>({});
+	let runInputJsonError = $state<string | null>(null);
+
+	const selectedWorkflow = $derived(data.workflows.find((w) => w.id === selectedWorkflowId));
+	const inputFields = $derived(selectedWorkflow?.inputSchema ?? []);
+
+	function selectWorkflow(id: string) {
+		selectedWorkflowId = id;
+		runInput = {};
+		runInputErrors = {};
+		runInputJsonError = null;
+	}
 
 	function dialogRef(node: HTMLDialogElement) {
 		dialogEl = node;
@@ -60,7 +79,18 @@
 						<span class="badge {statusClass[execution.status]} badge-sm">{execution.status}</span>
 						<span class="font-medium">{execution.workflowName}</span>
 						{#if execution.parentExecutionId}
-							<span class="badge badge-ghost badge-xs">child of {execution.parentExecutionId.slice(0, 8)}</span>
+							<a
+								class="badge badge-ghost badge-xs"
+								href="/executions/{execution.parentExecutionId}"
+								onclick={(e) => e.stopPropagation()}
+							>
+								child of {execution.parentExecutionId.slice(0, 8)}
+							</a>
+						{/if}
+						{#if execution.error}
+							<span class="text-error max-w-64 truncate text-xs" title={execution.error}>
+								{execution.error}
+							</span>
 						{/if}
 						<span class="text-base-content/50 ml-auto text-xs">
 							{new Date(execution.startedAt).toLocaleString()}
@@ -86,6 +116,11 @@
 									? JSON.stringify(execution.output, null, 2)
 									: '—'}</pre>
 						</div>
+						<div class="sm:col-span-2">
+							<a class="link link-hover text-xs" href="/executions/{execution.id}">
+								Open run — timeline, per-node input/output and child runs →
+							</a>
+						</div>
 					</div>
 				</details>
 			{/each}
@@ -101,7 +136,15 @@
 			method="POST"
 			action="?/run"
 			class="mt-4 flex flex-col gap-3"
-			use:enhance={() => {
+			use:enhance={({ formData, cancel }) => {
+				const coerced = coerceInput(inputFields, runInput);
+				runInputErrors = validateInput(inputFields, coerced);
+				if (Object.keys(runInputErrors).length > 0 || runInputJsonError) {
+					cancel();
+					return;
+				}
+				formData.set('input', JSON.stringify(coerced));
+
 				running = true;
 				return async ({ result, update }) => {
 					running = false;
@@ -116,23 +159,33 @@
 
 			<label class="fieldset-label flex flex-col gap-1">
 				<span class="text-sm font-medium">Workflow</span>
-				<select name="workflowId" class="select w-full" required>
-					<option value="" disabled selected>Choose a workflow…</option>
+				<select
+					name="workflowId"
+					class="select w-full"
+					required
+					value={selectedWorkflowId}
+					onchange={(e) => selectWorkflow(e.currentTarget.value)}
+				>
+					<option value="" disabled>Choose a workflow…</option>
 					{#each data.workflows as workflow (workflow.id)}
 						<option value={workflow.id}>{workflow.projectName} / {workflow.name}</option>
 					{/each}
 				</select>
 			</label>
 
-			<label class="fieldset-label flex flex-col gap-1">
-				<span class="text-sm font-medium">Input (optional JSON)</span>
-				<textarea
-					name="input"
-					class="textarea w-full font-mono"
-					rows="4"
-					placeholder={'{ "key": "value" }'}>{form?.inputRaw ?? ''}</textarea
-				>
-			</label>
+			{#if selectedWorkflow}
+				<div class="fieldset-label flex flex-col gap-1">
+					<span class="text-sm font-medium">Input</span>
+					{#key selectedWorkflowId}
+						<WorkflowInputForm
+							fields={inputFields}
+							bind:value={runInput}
+							errors={runInputErrors}
+							onjsonerror={(message) => (runInputJsonError = message)}
+						/>
+					{/key}
+				</div>
+			{/if}
 
 			<p class="text-base-content/50 text-xs">
 				Requires a `zigflow` worker already registered for the workflow's task queue — save the
@@ -141,7 +194,11 @@
 
 			<div class="modal-action">
 				<button type="button" class="btn" onclick={() => dialogEl?.close()}>Cancel</button>
-				<button type="submit" class="btn btn-primary" disabled={running}>
+				<button
+					type="submit"
+					class="btn btn-primary"
+					disabled={running || !selectedWorkflowId || !!runInputJsonError}
+				>
 					{running ? 'Starting…' : 'Run'}
 				</button>
 			</div>

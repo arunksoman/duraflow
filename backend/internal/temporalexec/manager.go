@@ -6,12 +6,22 @@ import (
 	"io"
 	"log"
 	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
+
+	"gopkg.in/yaml.v3"
+
+	"duraflow/backend/internal/config"
 )
+
+// TelemetryTokenHeader carries the shared secret from a spawned worker to this server's
+// CloudEvents ingest endpoint. Defined here because WorkerManager writes it and api reads it.
+const TelemetryTokenHeader = "X-Duraflow-Token"
 
 // WorkerManager owns one `zigflow run -f <workflow>.yaml` subprocess per workflow that has a
 // non-blank DSL — each such process is a Temporal worker registering that workflow's
@@ -21,30 +31,32 @@ type WorkerManager struct {
 	binary          string
 	workflowsDir    string
 	temporalAddress string
+	telemetry       config.TelemetryConfig
 	available       bool
 
 	mu      sync.Mutex
 	workers map[string]*exec.Cmd
 }
 
-func NewWorkerManager(binary, workflowsDir, temporalAddress string) *WorkerManager {
+func NewWorkerManager(temporal config.TemporalConfig, telemetry config.TelemetryConfig) *WorkerManager {
 	available := true
-	if _, err := exec.LookPath(binary); err != nil {
+	if _, err := exec.LookPath(temporal.ZigflowBinary); err != nil {
 		log.Printf(
 			"zigflow binary %q not found on PATH — workflow execution workers will not start "+
 				"(install: go install github.com/zigflow/zigflow@latest)",
-			binary,
+			temporal.ZigflowBinary,
 		)
 		available = false
 	}
-	if err := os.MkdirAll(workflowsDir, 0o755); err != nil {
-		log.Printf("creating workflows dir %s: %v", workflowsDir, err)
+	if err := os.MkdirAll(temporal.WorkflowsDir, 0o755); err != nil {
+		log.Printf("creating workflows dir %s: %v", temporal.WorkflowsDir, err)
 	}
 
 	return &WorkerManager{
-		binary:          binary,
-		workflowsDir:    workflowsDir,
-		temporalAddress: temporalAddress,
+		binary:          temporal.ZigflowBinary,
+		workflowsDir:    temporal.WorkflowsDir,
+		temporalAddress: temporal.Address,
+		telemetry:       telemetry,
 		available:       available,
 		workers:         map[string]*exec.Cmd{},
 	}
@@ -52,6 +64,63 @@ func NewWorkerManager(binary, workflowsDir, temporalAddress string) *WorkerManag
 
 func (m *WorkerManager) filePath(id string) string {
 	return filepath.Join(m.workflowsDir, id+".yaml")
+}
+
+func (m *WorkerManager) cloudEventsPath(id string) string {
+	return filepath.Join(m.workflowsDir, id+".cloudevents.yaml")
+}
+
+// cloudEventsConfig mirrors zigflow's `--cloudevents-config` file shape (pkg/cloudevents's
+// Events/ClientConfig). Marshalled rather than templated because the target URL and token are
+// values, not literals.
+type cloudEventsConfig struct {
+	Clients []cloudEventsClient `yaml:"clients"`
+}
+
+type cloudEventsClient struct {
+	Name     string         `yaml:"name"`
+	Protocol string         `yaml:"protocol"`
+	Target   string         `yaml:"target"`
+	Options  map[string]any `yaml:"options,omitempty"`
+}
+
+// writeCloudEventsConfig points a worker's CloudEvents emitter at this server's ingest endpoint,
+// which is what makes per-task progress, input and output visible in the UI at all. Returns the
+// config path, or "" when telemetry is disabled or the file couldn't be written (the worker then
+// simply starts without it and the run shows no task detail).
+func (m *WorkerManager) writeCloudEventsConfig(id, name string) string {
+	if m.telemetry.SinkURL == "" {
+		return ""
+	}
+
+	timeout := m.telemetry.Timeout
+	if timeout <= 0 {
+		timeout = time.Second
+	}
+
+	cfg := cloudEventsConfig{Clients: []cloudEventsClient{{
+		Name:     "duraflow",
+		Protocol: "http",
+		Target:   m.telemetry.SinkURL,
+		Options: map[string]any{
+			"method":  "POST",
+			"timeout": timeout.String(),
+			"headers": map[string]string{TelemetryTokenHeader: m.telemetry.Token},
+		},
+	}}}
+
+	raw, err := yaml.Marshal(cfg)
+	if err != nil {
+		log.Printf("[worker:%s] building cloudevents config: %v", name, err)
+		return ""
+	}
+
+	path := m.cloudEventsPath(id)
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		log.Printf("[worker:%s] writing cloudevents config: %v", name, err)
+		return ""
+	}
+	return path
 }
 
 // Sync (re)starts the worker for a workflow after its DSL was created or changed. A blank DSL
@@ -71,6 +140,23 @@ func (m *WorkerManager) Sync(id, name, dsl string) {
 		return
 	}
 
+	healthAddr, prefix := m.startLocked(id, name, path)
+	if healthAddr == "" {
+		return
+	}
+
+	// Every DSL save kills and respawns this process, and the UI's Run button saves before it
+	// starts an execution. Returning before the new worker is polling Temporal means that first
+	// run fails with "no worker registered for this task queue" — so block until it's up. Done
+	// outside the lock: a slow worker must not stall every other workflow's sync.
+	if err := waitForWorkerReady(healthAddr, workerReadyTimeout); err != nil {
+		log.Printf("%s did not become ready: %v", prefix, err)
+	}
+}
+
+// startLocked spawns the worker process and returns its health address plus the log prefix, or
+// ("", "") if it couldn't be started.
+func (m *WorkerManager) startLocked(id, name, path string) (healthAddr, prefix string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.stopLocked(id)
@@ -82,21 +168,26 @@ func (m *WorkerManager) Sync(id, name, dsl string) {
 	metricsAddr, err := freeLoopbackAddr()
 	if err != nil {
 		log.Printf("[worker:%s] picking a metrics port: %v", name, err)
-		return
+		return "", ""
 	}
-	healthAddr, err := freeLoopbackAddr()
+	healthAddr, err = freeLoopbackAddr()
 	if err != nil {
 		log.Printf("[worker:%s] picking a health-check port: %v", name, err)
-		return
+		return "", ""
 	}
 
-	prefix := fmt.Sprintf("[worker:%s]", name)
-	cmd := exec.Command(
-		m.binary, "run", "-f", path,
+	args := []string{
+		"run", "-f", path,
 		"--temporal-address", m.temporalAddress,
 		"--metrics-listen-address", metricsAddr,
 		"--health-listen-address", healthAddr,
-	)
+	}
+	if eventsPath := m.writeCloudEventsConfig(id, name); eventsPath != "" {
+		args = append(args, "--cloudevents-config", eventsPath)
+	}
+
+	prefix = fmt.Sprintf("[worker:%s]", name)
+	cmd := exec.Command(m.binary, args...)
 	stdout := prefixedWriter(prefix)
 	stderr := prefixedWriter(prefix)
 	cmd.Stdout = stdout
@@ -106,7 +197,7 @@ func (m *WorkerManager) Sync(id, name, dsl string) {
 		log.Printf("%s failed to start: %v", prefix, err)
 		_ = stdout.Close()
 		_ = stderr.Close()
-		return
+		return "", ""
 	}
 	log.Printf("%s started (pid %d)", prefix, cmd.Process.Pid)
 	m.workers[id] = cmd
@@ -116,15 +207,46 @@ func (m *WorkerManager) Sync(id, name, dsl string) {
 		_ = stdout.Close()
 		_ = stderr.Close()
 	}()
+
+	return healthAddr, prefix
 }
 
-// Stop kills a workflow's worker process, if any, and removes its DSL file.
+const (
+	workerReadyTimeout  = 15 * time.Second
+	workerReadyInterval = 100 * time.Millisecond
+)
+
+// waitForWorkerReady polls the health server zigflow starts on healthAddr until it answers.
+// A worker that never answers isn't treated as fatal — it may still come up moments later, and
+// failing the surrounding DSL save over it would be worse than a slow first run.
+func waitForWorkerReady(healthAddr string, timeout time.Duration) error {
+	client := &http.Client{Timeout: workerReadyInterval * 5}
+	url := "http://" + healthAddr + "/readyz"
+	deadline := time.Now().Add(timeout)
+
+	for {
+		resp, err := client.Get(url)
+		if err == nil {
+			_ = resp.Body.Close()
+			if resp.StatusCode < 500 {
+				return nil
+			}
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("health check %s not answering after %s", url, timeout)
+		}
+		time.Sleep(workerReadyInterval)
+	}
+}
+
+// Stop kills a workflow's worker process, if any, and removes the files spawned for it.
 func (m *WorkerManager) Stop(id string) {
 	m.mu.Lock()
 	m.stopLocked(id)
 	m.mu.Unlock()
 
 	_ = os.Remove(m.filePath(id))
+	_ = os.Remove(m.cloudEventsPath(id))
 }
 
 func (m *WorkerManager) stopLocked(id string) {

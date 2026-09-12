@@ -1,2 +1,5 @@
 *.db
+# WAL journal sidecars — SQLite now runs in WAL mode (see config.go's database.dsn default)
+*.db-shm
+*.db-wal
 /workflows/

@@ -1,8 +1,9 @@
 <script lang="ts">
 	import { Handle, Position, useSvelteFlow } from '@xyflow/svelte';
-	import { Trash2 } from '@lucide/svelte';
+	import { ExternalLink, Trash2 } from '@lucide/svelte';
 	import { NODE_META } from './builderConfig';
 	import type { WorkflowNodeType } from '$lib/types';
+	import type { NodeRunState } from '$lib/zigflow-engine/runState';
 
 	let {
 		id,
@@ -27,6 +28,12 @@
 	const meta = $derived(NODE_META[nodeType]);
 	const label = $derived((data.label as string) || meta.label);
 	const Icon = $derived(meta.icon);
+	// Run state, projected onto the node by whichever page is showing a run. `skipped` is the one
+	// that answers "which path did it take?" — it means the run finished without ever reaching
+	// this node.
+	const runState = $derived(data.runState as NodeRunState | undefined);
+	const runAttempts = $derived((data.runAttempts as number) ?? 0);
+	const childExecutionId = $derived(data.childExecutionId as string | undefined);
 
 	let isHovered = $state(false);
 
@@ -48,6 +55,14 @@
 	class="bg-base-100 border-base-300 relative w-44 select-none overflow-visible rounded-lg border shadow-sm transition-shadow"
 	class:ring-2={selected}
 	class:ring-offset-1={selected}
+	class:border-2={runState === 'success' || runState === 'error' || runState === 'running'}
+	class:border-success={runState === 'success'}
+	class:border-error={runState === 'error'}
+	class:border-info={runState === 'running'}
+	class:animate-pulse={runState === 'running'}
+	class:border-dashed={runState === 'skipped'}
+	class:opacity-40={runState === 'skipped'}
+	class:border-warning={runState === 'unknown'}
 	style:border-left="4px solid {meta.color}"
 	style:--tw-ring-color={meta.color}
 	onmouseenter={() => (isHovered = true)}
@@ -73,10 +88,32 @@
 		</div>
 		<span class="text-base-content min-w-0 flex-1 truncate text-xs font-semibold">{label}</span>
 	</div>
-	<div class="border-base-200 flex items-center border-t px-2.5 py-1.5">
+	<div class="border-base-200 flex items-center gap-1.5 border-t px-2.5 py-1.5">
 		<span class="text-base-content/40 font-mono text-[10px] uppercase tracking-wide">
 			{nodeType === 'childWorkflow' ? 'child-flow' : nodeType === 'grpcCall' ? 'grpc-call' : nodeType}
 		</span>
+		{#if runState === 'skipped'}
+			<span class="text-base-content/40 text-[10px]" title="Not on the path this run took">
+				not run
+			</span>
+		{:else if runState === 'unknown'}
+			<span class="text-warning text-[10px]" title="The run ended before this task reported back">
+				unresolved
+			</span>
+		{/if}
+		{#if runAttempts > 1}
+			<span class="badge badge-ghost badge-xs" title="{runAttempts} attempts">×{runAttempts}</span>
+		{/if}
+		{#if childExecutionId}
+			<a
+				class="text-base-content/60 hover:text-primary ml-auto"
+				href="/executions/{childExecutionId}"
+				title="Open this child workflow's run"
+				onclick={(e) => e.stopPropagation()}
+			>
+				<ExternalLink size={11} />
+			</a>
+		{/if}
 	</div>
 </div>
 
