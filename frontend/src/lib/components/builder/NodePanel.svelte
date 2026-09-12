@@ -2,7 +2,7 @@
 	import { untrack } from 'svelte';
 	import type { Node, Edge } from '@xyflow/svelte';
 	import { Plus, Trash2, X } from '@lucide/svelte';
-	import type { WorkflowMeta, InputField } from '$lib/types';
+	import type { WorkflowMeta, InputField, Workflow } from '$lib/types';
 	import { NODE_META } from './builderConfig';
 	import type { VarEntry, CaseEntry, EventEntry, BranchEntry } from './builderConfig';
 	import type { WorkflowNodeType } from '$lib/types';
@@ -11,12 +11,15 @@
 	import CodeMirrorEditor from '$lib/components/editor/CodeMirrorEditor.svelte';
 	import Accordion from './Accordion.svelte';
 	import { OWNER_SCOPE_TAG } from '$lib/zigflow-engine/inlineScopeView';
+	import { parseDocumentHeader } from '$lib/zigflow-engine/header';
 
 	interface Props {
 		node: Node;
 		nodes: Node[];
 		edges: Edge[];
 		workflowMeta: WorkflowMeta;
+		/** The project's other workflows, for the Child Workflow node's target picker. */
+		siblingWorkflows?: Workflow[];
 		width?: number;
 		onclose: () => void;
 		onupdate: (id: string, patch: Record<string, unknown>) => void;
@@ -31,12 +34,21 @@
 		nodes,
 		edges,
 		workflowMeta,
+		siblingWorkflows = [],
 		width = 340,
 		onclose,
 		onupdate,
 		onremovebranch,
 		onupdatemeta
 	}: Props = $props();
+
+	// { value: real document.workflowType, label: the sibling's display name } — a sibling with no
+	// saved/parseable DSL can't be a valid `run.workflow.type` target, so it's skipped entirely.
+	const childWorkflowOptions = $derived(
+		siblingWorkflows
+			.map((w) => ({ value: parseDocumentHeader(w.dsl)?.workflowType, label: w.name }))
+			.filter((o): o is { value: string; label: string } => !!o.value)
+	);
 
 	const nodeType = $derived<WorkflowNodeType>(
 		node && (node.type ?? 'set') in NODE_META ? (node.type as WorkflowNodeType) : 'set'
@@ -1551,13 +1563,20 @@
 						<label class="text-base-content/50 text-[10px] font-semibold uppercase" for="np-cwft"
 							>Workflow type</label
 						>
-						<input
+						<select
 							id="np-cwft"
-							class="input input-xs font-mono w-full"
-							placeholder="child-workflow-type"
+							class="select select-xs font-mono w-full"
 							value={f('workflowType')}
-							oninput={(e) => patch('workflowType', (e.target as HTMLInputElement).value)}
-						/>
+							onchange={(e) => patch('workflowType', (e.target as HTMLSelectElement).value)}
+						>
+							<option value="" disabled>Select a workflow…</option>
+							{#if f('workflowType') && !childWorkflowOptions.some((o) => o.value === f('workflowType'))}
+								<option value={f('workflowType')}>(current) {f('workflowType')}</option>
+							{/if}
+							{#each childWorkflowOptions as opt (opt.value)}
+								<option value={opt.value}>{opt.label}</option>
+							{/each}
+						</select>
 					</div>
 					<div class="flex flex-col gap-1">
 						<span class="text-base-content/50 text-[10px] font-semibold uppercase"

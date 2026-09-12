@@ -43,6 +43,20 @@ type updateWorkflowInput struct {
 	}
 }
 
+// applyDSLHeader refreshes the columns denormalized from the DSL's `document` header. Call it on
+// every write that can change the DSL, before saving — the resolver matches Temporal child
+// workflows back to a Workflow row through these two columns.
+func applyDSLHeader(workflow *models.Workflow) {
+	taskQueue, workflowType, err := parseDSLHeader(workflow.DSL)
+	if err != nil {
+		// A DSL that doesn't parse yet is normal mid-edit; just clear the derived columns so a
+		// stale workflow type can't keep matching child workflows.
+		workflow.TaskQueue, workflow.WorkflowType = "", ""
+		return
+	}
+	workflow.TaskQueue, workflow.WorkflowType = taskQueue, workflowType
+}
+
 // syncWorkerRegistration starts/updates the workflow's zigflow worker process and reflects its
 // presence in the `workers` table (best-effort — a workflow whose DSL doesn't yet have a valid
 // document.taskQueue just doesn't get a row), so the Workers page shows real spawned processes
@@ -106,6 +120,7 @@ func registerWorkflowRoutes(api huma.API, deps *Deps, base string) {
 			Version:     1,
 			DSL:         in.Body.DSL,
 		}
+		applyDSLHeader(&workflow)
 		if err := deps.DB.WithContext(ctx).Create(&workflow).Error; err != nil {
 			return nil, huma.Error500InternalServerError("failed to create workflow", err)
 		}
@@ -152,6 +167,7 @@ func registerWorkflowRoutes(api huma.API, deps *Deps, base string) {
 			workflow.DSL = *in.Body.DSL
 			workflow.Version++
 		}
+		applyDSLHeader(&workflow)
 		if err := deps.DB.WithContext(ctx).Save(&workflow).Error; err != nil {
 			return nil, huma.Error500InternalServerError("failed to update workflow", err)
 		}

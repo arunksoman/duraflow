@@ -66,8 +66,40 @@ export interface Execution {
 	startedAt: string;
 	completedAt?: string;
 	input?: Record<string, unknown>;
-	output?: Record<string, unknown>;
+	/** A workflow's `$output` is whatever its last task produced — not necessarily an object. */
+	output?: unknown;
 	parentExecutionId?: string;
+	temporalRunId?: string;
+	/** Failure message reported by Temporal once a non-completed run closed. */
+	error?: string;
+	/** Set only for child runs whose Temporal workflow type matched no stored workflow. */
+	workflowType?: string;
+	rootExecutionId?: string;
+	/** Which task on the parent's canvas started this child run, and where it sits. */
+	parentTaskName?: string;
+	parentScopePath?: string;
+}
+
+/**
+ * One moment in a run's timeline, as recorded by the backend from the CloudEvents its zigflow
+ * workers emit. Mirrors `executionEventDTO` in backend/internal/api/executions.go.
+ */
+export interface ExecutionEvent {
+	seq: number;
+	executionId: string;
+	rootExecutionId?: string;
+	/** The Temporal workflow execution this came from — a nested scope has its own. */
+	workflowExecutionId: string;
+	/** "" for the root scope, else "for_0", "try", "fork_<branch>", "for_0_try", … */
+	scopePath?: string;
+	/** "task.started" | "task.completed" | "task.faulted" | "workflow.completed" | … */
+	eventType: string;
+	taskName?: string;
+	attempt?: number;
+	occurredAt: string;
+	/** Payload: {input,state} / {input,output,state} / {error} depending on eventType. */
+	data?: Record<string, unknown>;
+	truncated?: boolean;
 }
 
 export type WorkerStatus = 'online' | 'offline' | 'draining';

@@ -78,7 +78,22 @@ In dev only, `getSessionUser` special-cases the literal cookie value `dev-bypass
 
 Shared domain types (`User`, `Project`, `Workflow`, `Execution`, `Schedule`, `Worker`, `WorkflowMeta`, etc.) live in `src/lib/types/index.ts` and are used on both client and server. The backend's GORM models and DTOs (`../backend/internal/models`, `../backend/internal/api`) mirror these field-for-field (camelCase JSON tags) — keep them in sync when either side changes.
 
-Every domain type has a real page now: `/dashboard` and `/projects/[projectId]` (projects + workflow list/create/delete), the builder (load/save DSL — see below), `/workers`, `/schedules`, `/executions` (all three top-level, aggregating across every project client-side in their `+page.server.ts` `load` since the backend has no cross-project list endpoints — see those files for the `Promise.all` fan-out pattern). `Sidebar.svelte`'s `navItems` no longer has any `enabled: false` entries. **Known gap**: the Executions page is a flat, sortable list with expandable input/output JSON — no timeline/graph visualization or child-workflow drill-down (`parentExecutionId` is shown as a small badge, not a navigable link). Flagged as a deliberate scope cut, not an oversight.
+Every domain type has a real page now: `/dashboard` and `/projects/[projectId]` (projects + workflow list/create/delete), the builder (load/save DSL — see below), `/workers`, `/schedules`, `/executions` (all three top-level, aggregating across every project client-side in their `+page.server.ts` `load` since the backend has no cross-project list endpoints — see those files for the `Promise.all` fan-out pattern). `Sidebar.svelte`'s `navItems` no longer has any `enabled: false` entries. `/executions` is the flat cross-project list (root runs only — child-workflow runs belong to their parent's timeline); `/executions/[id]` is a single run: a read-only canvas with the path it took highlighted, the task timeline, per-node input/output, and links into any child runs it started.
+
+### Run observability
+
+After a run starts, what happened comes from the backend's stored CloudEvents stream, not from Temporal history (see `backend/CLAUDE.md` for why). The frontend side is four pieces:
+
+| File | Responsibility |
+| --- | --- |
+| `zigflow-engine/runIndex.ts` | `buildRunIndex(graph)` — walks the scope tree from `ROOT_SCOPE_ID`, mapping `(scopeId, taskName) -> nodeId`. Task names are only unique *within* a scope, which is why this is not a flat map |
+| `zigflow-engine/runScope.ts` | Turns the backend's `scopePath` (`for_0`, `try`, `fork_<branch>`, `for_0_try`) into a canvas scope id, degrading to name-only matching rather than guessing |
+| `zigflow-engine/runState.ts` | Pure reducer: events → per-node state + log. `finalizeRunState` turns everything still `pending` into `skipped`, which is what makes the path *not* taken visible |
+| `runtime/runSession.svelte.ts` | Owns the `EventSource`, reconnects from `lastSeq`, and keeps child runs current. All decisions live in `runState.ts` so they stay testable |
+
+`components/execution/RunView.svelte` (the log/details/child-runs panel) and `components/execution/WorkflowInputForm.svelte` (typed `$input` form with a raw-JSON escape hatch) are shared verbatim between the builder and the execution page, so a live run and a replayed one render identically. `WorkflowNode.svelte` reads `data.runState` — `running`/`success`/`error`/`skipped`/`unknown` — plus `data.runAttempts` and `data.childExecutionId`.
+
+Build the run index at the moment you compute the DSL you're about to run, and freeze it for that run's duration: it has to describe the DSL that was actually submitted, or incoming events get attributed to the wrong nodes.
 
 ### Workflow builder & the Zigflow DSL engine
 
@@ -98,6 +113,9 @@ The canonical persisted form of a workflow is Zigflow YAML text (`Workflow.dsl`)
 | `inlineScopeView.ts` | Composes/decomposes the canvas's fully-inline rendering of nested scopes (see below) |
 | `scopeKey.ts` | Deterministic scope-id builders (`forScopeKey`, `tryScopeKey`, `catchScopeKey`, `forkBranchScopeKey`) shared by `graph.ts` and the Svelte layer |
 | `slug.ts` | Task-name slugging helpers |
+| `header.ts` | Tolerant, schema-free reads of a raw DSL string — `parseDocumentHeader` (taskQueue/workflowType) and `parseInputSchemaFromDsl`, for workflows never loaded into the canvas |
+| `inputSchema.ts` | The value side of a declared `$input` schema: skeletons, validation, form-string coercion |
+| `runIndex.ts` / `runScope.ts` / `runState.ts` | Run-to-canvas correlation — see "Run observability" above |
 
 The Svelte layer (`+page.svelte`, `NodePanel.svelte`) only ever calls the public functions (`serializeZigflowDocument`, `deserializeZigflowDocument`, `astToGraph`, `graphToAst`) — it never hand-builds YAML strings or task objects. Every engine file has a co-located `*.test.ts` under the vitest `server` project.
 

@@ -38,6 +38,8 @@ func Open(cfg config.DatabaseConfig) (*gorm.DB, error) {
 		&models.Execution{},
 		&models.Schedule{},
 		&models.Worker{},
+		&models.ExecutionEvent{},
+		&models.WorkflowExecutionRef{},
 	); err != nil {
 		return nil, fmt.Errorf("running migrations: %w", err)
 	}
