@@ -53,9 +53,10 @@ func ExtractTaskName(summary *commonpb.Payload, payloads *commonpb.Payloads) (st
 }
 
 // MapWorkflowStatus converts a Temporal workflow close status into this app's Execution status
-// enum. WORKFLOW_EXECUTION_STATUS_RUNNING (and CONTINUED_AS_NEW/PAUSED, which don't apply to
-// zigflow-run workflows) fall through to ExecutionRunning — the caller should only act on this
-// once it already knows the workflow is closed.
+// enum. WORKFLOW_EXECUTION_STATUS_RUNNING, CONTINUED_AS_NEW (a zigflow workflow with
+// `canMaxHistoryLength` rolls over mid-run — describe the latest run, not the first) and PAUSED
+// fall through to ExecutionRunning — the caller should only act on this once it already knows the
+// workflow is closed.
 func MapWorkflowStatus(status enumspb.WorkflowExecutionStatus) models.ExecutionStatus {
 	switch status {
 	case enumspb.WORKFLOW_EXECUTION_STATUS_COMPLETED:

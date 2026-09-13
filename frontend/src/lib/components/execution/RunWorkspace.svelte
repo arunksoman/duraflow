@@ -76,7 +76,9 @@
 			return session.status === 'idle' || session.status === 'starting' ? undefined : 'success';
 		}
 		if (node.type === 'end') {
-			if (session.status === 'completed') return 'success';
+			// The root workflow's own completion event is enough: it arrives before the server's
+			// terminal status, and is right even if that status is stale.
+			if (session.status === 'completed' || session.run.workflowCompleted) return 'success';
 			return session.run.finalized ? 'skipped' : undefined;
 		}
 		return byNode[node.id]?.state;
