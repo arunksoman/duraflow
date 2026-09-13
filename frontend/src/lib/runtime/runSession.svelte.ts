@@ -39,6 +39,8 @@ export class RunSession {
 	childRuns = $state<Execution[]>([]);
 
 	#index: RunIndex = EMPTY_INDEX;
+	/** Every event received for this run, by seq — what the state is rebuilt from when needed. */
+	#events = new Map<number, ExecutionEvent>();
 	#source: EventSource | null = null;
 	#reconnectAttempt = 0;
 	#reconnectTimer: ReturnType<typeof setTimeout> | undefined;
@@ -53,6 +55,7 @@ export class RunSession {
 		this.status = 'starting';
 		this.error = null;
 		this.run = initialRunState(index);
+		this.#events = new Map();
 		this.childRuns = [];
 	}
 
@@ -69,7 +72,9 @@ export class RunSession {
 		this.executionId = executionId;
 		this.error = null;
 		this.status = 'running';
-		this.run = reduceRunStateAll(initialRunState(index), seedEvents, index);
+		this.#events = new Map();
+		this.run = initialRunState(index);
+		this.#apply(seedEvents);
 		this.childRuns = [];
 
 		void this.#refreshChildren();
@@ -83,10 +88,8 @@ export class RunSession {
 		this.executionId = execution.id;
 		this.error = execution.error ?? null;
 		this.childRuns = children;
-		this.run = finalizeRunState(
-			reduceRunStateAll(initialRunState(index), events, index),
-			execution.status
-		);
+		this.#events = new Map(events.map((e) => [e.seq, e]));
+		this.run = finalizeRunState(this.#rebuild(), execution.status);
 		this.#attachChildren(children);
 		this.status = execution.status;
 	}
@@ -114,7 +117,7 @@ export class RunSession {
 
 		source.addEventListener('event', (e) => {
 			const event = parseEvent<ExecutionEvent>(e);
-			if (event) this.run = reduceRunStateAll(this.run, [event], this.#index);
+			if (event) this.#apply([event]);
 		});
 
 		source.addEventListener('status', (e) => {
@@ -153,24 +156,22 @@ export class RunSession {
 
 	async #finish(status: ExecutionStatus, error?: string) {
 		this.stop();
-		await this.#catchUp();
+		// The whole log, not just what's after `lastSeq`: an event resolved late can carry a lower
+		// seq than one already shown, and the finished run should reflect all of them.
+		await this.#catchUp(0);
 		await this.#refreshChildren();
 		this.status = status;
 		if (error) this.error = error;
 		this.run = finalizeRunState(this.run, status);
 	}
 
-	async #catchUp() {
+	async #catchUp(afterSeq = this.run.lastSeq) {
 		if (!this.executionId) return;
 		try {
-			const response = await fetch(
-				`/executions/${this.executionId}/events?afterSeq=${this.run.lastSeq}`
-			);
+			const response = await fetch(`/executions/${this.executionId}/events?afterSeq=${afterSeq}`);
 			if (!response.ok) return;
 			const body = (await response.json()) as { events: ExecutionEvent[] };
-			if (body.events?.length) {
-				this.run = reduceRunStateAll(this.run, body.events, this.#index);
-			}
+			if (body.events?.length) this.#apply(body.events);
 		} catch {
 			// Offline or the run was deleted; the timeline we already have still stands.
 		}
@@ -187,6 +188,36 @@ export class RunSession {
 		} catch {
 			// Child links are an enhancement; the run itself is unaffected.
 		}
+	}
+
+	/**
+	 * Folds in newly received events. Events normally arrive in seq order and are applied
+	 * incrementally, but the server can deliver one late (a task's start resolved after its
+	 * finish); the reducer ignores anything at or below the seq it has reached, so a late event
+	 * triggers a replay of the whole log in order instead of being lost.
+	 */
+	#apply(events: ExecutionEvent[]) {
+		const fresh = events.filter((e) => !this.#events.has(e.seq));
+		if (fresh.length === 0) return;
+		for (const event of fresh) this.#events.set(event.seq, event);
+
+		const outOfOrder = fresh.some((e) => e.seq <= this.run.lastSeq);
+		if (!outOfOrder) {
+			this.run = reduceRunStateAll(
+				this.run,
+				[...fresh].sort((a, b) => a.seq - b.seq),
+				this.#index
+			);
+			return;
+		}
+		const childRuns = this.childRuns;
+		this.run = this.#rebuild();
+		this.#attachChildren(childRuns);
+	}
+
+	#rebuild(): RunState {
+		const ordered = [...this.#events.values()].sort((a, b) => a.seq - b.seq);
+		return reduceRunStateAll(initialRunState(this.#index), ordered, this.#index);
 	}
 
 	/** Hangs each discovered child run off the `childWorkflow` node that started it. */

@@ -1,7 +1,100 @@
 import { API_BASE_URL, authHeaders } from '$lib/server/http';
-import type { Execution, ExecutionEvent } from '$lib/types';
+import type { Execution, ExecutionEvent, ExecutionStatus, ExecutionTrigger } from '$lib/types';
 
-export class ExecutionsApiError extends Error {}
+export class ExecutionsApiError extends Error {
+	constructor(
+		message: string,
+		readonly status?: number
+	) {
+		super(message);
+	}
+}
+
+async function errorDetail(response: Response, fallback: string): Promise<string> {
+	try {
+		const body = await response.json();
+		if (typeof body?.detail === 'string') return body.detail;
+	} catch {
+		// keep the fallback
+	}
+	return fallback;
+}
+
+export interface ExecutionFilters {
+	workflowId?: string;
+	projectId?: string;
+	trigger?: ExecutionTrigger;
+	status?: ExecutionStatus;
+	/** RFC 3339 bounds on `startedAt`. */
+	from?: string;
+	to?: string;
+	limit?: number;
+	offset?: number;
+}
+
+export interface ExecutionPage {
+	items: Execution[];
+	total: number;
+}
+
+/** Root runs across every project, filtered and paged server-side. */
+export async function listAllExecutions(
+	token: string | undefined,
+	filters: ExecutionFilters = {}
+): Promise<ExecutionPage> {
+	const params = new URLSearchParams();
+	for (const [key, value] of Object.entries(filters)) {
+		if (value !== undefined && value !== '') params.set(key, String(value));
+	}
+
+	let response: Response;
+	try {
+		response = await fetch(`${API_BASE_URL}/executions?${params}`, {
+			headers: authHeaders(token)
+		});
+	} catch {
+		throw new ExecutionsApiError('Unable to reach the executions service');
+	}
+
+	if (!response.ok) {
+		throw new ExecutionsApiError(
+			await errorDetail(response, 'Unable to load executions'),
+			response.status
+		);
+	}
+	const body = (await response.json()) as Partial<ExecutionPage>;
+	return { items: body.items ?? [], total: body.total ?? 0 };
+}
+
+/**
+ * Deletes runs completely — child runs, event log and Temporal history included. `force`
+ * terminates any still in progress first; without it the backend refuses (409).
+ */
+export async function deleteExecutions(
+	token: string | undefined,
+	ids: string[],
+	force = false
+): Promise<number> {
+	let response: Response;
+	try {
+		response = await fetch(`${API_BASE_URL}/executions/delete`, {
+			method: 'POST',
+			headers: { 'content-type': 'application/json', ...authHeaders(token) },
+			body: JSON.stringify({ ids, force })
+		});
+	} catch {
+		throw new ExecutionsApiError('Unable to reach the executions service');
+	}
+
+	if (!response.ok) {
+		throw new ExecutionsApiError(
+			await errorDetail(response, 'Unable to delete the selected runs'),
+			response.status
+		);
+	}
+	const body = (await response.json()) as { deleted?: number };
+	return body.deleted ?? 0;
+}
 
 export async function getExecution(
 	token: string | undefined,
@@ -86,7 +179,7 @@ export async function listExecutions(
 export async function createExecution(
 	token: string | undefined,
 	workflowId: string,
-	input: { input?: Record<string, unknown> }
+	input: { input?: Record<string, unknown>; trigger?: ExecutionTrigger }
 ): Promise<Execution> {
 	let response: Response;
 	try {

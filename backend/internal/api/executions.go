@@ -14,6 +14,7 @@ import (
 	enumspb "go.temporal.io/api/enums/v1"
 	"go.temporal.io/sdk/client"
 	"gopkg.in/yaml.v3"
+	"gorm.io/gorm"
 
 	"duraflow/backend/internal/models"
 	"duraflow/backend/internal/temporalexec"
@@ -22,21 +23,24 @@ import (
 // executionDTO mirrors the frontend's Execution type (src/lib/types/index.ts)
 // exactly, decoding the model's raw JSON columns into plain maps for the API.
 type executionDTO struct {
-	ID                string                 `json:"id"`
-	WorkflowID        string                 `json:"workflowId"`
-	WorkflowName      string                 `json:"workflowName"`
-	Status            models.ExecutionStatus `json:"status"`
-	StartedAt         time.Time              `json:"startedAt"`
-	CompletedAt       *time.Time             `json:"completedAt,omitempty"`
-	Input             map[string]any         `json:"input,omitempty"`
-	Output            any                    `json:"output,omitempty"`
-	ParentExecutionID *string                `json:"parentExecutionId,omitempty"`
-	TemporalRunID     string                 `json:"temporalRunId,omitempty"`
-	Error             string                 `json:"error,omitempty"`
-	WorkflowType      string                 `json:"workflowType,omitempty"`
-	RootExecutionID   string                 `json:"rootExecutionId,omitempty"`
-	ParentTaskName    string                 `json:"parentTaskName,omitempty"`
-	ParentScopePath   string                 `json:"parentScopePath,omitempty"`
+	ID                string                  `json:"id"`
+	WorkflowID        string                  `json:"workflowId"`
+	WorkflowName      string                  `json:"workflowName"`
+	ProjectID         string                  `json:"projectId,omitempty"`
+	ProjectName       string                  `json:"projectName,omitempty"`
+	Status            models.ExecutionStatus  `json:"status"`
+	Trigger           models.ExecutionTrigger `json:"trigger"`
+	StartedAt         time.Time               `json:"startedAt"`
+	CompletedAt       *time.Time              `json:"completedAt,omitempty"`
+	Input             map[string]any          `json:"input,omitempty"`
+	Output            any                     `json:"output,omitempty"`
+	ParentExecutionID *string                 `json:"parentExecutionId,omitempty"`
+	TemporalRunID     string                  `json:"temporalRunId,omitempty"`
+	Error             string                  `json:"error,omitempty"`
+	WorkflowType      string                  `json:"workflowType,omitempty"`
+	RootExecutionID   string                  `json:"rootExecutionId,omitempty"`
+	ParentTaskName    string                  `json:"parentTaskName,omitempty"`
+	ParentScopePath   string                  `json:"parentScopePath,omitempty"`
 }
 
 func toExecutionDTO(e models.Execution, workflowName string) executionDTO {
@@ -45,6 +49,7 @@ func toExecutionDTO(e models.Execution, workflowName string) executionDTO {
 		WorkflowID:        e.WorkflowID,
 		WorkflowName:      workflowName,
 		Status:            e.Status,
+		Trigger:           e.Trigger,
 		StartedAt:         e.StartedAt,
 		CompletedAt:       e.CompletedAt,
 		ParentExecutionID: e.ParentExecutionID,
@@ -54,6 +59,9 @@ func toExecutionDTO(e models.Execution, workflowName string) executionDTO {
 		RootExecutionID:   e.RootExecutionID,
 		ParentTaskName:    e.ParentTaskName,
 		ParentScopePath:   e.ParentScopePath,
+	}
+	if dto.Trigger == "" {
+		dto.Trigger = models.TriggerManual
 	}
 	if len(e.Input) > 0 {
 		_ = json.Unmarshal(e.Input, &dto.Input)
@@ -98,6 +106,40 @@ func toExecutionEventDTO(e models.ExecutionEvent) executionEventDTO {
 	}
 }
 
+// describeExecutions converts a page of executions to DTOs, labelling each with its workflow and
+// project in two batched reads rather than a query per row.
+func describeExecutions(ctx context.Context, deps *Deps, executions []models.Execution) []executionDTO {
+	workflowIDs := make([]string, 0, len(executions))
+	for _, e := range executions {
+		workflowIDs = append(workflowIDs, e.WorkflowID)
+	}
+
+	var workflows []models.Workflow
+	deps.DB.WithContext(ctx).Select("id", "name", "project_id").Where("id IN ?", workflowIDs).Find(&workflows)
+	workflowByID := make(map[string]models.Workflow, len(workflows))
+	projectIDs := make([]string, 0, len(workflows))
+	for _, w := range workflows {
+		workflowByID[w.ID] = w
+		projectIDs = append(projectIDs, w.ProjectID)
+	}
+
+	var projects []models.Project
+	deps.DB.WithContext(ctx).Select("id", "name").Where("id IN ?", projectIDs).Find(&projects)
+	projectNameByID := make(map[string]string, len(projects))
+	for _, p := range projects {
+		projectNameByID[p.ID] = p.Name
+	}
+
+	dtos := make([]executionDTO, len(executions))
+	for i, e := range executions {
+		w := workflowByID[e.WorkflowID]
+		dtos[i] = toExecutionDTO(e, w.Name)
+		dtos[i].ProjectID = w.ProjectID
+		dtos[i].ProjectName = projectNameByID[w.ProjectID]
+	}
+	return dtos
+}
+
 func workflowName(deps *Deps, ctx context.Context, workflowID string) string {
 	var workflow models.Workflow
 	deps.DB.WithContext(ctx).Select("name").First(&workflow, "id = ?", workflowID)
@@ -137,11 +179,22 @@ func reconcileStatus(ctx context.Context, deps *Deps, execution models.Execution
 	var result any
 	err = temporalClient.GetWorkflow(ctx, execution.ID, execution.TemporalRunID).Get(ctx, &result)
 	applyTerminalResult(&execution, temporalexec.MapWorkflowStatus(status), completedAt, result, err)
-
-	if err := deps.DB.WithContext(ctx).Save(&execution).Error; err != nil {
-		return execution
-	}
+	_, _ = persistTerminalResult(ctx, deps, execution)
 	return execution
+}
+
+// persistTerminalResult writes only the fields applyTerminalResult sets, and only onto a row that
+// still exists. Deliberately not Save: GORM's Save upserts, so a run deleted while its watcher was
+// waiting on Temporal would be silently re-inserted. Reports whether a row was updated.
+func persistTerminalResult(ctx context.Context, deps *Deps, execution models.Execution) (bool, error) {
+	result := deps.DB.WithContext(ctx).Model(&models.Execution{}).Where("id = ?", execution.ID).
+		Updates(map[string]any{
+			"status":       execution.Status,
+			"completed_at": execution.CompletedAt,
+			"output":       execution.Output,
+			"error":        execution.Error,
+		})
+	return result.RowsAffected > 0, result.Error
 }
 
 // applyTerminalResult writes the outcome of a closed workflow onto an execution: its status,
@@ -226,9 +279,13 @@ func watchTerminal(deps *Deps, executionID string) {
 		return
 	}
 	applyTerminalResult(&execution, status, completedAt, result, runErr)
-	if err := deps.DB.WithContext(ctx).Save(&execution).Error; err != nil {
+	updated, err := persistTerminalResult(ctx, deps, execution)
+	if err != nil {
 		log.Printf("[execution:%s] persisting terminal status: %v", executionID, err)
 		return
+	}
+	if !updated {
+		return // deleted while it ran
 	}
 
 	deps.Bus.Publish(executionID, models.ExecutionEvent{
@@ -371,6 +428,28 @@ type createExecutionInput struct {
 	WorkflowID string `path:"id"`
 	Body       struct {
 		Input map[string]any `json:"input,omitempty"`
+		// Trigger defaults to "manual" — the only kind anything starts today.
+		Trigger models.ExecutionTrigger `json:"trigger,omitempty" enum:"manual,scheduled,backfill"`
+	}
+}
+
+type listAllExecutionsInput struct {
+	WorkflowID string `query:"workflowId"`
+	ProjectID  string `query:"projectId"`
+	Trigger    string `query:"trigger" doc:"manual, scheduled or backfill"`
+	Status     string `query:"status" doc:"running, completed, failed, cancelled, terminated or timed_out"`
+	// From/To bound startedAt, as RFC 3339 timestamps.
+	From      string `query:"from"`
+	To        string `query:"to"`
+	RootsOnly bool   `query:"rootsOnly" default:"true"`
+	Limit     int    `query:"limit" default:"50" minimum:"1" maximum:"500"`
+	Offset    int    `query:"offset" minimum:"0"`
+}
+
+type listAllExecutionsOutput struct {
+	Body struct {
+		Items []executionDTO `json:"items"`
+		Total int64          `json:"total"`
 	}
 }
 
@@ -406,6 +485,64 @@ func registerExecutionRoutes(api huma.API, deps *Deps, base string) {
 			dtos[i] = toExecutionDTO(e, name)
 		}
 		return &listExecutionsOutput{Body: dtos}, nil
+	})
+
+	huma.Register(api, huma.Operation{
+		OperationID: "list-all-executions",
+		Method:      http.MethodGet,
+		Path:        base + "/executions",
+		Summary:     "List executions across every project, filtered and paged",
+		Tags:        []string{"Executions"},
+		Security:    authSecurity(),
+		Errors:      []int{422},
+	}, func(ctx context.Context, in *listAllExecutionsInput) (*listAllExecutionsOutput, error) {
+		query := deps.DB.WithContext(ctx).Model(&models.Execution{})
+		if in.RootsOnly {
+			query = query.Where("parent_execution_id IS NULL")
+		}
+		if in.WorkflowID != "" {
+			query = query.Where("workflow_id = ?", in.WorkflowID)
+		}
+		if in.ProjectID != "" {
+			query = query.Where("workflow_id IN (?)",
+				deps.DB.Model(&models.Workflow{}).Select("id").Where("project_id = ?", in.ProjectID))
+		}
+		if in.Trigger != "" {
+			if !models.ExecutionTrigger(in.Trigger).Valid() {
+				return nil, huma.Error422UnprocessableEntity("unknown trigger " + in.Trigger)
+			}
+			query = query.Where("run_trigger = ?", in.Trigger)
+		}
+		if in.Status != "" {
+			query = query.Where("status = ?", in.Status)
+		}
+		for _, bound := range []struct {
+			value, op string
+		}{{in.From, ">="}, {in.To, "<="}} {
+			if bound.value == "" {
+				continue
+			}
+			t, err := time.Parse(time.RFC3339, bound.value)
+			if err != nil {
+				return nil, huma.Error422UnprocessableEntity("from/to must be RFC 3339 timestamps", err)
+			}
+			query = query.Where("started_at "+bound.op+" ?", t)
+		}
+
+		out := &listAllExecutionsOutput{}
+		// Count mutates the statement it runs on, so the count and the page each get a fresh session.
+		if err := query.Session(&gorm.Session{}).Count(&out.Body.Total).Error; err != nil {
+			return nil, huma.Error500InternalServerError("failed to count executions", err)
+		}
+
+		var executions []models.Execution
+		if err := query.Session(&gorm.Session{}).Order("started_at desc").Limit(in.Limit).Offset(in.Offset).
+			Find(&executions).Error; err != nil {
+			return nil, huma.Error500InternalServerError("failed to list executions", err)
+		}
+
+		out.Body.Items = describeExecutions(ctx, deps, executions)
+		return out, nil
 	})
 
 	huma.Register(api, huma.Operation{
@@ -445,11 +582,17 @@ func registerExecutionRoutes(api huma.API, deps *Deps, base string) {
 			workflowInput = map[string]any{}
 		}
 
+		trigger := in.Body.Trigger
+		if trigger == "" {
+			trigger = models.TriggerManual
+		}
+
 		inputJSON, _ := json.Marshal(workflowInput)
 		execution := models.Execution{
 			Base:       models.Base{ID: uuid.NewString()},
 			WorkflowID: in.WorkflowID,
 			Status:     models.ExecutionRunning,
+			Trigger:    trigger,
 			StartedAt:  time.Now(),
 			Input:      inputJSON,
 		}
@@ -514,11 +657,20 @@ func registerExecutionRoutes(api huma.API, deps *Deps, base string) {
 		}
 
 		// Subscribe before reading the backlog, or events landing between the two are lost. The
-		// overlap that creates is handled by skipping anything at or below maxSeq afterwards.
+		// overlap that creates is handled by skipping seqs already sent. That is tracked per seq, not
+		// as a high-water mark: the resolver can publish an event after one with a higher seq (a
+		// task's start resolved after its finish), and a high-water mark would silently drop it.
 		subscription := deps.Bus.Subscribe(in.ID)
 		defer subscription.Close()
 
 		maxSeq := in.AfterSeq
+		sent := make(map[uint64]struct{})
+		markSent := func(seq uint64) {
+			sent[seq] = struct{}{}
+			if seq > maxSeq {
+				maxSeq = seq
+			}
+		}
 		backlog, err := loadExecutionEvents(ctx, deps, in.ID, maxSeq, maxEventPageSize)
 		if err != nil {
 			_ = send.Data(watchDone{Done: true, Status: execution.Status, Error: "failed to read the event log"})
@@ -528,7 +680,7 @@ func registerExecutionRoutes(api huma.API, deps *Deps, base string) {
 			if err := send.Data(toExecutionEventDTO(ev)); err != nil {
 				return // client disconnected
 			}
-			maxSeq = ev.Seq
+			markSent(ev.Seq)
 		}
 
 		_ = send.Data(statusEvent{Status: execution.Status, Error: execution.Error})
@@ -562,18 +714,18 @@ func registerExecutionRoutes(api huma.API, deps *Deps, base string) {
 					// Drain whatever the resolver published just before the close marker.
 					for _, tail := range mustLoadEvents(ctx, deps, in.ID, maxSeq) {
 						_ = send.Data(toExecutionEventDTO(tail))
-						maxSeq = tail.Seq
+						markSent(tail.Seq)
 					}
 					_ = send.Data(watchDone{Done: true, Status: execution.Status, Error: execution.Error})
 					return
 				}
-				if ev.Seq <= maxSeq {
+				if _, already := sent[ev.Seq]; already || ev.Seq <= in.AfterSeq {
 					continue
 				}
 				if err := send.Data(toExecutionEventDTO(ev)); err != nil {
 					return
 				}
-				maxSeq = ev.Seq
+				markSent(ev.Seq)
 
 			case <-heartbeat.C:
 				// Keeps proxies from closing an idle stream during a long-running task.

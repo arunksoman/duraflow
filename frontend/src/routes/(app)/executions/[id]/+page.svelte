@@ -1,36 +1,21 @@
 <script lang="ts">
 	import { untrack } from 'svelte';
-	import {
-		SvelteFlow,
-		Controls,
-		Background,
-		MiniMap,
-		BackgroundVariant,
-		type Node,
-		type Edge
-	} from '@xyflow/svelte';
-	import '@xyflow/svelte/dist/style.css';
 	import { enhance } from '$app/forms';
-	import { AlertTriangle, ArrowLeft, RefreshCw } from '@lucide/svelte';
+	import { AlertTriangle, ArrowLeft, RefreshCw, Trash2 } from '@lucide/svelte';
 
-	import WorkflowNode from '$lib/components/builder/WorkflowNode.svelte';
-	import ReconnectableEdge from '$lib/components/builder/ReconnectableEdge.svelte';
-	import RunView from '$lib/components/execution/RunView.svelte';
+	import RunWorkspace from '$lib/components/execution/RunWorkspace.svelte';
+	import DeleteRunsDialog from '$lib/components/execution/DeleteRunsDialog.svelte';
 	import ThemeToggle from '$lib/components/ThemeToggle.svelte';
-	import { NODE_TYPES } from '$lib/components/builder/builderConfig';
 	import { astToGraph, type ScopeGraph } from '$lib/zigflow-engine/graph';
 	import { deserializeZigflowDocument } from '$lib/zigflow-engine/deserialize';
-	import { composeScopeForDisplay } from '$lib/zigflow-engine/inlineScopeView';
-	import { ROOT_SCOPE_ID } from '$lib/zigflow-engine/scopeKey';
 	import { buildRunIndex } from '$lib/zigflow-engine/runIndex';
 	import { RunSession } from '$lib/runtime/runSession.svelte';
 	import type { ExecutionStatus } from '$lib/types';
 	import type { PageProps } from './$types';
 
-	let { data }: PageProps = $props();
+	let { data, form }: PageProps = $props();
 
-	const nodeTypes = Object.fromEntries(NODE_TYPES.map((t) => [t, WorkflowNode]));
-	const edgeTypes = { default: ReconnectableEdge };
+	let showDelete = $state(false);
 
 	const statusClass: Record<ExecutionStatus, string> = {
 		running: 'badge-info',
@@ -52,11 +37,6 @@
 
 	const scopes: Record<string, ScopeGraph> = parsed?.graph.scopes ?? {};
 	const runIndex = buildRunIndex({ scopes });
-	const composed = parsed ? composeScopeForDisplay(scopes, ROOT_SCOPE_ID) : { nodes: [], edges: [] };
-
-	let nodes: Node[] = $state.raw(composed.nodes);
-	let edges: Edge[] = $state.raw(composed.edges);
-	let selectedNodeId = $state<string | null>(null);
 
 	const session = new RunSession();
 
@@ -73,36 +53,6 @@
 
 	$effect(() => {
 		return () => session.stop();
-	});
-
-	$effect(() => {
-		const byNode = session.run.byNode;
-		const current = untrack(() => nodes);
-		let changed = false;
-
-		const next = current.map((node) => {
-			const detail = byNode[node.id];
-			const nodeData = node.data as Record<string, unknown>;
-			if (
-				nodeData.runState === detail?.state &&
-				nodeData.runAttempts === (detail?.attempts ?? 0) &&
-				nodeData.childExecutionId === detail?.childExecutionId
-			) {
-				return node;
-			}
-			changed = true;
-			return {
-				...node,
-				data: {
-					...nodeData,
-					runState: detail?.state,
-					runAttempts: detail?.attempts ?? 0,
-					childExecutionId: detail?.childExecutionId
-				}
-			};
-		});
-
-		if (changed) nodes = next;
 	});
 
 	const durationLabel = $derived.by(() => {
@@ -147,6 +97,9 @@
 		<span class="badge {statusClass[data.execution.status]} badge-sm">
 			{session.status === 'running' ? 'running' : data.execution.status}
 		</span>
+		<span class="badge badge-outline badge-sm" title="What started this run">
+			{data.execution.trigger ?? 'manual'}
+		</span>
 
 		<span class="text-base-content/50 text-xs">
 			{new Date(data.execution.startedAt).toLocaleString()}
@@ -168,6 +121,16 @@
 					</button>
 				</form>
 			{/if}
+			{#if !data.execution.parentExecutionId}
+				<button
+					class="btn btn-ghost btn-sm text-error gap-1.5"
+					type="button"
+					onclick={() => (showDelete = true)}
+				>
+					<Trash2 size={14} />
+					Delete
+				</button>
+			{/if}
 			<ThemeToggle />
 		</div>
 	</div>
@@ -179,44 +142,17 @@
 		</div>
 	{/if}
 
-	<!-- Canvas + run panel -->
-	<div class="flex min-h-0 flex-1 flex-col">
-		{#if nodes.length > 0}
-			<div class="border-base-300 min-h-0 flex-1 overflow-hidden rounded-lg border">
-				<SvelteFlow
-					bind:nodes
-					bind:edges
-					{nodeTypes}
-					{edgeTypes}
-					nodesDraggable={false}
-					nodesConnectable={false}
-					elementsSelectable
-					fitView
-					onnodeclick={({ node }) => (selectedNodeId = node.id)}
-				>
-					<Background variant={BackgroundVariant.Dots} gap={16} />
-					<Controls />
-					<MiniMap zoomable pannable />
-				</SvelteFlow>
-			</div>
-		{:else}
-			<div class="alert alert-info py-2 text-sm">
-				<span>
-					No canvas for this run — its workflow {data.execution.workflowId
-						? "couldn't be parsed"
-						: 'is not stored in DuraFlow'}. The log below still shows everything it did.
-				</span>
-			</div>
-		{/if}
-
-		<div class="h-[22rem] shrink-0">
-			<RunView
-				{session}
-				index={runIndex}
-				{nodes}
-				{selectedNodeId}
-				onselectnode={(nodeId) => (selectedNodeId = nodeId)}
-			/>
-		</div>
+	<div class="border-base-300 min-h-0 flex-1 overflow-hidden rounded-lg border">
+		<RunWorkspace {session} index={runIndex} {scopes} />
 	</div>
 </div>
+
+{#if showDelete}
+	<DeleteRunsDialog
+		action="?/delete"
+		ids={[data.execution.id]}
+		running={data.execution.status === 'running' ? 1 : 0}
+		error={form && 'deleteError' in form ? form.deleteError : undefined}
+		onclose={() => (showDelete = false)}
+	/>
+{/if}

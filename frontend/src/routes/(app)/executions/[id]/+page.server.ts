@@ -1,7 +1,8 @@
-import { error, fail } from '@sveltejs/kit';
+import { error, fail, redirect } from '@sveltejs/kit';
 import {
 	ExecutionsApiError,
 	createExecution,
+	deleteExecutions,
 	getExecution,
 	listChildExecutions,
 	listExecutionEvents
@@ -41,6 +42,21 @@ export const load: PageServerLoad = async ({ params, cookies }) => {
 };
 
 export const actions: Actions = {
+	delete: async ({ request, params, cookies }) => {
+		const data = await request.formData();
+		const force = data.get('force') === 'true';
+
+		try {
+			await deleteExecutions(cookies.get('session'), [params.id], force);
+		} catch (err) {
+			if (err instanceof ExecutionsApiError) {
+				return fail(err.status ?? 502, { deleteError: err.message });
+			}
+			throw err;
+		}
+		redirect(303, '/executions');
+	},
+
 	// Re-runs the same workflow with the same input — the quickest way to retry after a failure.
 	rerun: async ({ params, cookies }) => {
 		const token = cookies.get('session');

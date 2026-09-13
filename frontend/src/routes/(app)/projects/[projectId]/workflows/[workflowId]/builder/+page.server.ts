@@ -1,6 +1,11 @@
 import { error, fail } from '@sveltejs/kit';
 import { ProjectsApiError, getProject } from '$lib/server/projects';
-import { WorkflowsApiError, getWorkflow, updateWorkflow, listWorkflows } from '$lib/server/workflows';
+import {
+	WorkflowsApiError,
+	getWorkflow,
+	updateWorkflow,
+	listWorkflows
+} from '$lib/server/workflows';
 import { ExecutionsApiError, createExecution } from '$lib/server/executions';
 import type { Actions, PageServerLoad } from './$types';
 
@@ -61,7 +66,11 @@ export const actions: Actions = {
 			// registers this workflow's Temporal task queue loads from the persisted file, not the
 			// canvas.
 			await updateWorkflow(token, params.workflowId, { dsl });
-			const execution = await createExecution(token, params.workflowId, { input });
+			// The builder only starts designer test runs.
+			const execution = await createExecution(token, params.workflowId, {
+				input,
+				trigger: 'manual'
+			});
 			return { success: true, execution };
 		} catch (err) {
 			if (err instanceof WorkflowsApiError || err instanceof ExecutionsApiError) {

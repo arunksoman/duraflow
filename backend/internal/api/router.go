@@ -63,6 +63,7 @@ func NewRouter(deps *Deps) *echo.Echo {
 	registerProjectRoutes(api, deps, base)
 	registerWorkflowRoutes(api, deps, base)
 	registerExecutionRoutes(api, deps, base)
+	registerExecutionDeleteRoutes(api, deps, base)
 	registerScheduleRoutes(api, deps, base)
 	registerWorkerRoutes(api, deps, base)
 	registerTelemetryRoutes(api, deps, base)
