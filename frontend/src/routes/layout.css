@@ -6,3 +6,35 @@
 		light --default,
 		dark --prefersdark;
 }
+
+/*
+ * Run-status palette, shared by the builder canvas and every run view. Node borders are one
+ * neutral colour at rest (node type is carried by the icon), and switch to a status colour once a
+ * run touches them. `partial` and `continued` are reserved: nothing produces them yet.
+ */
+:root {
+	--run-neutral: color-mix(in oklab, var(--color-base-content) 22%, var(--color-base-100));
+	--run-success: #16a34a;
+	--run-partial: #a3b818;
+	--run-running: #2563eb;
+	--run-continued: #d97706;
+	--run-error: #dc2626;
+}
+
+[data-theme='dark'] {
+	--run-success: #22c55e;
+	--run-partial: #c5d62a;
+	--run-running: #3b82f6;
+	--run-continued: #f59e0b;
+	--run-error: #ef4444;
+}
+
+@media (prefers-color-scheme: dark) {
+	:root:not([data-theme='light']) {
+		--run-success: #22c55e;
+		--run-partial: #c5d62a;
+		--run-running: #3b82f6;
+		--run-continued: #f59e0b;
+		--run-error: #ef4444;
+	}
+}

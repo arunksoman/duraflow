@@ -161,13 +161,16 @@ func reconcileStatus(ctx context.Context, deps *Deps, execution models.Execution
 		return execution
 	}
 
-	desc, err := temporalClient.DescribeWorkflowExecution(ctx, execution.ID, execution.TemporalRunID)
+	// The latest run of the chain — see watchTerminal for why not TemporalRunID.
+	desc, err := temporalClient.DescribeWorkflowExecution(ctx, execution.ID, "")
 	if err != nil {
 		return execution
 	}
 
 	status := desc.GetWorkflowExecutionInfo().GetStatus()
-	if status == enumspb.WORKFLOW_EXECUTION_STATUS_RUNNING || status == enumspb.WORKFLOW_EXECUTION_STATUS_UNSPECIFIED {
+	if status == enumspb.WORKFLOW_EXECUTION_STATUS_RUNNING ||
+		status == enumspb.WORKFLOW_EXECUTION_STATUS_UNSPECIFIED ||
+		status == enumspb.WORKFLOW_EXECUTION_STATUS_CONTINUED_AS_NEW {
 		return execution
 	}
 
@@ -223,6 +226,13 @@ func applyTerminalResult(
 		return
 	}
 
+	// This is only called once the workflow has closed, so "running" here means Temporal described
+	// a run other than the one that finished (e.g. an earlier link of a continue-as-new chain).
+	// A clean result means it completed; never store a closed run as still running.
+	if execution.Status == models.ExecutionRunning {
+		execution.Status = models.ExecutionCompleted
+	}
+
 	execution.Error = ""
 	if result != nil {
 		if outputJSON, err := json.Marshal(result); err == nil {
@@ -266,7 +276,12 @@ func watchTerminal(deps *Deps, executionID string) {
 		status = models.ExecutionFailed
 	}
 	completedAt := time.Now()
-	if desc, err := temporalClient.DescribeWorkflowExecution(ctx, execution.ID, execution.TemporalRunID); err == nil {
+	// Describe the *latest* run, not the one we started: Get follows a continue-as-new chain (a
+	// workflow with `canMaxHistoryLength` rolls over mid-run), so the run we started closes as
+	// CONTINUED_AS_NEW long before the result arrives. Describing it would record the chain as
+	// still running, with the first run's close time. Execution ids are unique workflow ids, so
+	// the latest run is always this execution's.
+	if desc, err := temporalClient.DescribeWorkflowExecution(ctx, execution.ID, ""); err == nil {
 		info := desc.GetWorkflowExecutionInfo()
 		status = temporalexec.MapWorkflowStatus(info.GetStatus())
 		if closeTime := info.GetCloseTime(); closeTime != nil {

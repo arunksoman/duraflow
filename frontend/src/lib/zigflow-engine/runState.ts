@@ -79,6 +79,8 @@ export interface RunState {
 	unmatched: RunLogEntry[];
 	workflowInput?: unknown;
 	workflowOutput?: unknown;
+	/** The root workflow reported its own completion — the run reached its end. */
+	workflowCompleted: boolean;
 	lastSeq: number;
 	finalized: boolean;
 }
@@ -88,7 +90,14 @@ export function initialRunState(index: RunIndex): RunState {
 	for (const nodeId of index.allNodeIds) {
 		byNode[nodeId] = emptyDetail();
 	}
-	return { byNode, log: [], unmatched: [], lastSeq: 0, finalized: false };
+	return {
+		byNode,
+		log: [],
+		unmatched: [],
+		workflowCompleted: false,
+		lastSeq: 0,
+		finalized: false
+	};
 }
 
 export function reduceRunState(state: RunState, event: ExecutionEvent, index: RunIndex): RunState {
@@ -106,7 +115,7 @@ export function reduceRunStateAll(
 	const byNode = { ...state.byNode };
 	const log = [...state.log];
 	const unmatched = [...state.unmatched];
-	let { workflowInput, workflowOutput, lastSeq } = state;
+	let { workflowInput, workflowOutput, workflowCompleted, lastSeq } = state;
 
 	for (const event of events) {
 		if (event.seq <= lastSeq) continue;
@@ -121,7 +130,10 @@ export function reduceRunStateAll(
 			continue;
 		}
 		if (event.eventType === 'workflow.completed') {
-			if (!event.scopePath) workflowOutput = data.output;
+			if (!event.scopePath) {
+				workflowOutput = data.output;
+				workflowCompleted = true;
+			}
 			continue;
 		}
 
@@ -153,7 +165,16 @@ export function reduceRunStateAll(
 		byNode[match.nodeId] = applyEvent(byNode[match.nodeId] ?? emptyDetail(), event, scopePath);
 	}
 
-	return { ...state, byNode, log, unmatched, workflowInput, workflowOutput, lastSeq };
+	return {
+		...state,
+		byNode,
+		log,
+		unmatched,
+		workflowInput,
+		workflowOutput,
+		workflowCompleted,
+		lastSeq
+	};
 }
 
 function emptyDetail(): NodeRunDetail {
@@ -171,20 +192,29 @@ function applyEvent(
 
 	switch (event.eventType) {
 		case 'task.started': {
+			// A start while this scope's previous attempt is still open means that attempt never
+			// finished and the task began again — the workflow continued-as-new (zigflow's
+			// `canMaxHistoryLength`) or a worker replayed it. It's the same attempt restarted, not a
+			// new one, so it replaces the stale entry instead of leaving it open forever.
+			const restarted = history.findLastIndex(
+				(attempt) => attempt.scopePath === scopePath && attempt.state === 'running'
+			);
 			next.state = detail.state === 'error' ? 'error' : 'running';
-			next.attempts = detail.attempts + 1;
+			next.attempts = restarted >= 0 ? detail.attempts : detail.attempts + 1;
 			next.startedAt = event.occurredAt;
 			if ('input' in data) next.input = data.input;
 			if ('state' in data) next.taskState = data.state;
 			// A re-run (loop iteration, retry, back-jump) reports its own result; drop the stale one.
 			next.output = undefined;
 
-			history.push({
+			const attempt: NodeAttempt = {
 				...newAttempt(event, scopePath),
 				...('input' in data ? { input: data.input } : {}),
 				...('state' in data ? { stateBefore: data.state } : {}),
 				...(event.attempt ? { retry: event.attempt } : {})
-			});
+			};
+			if (restarted >= 0) history[restarted] = attempt;
+			else history.push(attempt);
 			break;
 		}
 
@@ -403,6 +433,15 @@ export function finalizeRunState(state: RunState, status: ExecutionStatus): RunS
 				error,
 				history: detail.history.map((attempt) =>
 					attempt.state === 'running' ? { ...attempt, state: closed, error } : attempt
+				)
+			};
+		} else if (detail.history.some((attempt) => attempt.state === 'running')) {
+			// The node settled but an earlier attempt never reported back; it can't still be running.
+			const closed = status === 'completed' ? 'unknown' : 'error';
+			byNode[nodeId] = {
+				...detail,
+				history: detail.history.map((attempt) =>
+					attempt.state === 'running' ? { ...attempt, state: closed } : attempt
 				)
 			};
 		} else {

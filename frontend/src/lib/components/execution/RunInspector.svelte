@@ -100,7 +100,7 @@
 		<div class="border-base-300 border-b px-3 py-2">
 			<h3 class="text-sm font-semibold">Workflow</h3>
 			<p class="text-base-content/50 text-xs">
-				Pick a step, or click a node on the canvas, to see what it received and returned.
+				Click a node on the canvas to see what it received and returned.
 			</p>
 		</div>
 		<div class="flex min-h-0 flex-1 flex-col gap-2 overflow-auto p-3">

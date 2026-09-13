@@ -2,6 +2,7 @@
 	import { Handle, Position, useSvelteFlow } from '@xyflow/svelte';
 	import { ExternalLink, Trash2 } from '@lucide/svelte';
 	import { NODE_META } from './builderConfig';
+	import { RUN_TONE_VAR, runTone } from './runStatus';
 	import type { WorkflowNodeType } from '$lib/types';
 	import type { NodeRunState } from '$lib/zigflow-engine/runState';
 
@@ -34,6 +35,10 @@
 	const runState = $derived(data.runState as NodeRunState | undefined);
 	const runAttempts = $derived((data.runAttempts as number) ?? 0);
 	const childExecutionId = $derived(data.childExecutionId as string | undefined);
+	// Every node shares one neutral border at rest — the icon carries the node type — and takes its
+	// run status colour once a run touches it.
+	const tone = $derived(runTone(runState));
+	const toneColor = $derived(RUN_TONE_VAR[tone]);
 
 	let isHovered = $state(false);
 
@@ -52,19 +57,18 @@
 <div
 	role="group"
 	aria-label="{label} {nodeType} node"
-	class="bg-base-100 border-base-300 relative w-44 select-none overflow-visible rounded-lg border shadow-sm transition-shadow"
-	class:ring-2={selected}
-	class:ring-offset-1={selected}
-	class:border-2={runState === 'success' || runState === 'error' || runState === 'running'}
-	class:border-success={runState === 'success'}
-	class:border-error={runState === 'error'}
-	class:border-info={runState === 'running'}
-	class:animate-pulse={runState === 'running'}
+	class="bg-base-100 relative w-44 select-none overflow-visible rounded-lg border-2 shadow-sm transition-[box-shadow,border-color,opacity]"
+	class:outline-2={selected}
+	class:outline-offset-4={selected}
+	class:outline-primary={selected}
+	class:run-pulse={runState === 'running'}
 	class:border-dashed={runState === 'skipped'}
-	class:opacity-40={runState === 'skipped'}
-	class:border-warning={runState === 'unknown'}
-	style:border-left="4px solid {meta.color}"
-	style:--tw-ring-color={meta.color}
+	class:opacity-70={runState === 'skipped'}
+	style:border-color={toneColor}
+	style:--run-tone={toneColor}
+	style:box-shadow={tone === 'neutral'
+		? undefined
+		: `0 0 0 3px color-mix(in oklab, ${toneColor} 22%, transparent)`}
 	onmouseenter={() => (isHovered = true)}
 	onmouseleave={() => (isHovered = false)}
 >
@@ -97,7 +101,7 @@
 					: nodeType}
 		</span>
 		{#if runState === 'skipped'}
-			<span class="text-base-content/40 text-[10px]" title="Not on the path this run took">
+			<span class="text-[10px]" style:color={toneColor} title="Not on the path this run took">
 				not run
 			</span>
 		{:else if runState === 'unknown'}
@@ -124,3 +128,20 @@
 {#if nodeType !== 'end'}
 	<Handle type="source" position={Position.Bottom} />
 {/if}
+
+<style>
+	/* A glow that breathes around a running node, instead of fading the whole card. */
+	.run-pulse {
+		animation: run-pulse 1.4s ease-in-out infinite;
+	}
+
+	@keyframes run-pulse {
+		0%,
+		100% {
+			box-shadow: 0 0 0 2px color-mix(in oklab, var(--run-tone) 25%, transparent);
+		}
+		50% {
+			box-shadow: 0 0 0 6px color-mix(in oklab, var(--run-tone) 10%, transparent);
+		}
+	}
+</style>
