@@ -20,7 +20,6 @@
 		Code2,
 		Play,
 		Save,
-		ScrollText,
 		SlidersHorizontal,
 		Workflow
 	} from '@lucide/svelte';
@@ -36,14 +35,9 @@
 	import { NODE_META, NODE_TYPES } from '$lib/components/builder/builderConfig';
 	import { astToGraph, graphToAst, type ScopeGraph } from '$lib/zigflow-engine/graph';
 	import { buildRunIndex, type RunIndex } from '$lib/zigflow-engine/runIndex';
-	import {
-		buildInputSkeleton,
-		coerceInput,
-		validateInput
-	} from '$lib/zigflow-engine/inputSchema';
+	import { buildInputSkeleton, coerceInput, validateInput } from '$lib/zigflow-engine/inputSchema';
 	import { RunSession } from '$lib/runtime/runSession.svelte';
-	import RunView from '$lib/components/execution/RunView.svelte';
-	import WorkflowInputForm from '$lib/components/execution/WorkflowInputForm.svelte';
+	import RunModal from '$lib/components/execution/RunModal.svelte';
 	import { serializeZigflowDocument } from '$lib/zigflow-engine/serialize';
 	import {
 		deserializeZigflowDocument,
@@ -210,24 +204,23 @@
 	let showDsl = $state(false);
 	let showVariables = $state(false);
 
-	// ── Run — live per-node state, log and results while an execution runs ────
+	// ── Run — happens in its own window, against a frozen copy of the design ────
 
 	const session = new RunSession();
 	let runError = $state<string | null>(null);
-	let showRunInput = $state(false);
+	let showRunModal = $state(false);
 	let runInput = $state<Record<string, unknown>>({});
 	let runInputErrors = $state<Record<string, string>>({});
 	let runInputJsonError = $state<string | null>(null);
 	let runFormEl: HTMLFormElement | undefined = $state();
-	let showRunPanel = $state(false);
-	let runPanelHeight = $state(280);
 
 	/**
-	 * The task-name-to-node mapping used to interpret a run's events. Frozen for the duration of
-	 * the run: it has to describe the DSL that was actually submitted, so editing the canvas
-	 * mid-run must not change how incoming events are attributed.
+	 * The task-name-to-node mapping and the graph a run's window draws, both frozen when the run
+	 * starts: they have to describe the DSL that was actually submitted, so editing the design
+	 * mid-run must not change how incoming events are attributed or what the run window shows.
 	 */
-	let runIndex = $state<RunIndex>(buildRunIndex({ scopes: {} }));
+	let runIndex = $state.raw<RunIndex>(buildRunIndex({ scopes: {} }));
+	let runScopes = $state.raw<Record<string, ScopeGraph>>({});
 	let runDsl = $state<string | null>(null);
 
 	const running = $derived(session.status === 'starting' || session.status === 'running');
@@ -236,94 +229,42 @@
 		return () => session.stop();
 	});
 
-	// Project run state onto the canvas. Reads `nodes` untracked — it writes `nodes`, and a tracked
-	// read of the same state in the same effect is an infinite-loop trap.
-	$effect(() => {
-		const byNode = session.run.byNode;
-		const current = untrack(() => nodes);
-		let changed = false;
-
-		const next = current.map((node) => {
-			const detail = byNode[node.id];
-			const data = node.data as Record<string, unknown>;
-			const nextState = detail?.state;
-			const nextAttempts = detail?.attempts ?? 0;
-			const nextChild = detail?.childExecutionId;
-
-			if (
-				data.runState === nextState &&
-				data.runAttempts === nextAttempts &&
-				data.childExecutionId === nextChild
-			) {
-				return node;
-			}
-			changed = true;
-			return {
-				...node,
-				data: {
-					...data,
-					runState: nextState,
-					runAttempts: nextAttempts,
-					childExecutionId: nextChild
-				}
-			};
-		});
-
-		if (changed) nodes = next;
-	});
-
 	/**
-	 * A run always executes the DSL currently on screen, so the schema to collect input against is
-	 * the one on screen too. The modal is shown even when nothing is declared, so there is one
-	 * consistent confirm step before a run starts.
+	 * Opens the run window. Its input form is seeded from the schema on screen, keeping whatever
+	 * was entered for an earlier run. A workflow with nothing to fill in runs straight away; one
+	 * with declared inputs waits for them, and reopening after a run shows that run rather than
+	 * starting another.
 	 */
-	function startRun() {
+	function openRunWindow() {
+		const fields = workflowMeta.inputSchema ?? [];
+		if (fields.length > 0) {
+			const skeleton = buildInputSkeleton(fields);
+			runInput = Object.fromEntries(
+				Object.keys(skeleton).map((key) => [key, key in runInput ? runInput[key] : skeleton[key]])
+			);
+		}
 		runError = null;
-		runInputErrors = {};
-		runInputJsonError = null;
-		runInput = buildInputSkeleton(workflowMeta.inputSchema ?? []);
-		showRunInput = true;
+		showRunModal = true;
+		if (session.status === 'idle' && fields.length === 0) startRun();
 	}
 
-	function confirmRunInput() {
+	function startRun() {
+		if (running) return;
 		const fields = workflowMeta.inputSchema ?? [];
 		const coerced = coerceInput(fields, runInput);
 		runInputErrors = validateInput(fields, coerced);
 		if (Object.keys(runInputErrors).length > 0 || runInputJsonError) return;
 
 		runInput = coerced;
-		showRunInput = false;
-		showRunPanel = true;
+		runError = null;
 		runIndex = buildRunIndex({ scopes });
+		// Snapshot typed loosely: `Snapshot<Node>` is too deep for svelte-check to instantiate.
+		runScopes = $state.snapshot(scopes as unknown) as Record<string, ScopeGraph>;
 		runDsl = dsl;
 		session.beginStarting(runIndex);
 		runFormEl?.requestSubmit();
 	}
 
-	function selectNodeFromRun(nodeId: string) {
-		configNodeId = nodeId;
-		nodes = nodes.map((n) => ({ ...n, selected: n.id === nodeId }));
-	}
-
-	function startRunPanelResize(e: MouseEvent) {
-		e.preventDefault();
-		const startY = e.clientY;
-		const startH = runPanelHeight;
-		document.body.style.cursor = 'row-resize';
-		document.body.style.userSelect = 'none';
-
-		function onMove(ev: MouseEvent) {
-			runPanelHeight = Math.max(140, Math.min(600, startH + (startY - ev.clientY)));
-		}
-		function onUp() {
-			document.body.style.cursor = '';
-			document.body.style.userSelect = '';
-			window.removeEventListener('mousemove', onMove);
-			window.removeEventListener('mouseup', onUp);
-		}
-		window.addEventListener('mousemove', onMove);
-		window.addEventListener('mouseup', onUp);
-	}
 	let configNodeId = $state<string | null>(null);
 	let screenToFlowPosition:
 		((pos: { x: number; y: number }) => { x: number; y: number }) | undefined = $state();
@@ -333,9 +274,9 @@
 	);
 	const dsl = $derived(serializeZigflowDocument(graphToAst({ scopes }, workflowMeta)));
 
-	/** True once the canvas has moved on from the DSL the in-flight run is actually executing. */
-	const canvasEditedDuringRun = $derived(
-		session.status === 'running' && runDsl !== null && runDsl !== dsl
+	/** True once the design has moved on from the DSL the run window is showing. */
+	const designChangedSinceRun = $derived(
+		session.status !== 'idle' && runDsl !== null && runDsl !== dsl
 	);
 
 	// ── DSL panel — bidirectional editor, gated by grammar validation ─
@@ -539,11 +480,7 @@
 <div class="bg-base-200 flex h-screen flex-col overflow-hidden">
 	<!-- Toolbar -->
 	<header class="bg-base-100 border-base-300 flex h-12 shrink-0 items-center gap-2 border-b px-3">
-		<a
-			href="/projects/{projectId}"
-			class="btn btn-ghost btn-sm btn-circle"
-			title="Back to project"
-		>
+		<a href="/projects/{projectId}" class="btn btn-ghost btn-sm btn-circle" title="Back to project">
 			<ArrowLeft size={16} />
 		</a>
 		<div class="bg-primary/10 text-primary rounded p-1">
@@ -580,6 +517,7 @@
 				// until after the request has already gone out.
 				formData.set('dsl', dsl);
 				formData.set('input', JSON.stringify(runInput));
+				formData.set('trigger', 'manual');
 				runError = null;
 
 				return async ({ result }) => {
@@ -600,26 +538,20 @@
 			<button
 				type="button"
 				class="btn btn-primary btn-sm gap-1.5"
-				disabled={running}
-				onclick={startRun}
-				title="Save and run this workflow"
+				onclick={openRunWindow}
+				title={session.status === 'idle'
+					? 'Save and run this workflow'
+					: 'Open the run window — inspect the last run or run again'}
 			>
-				<Play size={14} />
-				{running ? 'Running…' : 'Run'}
+				{#if running}
+					<span class="loading loading-spinner loading-xs"></span>
+					Running…
+				{:else}
+					<Play size={14} />
+					Run
+				{/if}
 			</button>
 		</form>
-		<button
-			class="btn btn-ghost btn-sm gap-1.5"
-			class:btn-active={showRunPanel}
-			onclick={() => (showRunPanel = !showRunPanel)}
-			title="Show this run's log, per-node input/output and child runs"
-		>
-			<ScrollText size={14} />
-			Run log
-		</button>
-		{#if runError}
-			<span class="text-error max-w-48 truncate text-xs" title={runError}>{runError}</span>
-		{/if}
 		<button
 			class="btn btn-ghost btn-sm gap-1.5"
 			class:btn-active={showDsl}
@@ -715,66 +647,26 @@
 			/>
 		{/if}
 	</div>
-
-	<!-- Run panel — what the run did, docked under the canvas -->
-	{#if showRunPanel}
-		<button
-			class="bg-base-300 hover:bg-primary/40 active:bg-primary/60 h-1 w-full shrink-0 cursor-row-resize border-0 p-0 transition-colors"
-			onmousedown={startRunPanelResize}
-			aria-label="Drag to resize the run panel"
-		></button>
-		<div class="shrink-0" style:height="{runPanelHeight}px">
-			{#if canvasEditedDuringRun}
-				<div class="alert alert-warning rounded-none py-1.5 text-xs">
-					<span>
-						The canvas changed since this run started — highlighting reflects the DSL that was run.
-					</span>
-				</div>
-			{/if}
-			<RunView
-				{session}
-				index={runIndex}
-				{nodes}
-				selectedNodeId={configNodeId}
-				onselectnode={selectNodeFromRun}
-				fullRunHref={session.executionId ? `/executions/${session.executionId}` : undefined}
-			/>
-		</div>
-	{/if}
 </div>
 
-<!-- Run input modal — the one confirm step before a run, schema or not -->
-{#if showRunInput}
-	<div class="modal modal-open z-50">
-		<div class="modal-box max-w-2xl">
-			<h3 class="text-lg font-semibold">Run "{workflowName}"</h3>
-			<p class="text-base-content/60 mt-1 text-sm">
-				The canvas is saved and then executed. Values below are passed as <code>$input</code>.
-			</p>
-
-			<div class="mt-4">
-				<WorkflowInputForm
-					fields={workflowMeta.inputSchema ?? []}
-					bind:value={runInput}
-					errors={runInputErrors}
-					onjsonerror={(message) => (runInputJsonError = message)}
-				/>
-			</div>
-
-			<div class="modal-action">
-				<button type="button" class="btn" onclick={() => (showRunInput = false)}>Cancel</button>
-				<button
-					type="button"
-					class="btn btn-primary"
-					disabled={!!runInputJsonError}
-					onclick={confirmRunInput}
-				>
-					<Play size={14} />
-					Run
-				</button>
-			</div>
-		</div>
-	</div>
+<!-- Run window — the run happens here; closing it keeps the run (and its results) around -->
+{#if showRunModal}
+	<RunModal
+		{workflowName}
+		{session}
+		index={runIndex}
+		scopes={runScopes}
+		fields={workflowMeta.inputSchema ?? []}
+		bind:input={runInput}
+		inputErrors={runInputErrors}
+		inputJsonError={runInputJsonError}
+		{runError}
+		canvasChanged={designChangedSinceRun}
+		allRunsHref="/executions?workflowId={workflowId}"
+		onjsonerror={(message) => (runInputJsonError = message)}
+		onrun={startRun}
+		onclose={() => (showRunModal = false)}
+	/>
 {/if}
 
 <!-- Workflow Variables modal -->

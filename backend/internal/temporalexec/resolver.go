@@ -338,6 +338,11 @@ func (r *Resolver) ensureChildExecution(
 	parentExecutionID := parentRes.ExecutionID
 	child.ParentExecutionID = &parentExecutionID
 	child.RootExecutionID = parentRes.RootExecutionID
+	child.Trigger = models.TriggerManual
+	var root models.Execution
+	if err := r.db.WithContext(ctx).Select("run_trigger").First(&root, "id = ?", parentRes.RootExecutionID).Error; err == nil && root.Trigger != "" {
+		child.Trigger = root.Trigger
+	}
 	child.Status = models.ExecutionRunning
 	child.StartedAt = time.Now()
 	child.ParentTaskName = r.childTaskName(ctx, parentWorkflowID, child.ID)
@@ -385,6 +390,21 @@ func (r *Resolver) childTaskName(ctx context.Context, parentWorkflowID, childWor
 		return ""
 	}
 	return ""
+}
+
+// Forget drops every cached resolution belonging to a deleted run tree, so a late event from it
+// can't be attributed to an Execution row that no longer exists.
+func (r *Resolver) Forget(rootExecutionIDs ...string) {
+	roots := make(map[string]struct{}, len(rootExecutionIDs))
+	for _, id := range rootExecutionIDs {
+		roots[id] = struct{}{}
+	}
+	r.cache.Range(func(key, value any) bool {
+		if _, ok := roots[value.(Resolution).RootExecutionID]; ok {
+			r.cache.Delete(key)
+		}
+		return true
+	})
 }
 
 func (r *Resolver) remember(wfExecID, runID string, res Resolution) {

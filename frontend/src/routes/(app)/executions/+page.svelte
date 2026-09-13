@@ -1,10 +1,13 @@
 <script lang="ts">
 	import { enhance } from '$app/forms';
-	import { ListChecks, Play } from '@lucide/svelte';
+	import { page } from '$app/state';
+	import { SvelteSet, SvelteURLSearchParams } from 'svelte/reactivity';
+	import { ChevronLeft, ChevronRight, ListChecks, Play, Trash2, X } from '@lucide/svelte';
 	import WorkflowInputForm from '$lib/components/execution/WorkflowInputForm.svelte';
+	import DeleteRunsDialog from '$lib/components/execution/DeleteRunsDialog.svelte';
 	import { coerceInput, validateInput } from '$lib/zigflow-engine/inputSchema';
 	import type { PageProps } from './$types';
-	import type { ExecutionStatus } from '$lib/types';
+	import type { Execution, ExecutionStatus, ExecutionTrigger } from '$lib/types';
 
 	let { data, form }: PageProps = $props();
 
@@ -40,17 +43,93 @@
 		terminated: 'badge-warning',
 		timed_out: 'badge-error'
 	};
+
+	const triggerClass: Record<ExecutionTrigger, string> = {
+		manual: 'badge-ghost',
+		scheduled: 'badge-primary badge-outline',
+		backfill: 'badge-secondary badge-outline'
+	};
+
+	const statuses: ExecutionStatus[] = [
+		'running',
+		'completed',
+		'failed',
+		'cancelled',
+		'terminated',
+		'timed_out'
+	];
+
+	// ── Filters (in the URL) ─────────────────────────────────────────
+
+	let filterForm: HTMLFormElement | undefined = $state();
+	const hasFilters = $derived(
+		Boolean(
+			data.filters.workflowId ||
+			data.filters.trigger ||
+			data.filters.status ||
+			data.filters.from ||
+			data.filters.to
+		)
+	);
+
+	const pageCount = $derived(Math.max(1, Math.ceil(data.total / data.pageSize)));
+
+	function pageHref(target: number): string {
+		const params = new SvelteURLSearchParams(page.url.searchParams);
+		if (target <= 1) params.delete('page');
+		else params.set('page', String(target));
+		const query = params.toString();
+		return query ? `?${query}` : '?';
+	}
+
+	// ── Selection & delete ───────────────────────────────────────────
+
+	const selected = new SvelteSet<string>();
+	let deleteIds = $state<string[] | null>(null);
+
+	// Rows can disappear under the selection (a delete, a filter change): only count what's shown.
+	const visibleSelected = $derived(data.executions.filter((e) => selected.has(e.id)));
+	const allSelected = $derived(
+		data.executions.length > 0 && visibleSelected.length === data.executions.length
+	);
+
+	function toggleAll() {
+		if (allSelected) selected.clear();
+		else for (const e of data.executions) selected.add(e.id);
+	}
+
+	function toggle(id: string) {
+		if (selected.has(id)) selected.delete(id);
+		else selected.add(id);
+	}
+
+	const deleteRunning = $derived(
+		deleteIds
+			? data.executions.filter((e) => deleteIds!.includes(e.id) && e.status === 'running').length
+			: 0
+	);
+
+	function duration(execution: Execution): string {
+		if (!execution.completedAt) return execution.status === 'running' ? '…' : '';
+		const ms = new Date(execution.completedAt).getTime() - new Date(execution.startedAt).getTime();
+		if (!Number.isFinite(ms) || ms < 0) return '';
+		if (ms < 1000) return `${ms} ms`;
+		if (ms < 60_000) return `${(ms / 1000).toFixed(1)} s`;
+		return `${Math.floor(ms / 60_000)}m ${Math.round((ms % 60_000) / 1000)}s`;
+	}
 </script>
 
 <svelte:head>
 	<title>Executions · DuraFlow</title>
 </svelte:head>
 
-<div class="flex flex-col gap-6">
+<div class="flex flex-col gap-4">
 	<div class="flex flex-wrap items-center justify-between gap-3">
 		<div>
 			<h1 class="text-xl font-semibold">Executions</h1>
-			<p class="text-base-content/60 mt-1 text-sm">Workflow runs across all projects, newest first.</p>
+			<p class="text-base-content/60 mt-1 text-sm">
+				Workflow runs across all projects, newest first.
+			</p>
 		</div>
 		<button
 			class="btn btn-primary"
@@ -62,71 +141,211 @@
 		</button>
 	</div>
 
+	<!-- Filters: a plain GET form, so the URL is the source of truth -->
+	<form
+		method="GET"
+		bind:this={filterForm}
+		class="border-base-300 bg-base-100 flex flex-wrap items-end gap-3 rounded-lg border p-3"
+		onchange={() => filterForm?.requestSubmit()}
+	>
+		<label class="flex flex-col gap-1">
+			<span class="text-base-content/60 text-xs">Workflow</span>
+			<select name="workflowId" class="select select-sm w-56" value={data.filters.workflowId}>
+				<option value="">All workflows</option>
+				{#each data.workflows as workflow (workflow.id)}
+					<option value={workflow.id}>{workflow.projectName} / {workflow.name}</option>
+				{/each}
+			</select>
+		</label>
+		<label class="flex flex-col gap-1">
+			<span class="text-base-content/60 text-xs">Run type</span>
+			<select name="trigger" class="select select-sm w-36" value={data.filters.trigger}>
+				<option value="">All types</option>
+				<option value="manual">Manual</option>
+				<option value="scheduled">Scheduled</option>
+				<option value="backfill">Backfill</option>
+			</select>
+		</label>
+		<label class="flex flex-col gap-1">
+			<span class="text-base-content/60 text-xs">Status</span>
+			<select name="status" class="select select-sm w-36" value={data.filters.status}>
+				<option value="">Any status</option>
+				{#each statuses as status (status)}
+					<option value={status}>{status.replace('_', ' ')}</option>
+				{/each}
+			</select>
+		</label>
+		<label class="flex flex-col gap-1">
+			<span class="text-base-content/60 text-xs">Started from (UTC)</span>
+			<input type="date" name="from" class="input input-sm w-40" value={data.filters.from} />
+		</label>
+		<label class="flex flex-col gap-1">
+			<span class="text-base-content/60 text-xs">to</span>
+			<input type="date" name="to" class="input input-sm w-40" value={data.filters.to} />
+		</label>
+		{#if hasFilters}
+			<a class="btn btn-ghost btn-sm gap-1" href="/executions">
+				<X size={14} />
+				Clear
+			</a>
+		{/if}
+		<noscript><button class="btn btn-sm" type="submit">Apply</button></noscript>
+	</form>
+
 	{#if data.apiError}
 		<div class="alert alert-warning text-sm"><span>Couldn't reach the executions API.</span></div>
+	{/if}
+
+	{#if form && 'deleted' in form && form.deleted}
+		<div class="alert alert-success py-2 text-sm">
+			<span>Deleted {form.deleted} {form.deleted === 1 ? 'run' : 'runs'}.</span>
+		</div>
 	{/if}
 
 	{#if data.executions.length === 0}
 		<div class="text-base-content/50 flex flex-col items-center gap-2 py-20">
 			<ListChecks size={40} />
-			<p>No executions yet.</p>
+			<p>{hasFilters ? 'No runs match these filters.' : 'No executions yet.'}</p>
 		</div>
 	{:else}
-		<div class="flex flex-col gap-2">
-			{#each data.executions as execution (execution.id)}
-				<details class="border-base-300 bg-base-100 rounded-lg border">
-					<summary class="flex cursor-pointer items-center gap-3 px-4 py-3 text-sm">
-						<span class="badge {statusClass[execution.status]} badge-sm">{execution.status}</span>
-						<span class="font-medium">{execution.workflowName}</span>
-						{#if execution.parentExecutionId}
-							<a
-								class="badge badge-ghost badge-xs"
-								href="/executions/{execution.parentExecutionId}"
-								onclick={(e) => e.stopPropagation()}
-							>
-								child of {execution.parentExecutionId.slice(0, 8)}
-							</a>
-						{/if}
-						{#if execution.error}
-							<span class="text-error max-w-64 truncate text-xs" title={execution.error}>
-								{execution.error}
-							</span>
-						{/if}
-						<span class="text-base-content/50 ml-auto text-xs">
-							{new Date(execution.startedAt).toLocaleString()}
-							{#if execution.completedAt}
-								→ {new Date(execution.completedAt).toLocaleString()}
-							{/if}
-						</span>
-					</summary>
-					<div class="border-base-300 grid grid-cols-1 gap-3 border-t p-4 sm:grid-cols-2">
-						<div>
-							<p class="text-base-content/40 mb-1 text-[10px] font-semibold uppercase tracking-wider">
-								Input
-							</p>
-							<pre class="bg-base-200 overflow-x-auto rounded p-2 text-xs">{execution.input
-									? JSON.stringify(execution.input, null, 2)
-									: '—'}</pre>
-						</div>
-						<div>
-							<p class="text-base-content/40 mb-1 text-[10px] font-semibold uppercase tracking-wider">
-								Output
-							</p>
-							<pre class="bg-base-200 overflow-x-auto rounded p-2 text-xs">{execution.output
-									? JSON.stringify(execution.output, null, 2)
-									: '—'}</pre>
-						</div>
-						<div class="sm:col-span-2">
-							<a class="link link-hover text-xs" href="/executions/{execution.id}">
-								Open run — timeline, per-node input/output and child runs →
-							</a>
-						</div>
-					</div>
-				</details>
-			{/each}
+		<div class="flex min-h-8 items-center gap-3 text-sm">
+			<span class="text-base-content/60">
+				{data.total}
+				{data.total === 1 ? 'run' : 'runs'}
+			</span>
+			{#if visibleSelected.length > 0}
+				<span class="text-base-content/60">· {visibleSelected.length} selected</span>
+				<button
+					type="button"
+					class="btn btn-error btn-sm btn-outline gap-1.5"
+					onclick={() => (deleteIds = visibleSelected.map((e) => e.id))}
+				>
+					<Trash2 size={14} />
+					Delete selected
+				</button>
+			{/if}
 		</div>
+
+		<div class="border-base-300 bg-base-100 overflow-x-auto rounded-lg border">
+			<table class="table-sm table">
+				<thead>
+					<tr>
+						<th class="w-8">
+							<input
+								type="checkbox"
+								class="checkbox checkbox-xs"
+								checked={allSelected}
+								indeterminate={visibleSelected.length > 0 && !allSelected}
+								onchange={toggleAll}
+								aria-label="Select all runs on this page"
+							/>
+						</th>
+						<th>Status</th>
+						<th>Type</th>
+						<th>Workflow</th>
+						<th>Started</th>
+						<th>Duration</th>
+						<th>Error</th>
+						<th class="w-10"></th>
+					</tr>
+				</thead>
+				<tbody>
+					{#each data.executions as execution (execution.id)}
+						<tr class="hover:bg-base-200/60">
+							<td>
+								<input
+									type="checkbox"
+									class="checkbox checkbox-xs"
+									checked={selected.has(execution.id)}
+									onchange={() => toggle(execution.id)}
+									aria-label="Select run {execution.id.slice(0, 8)}"
+								/>
+							</td>
+							<td>
+								<span class="badge badge-sm {statusClass[execution.status]}"
+									>{execution.status}</span
+								>
+							</td>
+							<td>
+								<span class="badge badge-sm {triggerClass[execution.trigger ?? 'manual']}">
+									{execution.trigger ?? 'manual'}
+								</span>
+							</td>
+							<td>
+								<a class="link link-hover font-medium" href="/executions/{execution.id}">
+									{execution.workflowName || execution.workflowType || 'Unknown workflow'}
+								</a>
+								{#if execution.projectName}
+									<span class="text-base-content/50 block text-xs">{execution.projectName}</span>
+								{/if}
+							</td>
+							<td class="text-base-content/70 text-xs whitespace-nowrap">
+								{new Date(execution.startedAt).toLocaleString()}
+							</td>
+							<td class="text-base-content/70 text-xs whitespace-nowrap">{duration(execution)}</td>
+							<td class="max-w-64">
+								{#if execution.error}
+									<span class="text-error block truncate text-xs" title={execution.error}>
+										{execution.error}
+									</span>
+								{/if}
+							</td>
+							<td>
+								<button
+									type="button"
+									class="btn btn-ghost btn-xs btn-square text-error"
+									onclick={() => (deleteIds = [execution.id])}
+									aria-label="Delete run {execution.id.slice(0, 8)}"
+									title="Delete run"
+								>
+									<Trash2 size={14} />
+								</button>
+							</td>
+						</tr>
+					{/each}
+				</tbody>
+			</table>
+		</div>
+
+		{#if pageCount > 1}
+			<div class="flex items-center justify-end gap-2 text-sm">
+				<span class="text-base-content/60">Page {data.filters.page} of {pageCount}</span>
+				<div class="join">
+					<a
+						class="btn btn-sm join-item"
+						class:btn-disabled={data.filters.page <= 1}
+						href={pageHref(data.filters.page - 1)}
+						aria-label="Previous page"
+					>
+						<ChevronLeft size={14} />
+					</a>
+					<a
+						class="btn btn-sm join-item"
+						class:btn-disabled={data.filters.page >= pageCount}
+						href={pageHref(data.filters.page + 1)}
+						aria-label="Next page"
+					>
+						<ChevronRight size={14} />
+					</a>
+				</div>
+			</div>
+		{/if}
 	{/if}
 </div>
+
+{#if deleteIds}
+	<DeleteRunsDialog
+		action="?/delete"
+		ids={deleteIds}
+		running={deleteRunning}
+		error={form && 'deleteError' in form ? form.deleteError : undefined}
+		onclose={() => (deleteIds = null)}
+		ondone={() => {
+			for (const id of deleteIds ?? []) selected.delete(id);
+			deleteIds = null;
+		}}
+	/>
+{/if}
 
 <dialog {@attach dialogRef} class="modal">
 	<div class="modal-box">
@@ -153,7 +372,7 @@
 				};
 			}}
 		>
-			{#if form?.error}
+			{#if form && 'error' in form && form.error}
 				<div class="alert alert-error py-2 text-sm"><span>{form.error}</span></div>
 			{/if}
 

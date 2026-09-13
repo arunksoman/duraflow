@@ -58,11 +58,19 @@ export interface Workflow {
 export type ExecutionStatus =
 	'running' | 'completed' | 'failed' | 'cancelled' | 'terminated' | 'timed_out';
 
+/** What started a run. Only `manual` is produced today; the other two are for the scheduler. */
+export type ExecutionTrigger = 'manual' | 'scheduled' | 'backfill';
+
 export interface Execution {
 	id: string;
 	workflowId: string;
 	workflowName: string;
+	/** Filled in by the cross-project list endpoint only. */
+	projectId?: string;
+	projectName?: string;
 	status: ExecutionStatus;
+	/** Child runs inherit their root run's trigger. */
+	trigger: ExecutionTrigger;
 	startedAt: string;
 	completedAt?: string;
 	input?: Record<string, unknown>;

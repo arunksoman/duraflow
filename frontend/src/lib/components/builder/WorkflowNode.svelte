@@ -68,7 +68,7 @@
 	onmouseenter={() => (isHovered = true)}
 	onmouseleave={() => (isHovered = false)}
 >
-	{#if isHovered && nodeType !== 'start'}
+	{#if isHovered && nodeType !== 'start' && !data.readOnly}
 		<button
 			class="bg-error text-error-content absolute -right-2 -top-2 z-10 flex size-5 cursor-pointer items-center justify-center rounded-full shadow-md transition-transform hover:scale-110"
 			onclick={handleDelete}
@@ -90,7 +90,11 @@
 	</div>
 	<div class="border-base-200 flex items-center gap-1.5 border-t px-2.5 py-1.5">
 		<span class="text-base-content/40 font-mono text-[10px] uppercase tracking-wide">
-			{nodeType === 'childWorkflow' ? 'child-flow' : nodeType === 'grpcCall' ? 'grpc-call' : nodeType}
+			{nodeType === 'childWorkflow'
+				? 'child-flow'
+				: nodeType === 'grpcCall'
+					? 'grpc-call'
+					: nodeType}
 		</span>
 		{#if runState === 'skipped'}
 			<span class="text-base-content/40 text-[10px]" title="Not on the path this run took">

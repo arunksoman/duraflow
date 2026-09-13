@@ -17,16 +17,42 @@ const (
 	ExecutionTimedOut   ExecutionStatus = "timed_out"
 )
 
+// ExecutionTrigger records what started a run, so designer test runs can be told apart from
+// production ones in the executions list.
+type ExecutionTrigger string
+
+const (
+	// TriggerManual is a run someone started by hand — the builder's Run button or the executions
+	// page's "Run workflow" dialog.
+	TriggerManual ExecutionTrigger = "manual"
+	// TriggerScheduled and TriggerBackfill are reserved for the scheduler; nothing writes them yet.
+	TriggerScheduled ExecutionTrigger = "scheduled"
+	TriggerBackfill  ExecutionTrigger = "backfill"
+)
+
+// Valid reports whether t is one of the known triggers.
+func (t ExecutionTrigger) Valid() bool {
+	switch t {
+	case TriggerManual, TriggerScheduled, TriggerBackfill:
+		return true
+	}
+	return false
+}
+
 type Execution struct {
 	Base
-	WorkflowID        string          `gorm:"not null;index" json:"workflowId"`
-	Status            ExecutionStatus `gorm:"not null;default:running" json:"status"`
-	StartedAt         time.Time       `json:"startedAt"`
-	CompletedAt       *time.Time      `json:"completedAt,omitempty"`
-	Input             datatypes.JSON  `json:"input,omitempty"`
-	Output            datatypes.JSON  `json:"output,omitempty"`
-	ParentExecutionID *string         `json:"parentExecutionId,omitempty"`
-	TemporalRunID     string          `json:"temporalRunId,omitempty"`
+	WorkflowID string          `gorm:"not null;index" json:"workflowId"`
+	Status     ExecutionStatus `gorm:"not null;default:running" json:"status"`
+	// Trigger is inherited by child-workflow runs from their root, so filtering by it never
+	// separates a run from its own children.
+	// Stored as run_trigger: TRIGGER is an SQL keyword, and raw Where clauses aren't quoted.
+	Trigger           ExecutionTrigger `gorm:"column:run_trigger;not null;default:manual;index" json:"trigger"`
+	StartedAt         time.Time        `json:"startedAt"`
+	CompletedAt       *time.Time       `json:"completedAt,omitempty"`
+	Input             datatypes.JSON   `json:"input,omitempty"`
+	Output            datatypes.JSON   `json:"output,omitempty"`
+	ParentExecutionID *string          `json:"parentExecutionId,omitempty"`
+	TemporalRunID     string           `json:"temporalRunId,omitempty"`
 
 	// Error is the failure message Temporal reports once a non-completed workflow closes — the
 	// single most important thing to show after a run, and previously not stored at all.
