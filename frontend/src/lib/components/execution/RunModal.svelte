@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { untrack } from 'svelte';
-	import { ExternalLink, ListChecks, Play, RotateCcw, X } from '@lucide/svelte';
+	import { Braces, Eraser, ExternalLink, ListChecks, Play, RotateCcw, X } from '@lucide/svelte';
 	import RunWorkspace from './RunWorkspace.svelte';
 	import WorkflowInputForm from './WorkflowInputForm.svelte';
 	import type { RunSession } from '$lib/runtime/runSession.svelte';
@@ -12,6 +12,10 @@
 	 * The builder's run window. A run happens inside it and stays inspectable after it ends; closing
 	 * it only hides it (a run in progress keeps going), and running again reuses the same window,
 	 * clearing the previous run's highlighting and data first.
+	 *
+	 * Inputs are asked for in a small dialog when Run is pressed, so the canvas and inspector keep
+	 * the whole window. Before the first run (or after clearing one) the canvas shows the design
+	 * itself, uncoloured.
 	 */
 
 	interface Props {
@@ -29,6 +33,8 @@
 		allRunsHref: string;
 		onjsonerror: (message: string | null) => void;
 		onrun: () => void;
+		/** Forgets the last run so the window shows the design again. */
+		onclear: () => void;
 		onclose: () => void;
 	}
 
@@ -46,6 +52,7 @@
 		allRunsHref,
 		onjsonerror,
 		onrun,
+		onclear,
 		onclose
 	}: Props = $props();
 
@@ -63,12 +70,9 @@
 		timed_out: 'badge-error'
 	};
 
-	// Inputs start open when there's something to fill in before the first run; after that they
-	// fold away so the run gets the room, one click from being edited for the next run.
-	let inputsOpen = $state(false);
-	$effect.pre(() => {
-		if ((!hasRun && fields.length > 0) || Object.keys(inputErrors).length > 0) inputsOpen = true;
-	});
+	// The inputs dialog opens straight away when the window is opened to fill in a first run.
+	let inputsOpen = $state(untrack(() => session.status === 'idle' && fields.length > 0));
+	const hasInputErrors = $derived(Object.keys(inputErrors).length > 0 || !!inputJsonError);
 
 	let startedAtMs = $state<number | null>(null);
 	let endedAtMs = $state<number | null>(null);
@@ -100,14 +104,28 @@
 		return ms < 1000 ? `${Math.max(ms, 0)} ms` : `${(ms / 1000).toFixed(1)} s`;
 	});
 
-	function run() {
+	/** Run asks for inputs first when the workflow declares any; otherwise it just runs. */
+	function requestRun() {
+		if (fields.length > 0) inputsOpen = true;
+		else onrun();
+	}
+
+	function submitInputs(event: SubmitEvent) {
+		event.preventDefault();
 		onrun();
-		if (Object.keys(inputErrors).length === 0 && !inputJsonError) inputsOpen = false;
+		// A failed validation leaves the errors on the form, so the dialog stays for fixing them.
+		if (!hasInputErrors) inputsOpen = false;
+	}
+
+	function clearRun() {
+		startedAtMs = null;
+		endedAtMs = null;
+		onclear();
 	}
 </script>
 
 <div class="modal modal-open z-50" role="dialog" aria-modal="true" aria-label="Run {workflowName}">
-	<div class="modal-box flex h-[94vh] w-[97vw] max-w-none flex-col overflow-hidden p-0">
+	<div class="modal-box relative flex h-[94vh] w-[97vw] max-w-none flex-col overflow-hidden p-0">
 		<header class="border-base-300 flex shrink-0 items-center gap-3 border-b px-4 py-2">
 			<div class="min-w-0">
 				<h2 class="truncate text-sm font-semibold">Run · {workflowName}</h2>
@@ -146,12 +164,37 @@
 					<ListChecks size={14} />
 					All runs
 				</a>
+				{#if hasRun && !busy}
+					<button
+						type="button"
+						class="btn btn-ghost btn-sm gap-1.5"
+						onclick={clearRun}
+						title="Clear the last run's results from this window (the run itself is kept)"
+					>
+						<Eraser size={14} />
+						Clear run
+					</button>
+				{/if}
+				{#if fields.length === 0}
+					<button
+						type="button"
+						class="btn btn-ghost btn-sm btn-square"
+						disabled={busy}
+						onclick={() => (inputsOpen = true)}
+						title="Run with a custom $input (JSON)"
+						aria-label="Run with a custom input"
+					>
+						<Braces size={14} />
+					</button>
+				{/if}
 				<button
 					type="button"
 					class="btn btn-primary btn-sm gap-1.5"
-					disabled={busy || !!inputJsonError}
-					onclick={run}
-					title="Save the design and run it with the inputs on the left"
+					disabled={busy}
+					onclick={requestRun}
+					title={fields.length > 0
+						? 'Enter the inputs, then save the design and run it'
+						: 'Save the design and run it'}
 				>
 					{#if hasRun}<RotateCcw size={14} />{:else}<Play size={14} />{/if}
 					{busy ? 'Running…' : hasRun ? 'Run again' : 'Run'}
@@ -170,22 +213,6 @@
 
 		<div class="min-h-0 flex-1">
 			<RunWorkspace {session} {index} {scopes}>
-				{#snippet sidebarTop()}
-					<details class="border-base-300 border-b" bind:open={inputsOpen}>
-						<summary class="flex cursor-pointer items-center gap-2 px-3 py-2 text-sm font-semibold">
-							Inputs
-							<span class="text-base-content/50 text-xs font-normal">
-								{fields.length > 0 ? `${fields.length} declared` : '$input as JSON'}
-							</span>
-							{#if Object.keys(inputErrors).length > 0 || inputJsonError}
-								<span class="badge badge-error badge-xs">fix</span>
-							{/if}
-						</summary>
-						<div class="max-h-[45vh] overflow-auto px-3 pb-3">
-							<WorkflowInputForm {fields} bind:value={input} errors={inputErrors} {onjsonerror} />
-						</div>
-					</details>
-				{/snippet}
 				{#snippet canvasBanner()}
 					{#if canvasChanged}
 						<div
@@ -200,5 +227,65 @@
 				{/snippet}
 			</RunWorkspace>
 		</div>
+
+		{#if inputsOpen}
+			<div
+				class="absolute inset-0 z-20 flex items-center justify-center bg-black/30 p-4"
+				role="presentation"
+				onclick={(e) => {
+					if (e.target === e.currentTarget) inputsOpen = false;
+				}}
+				onkeydown={(e) => {
+					if (e.key === 'Escape') inputsOpen = false;
+				}}
+			>
+				<div
+					class="bg-base-100 border-base-300 w-full max-w-lg rounded-xl border shadow-xl"
+					role="dialog"
+					aria-modal="true"
+					aria-labelledby="run-inputs-title"
+				>
+					<form class="flex max-h-[80vh] flex-col" onsubmit={submitInputs}>
+						<div class="border-base-300 flex items-center gap-2 border-b px-4 py-3">
+							<h3 id="run-inputs-title" class="text-sm font-semibold">Run inputs</h3>
+							<span class="text-base-content/50 text-xs">
+								{fields.length > 0 ? `${fields.length} declared` : '$input as JSON'}
+							</span>
+							<button
+								type="button"
+								class="btn btn-ghost btn-xs btn-square ml-auto"
+								onclick={() => (inputsOpen = false)}
+								aria-label="Close inputs"
+							>
+								<X size={14} />
+							</button>
+						</div>
+						<div class="min-h-0 flex-1 overflow-auto px-4 py-3">
+							<WorkflowInputForm {fields} bind:value={input} errors={inputErrors} {onjsonerror} />
+						</div>
+						<div class="border-base-300 flex items-center justify-end gap-2 border-t px-4 py-3">
+							{#if hasInputErrors}
+								<span class="text-error mr-auto text-xs">Fix the highlighted inputs to run.</span>
+							{/if}
+							<button
+								type="button"
+								class="btn btn-ghost btn-sm"
+								onclick={() => (inputsOpen = false)}
+							>
+								Cancel
+							</button>
+							<button
+								type="submit"
+								class="btn btn-primary btn-sm gap-1.5"
+								disabled={busy || !!inputJsonError}
+							>
+								<Play size={14} />
+								Run
+							</button>
+						</div>
+					</form>
+				</div>
+			</div>
+		{/if}
 	</div>
 </div>

@@ -46,6 +46,18 @@ export class RunSession {
 	#reconnectTimer: ReturnType<typeof setTimeout> | undefined;
 	#closed = false;
 
+	/** Forgets the current run entirely — back to "not run yet". The run itself is untouched. */
+	reset() {
+		this.stop();
+		this.#index = EMPTY_INDEX;
+		this.executionId = null;
+		this.status = 'idle';
+		this.error = null;
+		this.run = initialRunState(EMPTY_INDEX);
+		this.#events = new Map();
+		this.childRuns = [];
+	}
+
 	/** Resets to "about to run", so the canvas clears the moment the user presses Run. */
 	beginStarting(index: RunIndex) {
 		this.stop();

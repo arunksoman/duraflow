@@ -14,7 +14,8 @@
 	import WorkflowNode from '$lib/components/builder/WorkflowNode.svelte';
 	import ReconnectableEdge from '$lib/components/builder/ReconnectableEdge.svelte';
 	import { NODE_META, NODE_TYPES } from '$lib/components/builder/builderConfig';
-	import RunSteps from './RunSteps.svelte';
+	import { TriangleAlert } from '@lucide/svelte';
+	import { RUN_TONE_VAR, runTone } from '$lib/components/builder/runStatus';
 	import RunInspector, { type RunSelection } from './RunInspector.svelte';
 	import type { RunSession } from '$lib/runtime/runSession.svelte';
 	import type { RunIndex } from '$lib/zigflow-engine/runIndex';
@@ -25,9 +26,9 @@
 	import type { WorkflowNodeType } from '$lib/types';
 
 	/**
-	 * Everything about one run, laid out to be read side by side: the steps it took (left), the
-	 * workflow coloured by what happened (centre), and the selected step's input, output and
-	 * variable changes (right). Shared by the builder's run window and the execution page, so a
+	 * Everything about one run, laid out to be read side by side: the workflow coloured by what
+	 * happened (left) and the selected node's input, output and variable changes (right). The
+	 * canvas colours carry the path — there is no separate steps list. Shared by the builder's run window and the execution page, so a
 	 * live run and a replayed one look identical.
 	 *
 	 * `scopes` and `index` must describe the DSL that was actually run — the caller freezes both
@@ -38,13 +39,11 @@
 		session: RunSession;
 		index: RunIndex;
 		scopes: Record<string, ScopeGraph>;
-		/** Rendered above the steps list — the builder puts its input form here. */
-		sidebarTop?: Snippet;
 		/** Rendered over the top of the canvas, e.g. a "canvas changed" notice. */
 		canvasBanner?: Snippet;
 	}
 
-	let { session, index, scopes, sidebarTop, canvasBanner }: Props = $props();
+	let { session, index, scopes, canvasBanner }: Props = $props();
 
 	const nodeTypes = Object.fromEntries(NODE_TYPES.map((t) => [t, WorkflowNode]));
 	const edgeTypes = { default: ReconnectableEdge };
@@ -123,8 +122,9 @@
 		const next = current.map((edge) => {
 			const target = stateById.get(edge.target);
 			const travelled = RAN.has(stateById.get(edge.source)) && RAN.has(target);
+			// In-progress edges are blue dashes that turn solid green (or red) once the target settles.
 			const style = travelled
-				? `stroke: var(--color-${target === 'error' ? 'error' : 'success'}); stroke-width: 2.5;`
+				? `stroke: ${RUN_TONE_VAR[runTone(target)]}; stroke-width: 3;`
 				: undefined;
 			const animated = travelled && target === 'running';
 			if (edge.style === style && Boolean(edge.animated) === animated) return edge;
@@ -171,15 +171,28 @@
 </script>
 
 <div class="flex h-full min-h-0">
-	<aside class="border-base-300 bg-base-100 flex w-72 shrink-0 flex-col border-r">
-		{@render sidebarTop?.()}
-		<div class="min-h-0 flex-1">
-			<RunSteps {session} {index} {selection} {labelOf} onselect={(s) => (selection = s)} />
-		</div>
-	</aside>
-
 	<div class="bg-base-200 relative min-w-0 flex-1">
 		{@render canvasBanner?.()}
+		{#if session.run.unmatched.length > 0 || index.ambiguousScopes.size > 0}
+			<div
+				class="alert alert-warning absolute bottom-2 left-1/2 z-10 w-auto max-w-[80%] -translate-x-1/2 gap-1.5 px-2 py-1.5 text-[11px] shadow"
+			>
+				<TriangleAlert size={12} class="shrink-0" />
+				<span>
+					{#if session.run.unmatched.length > 0}
+						{session.run.unmatched.length} event(s) matched no node ({[
+							...new Set(session.run.unmatched.map((u) => u.taskName))
+						]
+							.slice(0, 3)
+							.join(', ')}).
+					{/if}
+					{#if index.ambiguousScopes.size > 0}
+						Sibling loops/try blocks in one scope can't be told apart — highlighting there may be
+						approximate.
+					{/if}
+				</span>
+			</div>
+		{/if}
 		{#if nodes.length > 0}
 			{#key composed}
 				<SvelteFlow
@@ -206,13 +219,13 @@
 			<div
 				class="text-base-content/50 flex h-full items-center justify-center p-6 text-center text-sm"
 			>
-				No canvas for this run — its workflow couldn't be drawn. Steps and node data are still
-				available.
+				No canvas for this run — its workflow couldn't be drawn. Workflow input and output are still
+				available on the right.
 			</div>
 		{/if}
 	</div>
 
-	<aside class="border-base-300 bg-base-100 flex w-[26rem] shrink-0 flex-col border-l">
+	<aside class="border-base-300 bg-base-100 flex w-104 shrink-0 flex-col border-l">
 		<RunInspector {session} {selection} {labelOf} onselect={(s) => (selection = s)} />
 	</aside>
 </div>

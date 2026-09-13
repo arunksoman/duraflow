@@ -248,6 +248,16 @@
 		if (session.status === 'idle' && fields.length === 0) startRun();
 	}
 
+	/** Drops the last run from the run window, which then shows the current design again. */
+	function clearRun() {
+		if (running) return;
+		session.reset();
+		runIndex = buildRunIndex({ scopes: {} });
+		runScopes = {};
+		runDsl = null;
+		runError = null;
+	}
+
 	function startRun() {
 		if (running) return;
 		const fields = workflowMeta.inputSchema ?? [];
@@ -655,7 +665,7 @@
 		{workflowName}
 		{session}
 		index={runIndex}
-		scopes={runScopes}
+		scopes={session.status === 'idle' ? scopes : runScopes}
 		fields={workflowMeta.inputSchema ?? []}
 		bind:input={runInput}
 		inputErrors={runInputErrors}
@@ -665,6 +675,7 @@
 		allRunsHref="/executions?workflowId={workflowId}"
 		onjsonerror={(message) => (runInputJsonError = message)}
 		onrun={startRun}
+		onclear={clearRun}
 		onclose={() => (showRunModal = false)}
 	/>
 {/if}
