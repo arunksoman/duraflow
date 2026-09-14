@@ -1,16 +1,36 @@
 <script lang="ts" module>
-	export interface AvailVar {
-		expr: string;
-		hint: string;
-		category: 'input' | 'env' | 'data' | 'context' | 'output';
-		source: string;
-		field: string;
-		rawRef: string;
-	}
+	import type { VarSource } from '$lib/zigflow-engine/expression';
+
+	/** Badge colour per variable source — shared with anything else that shows a variable chip. */
+	export const SOURCE_COLOR: Record<VarSource, string> = {
+		input: 'var(--color-primary)',
+		data: 'var(--color-success)',
+		context: 'var(--color-info)',
+		output: 'var(--color-secondary)',
+		env: 'var(--color-warning)',
+		dot: 'var(--color-neutral)'
+	};
 </script>
 
 <script lang="ts">
 	import { untrack } from 'svelte';
+	import type { AvailVar } from './availableVars';
+	import {
+		parseExpression,
+		parsePathText,
+		parseRef,
+		parseTransforms,
+		pathToText,
+		refToJq,
+		serializeExpression,
+		SOURCE_LABEL,
+		SOURCE_LETTER,
+		TRANSFORMS,
+		VAR_SOURCES,
+		type ExprMode,
+		type ExprToken,
+		type VarToken
+	} from '$lib/zigflow-engine/expression';
 
 	interface Props {
 		value: string;
@@ -18,6 +38,11 @@
 		multiline?: boolean;
 		rows?: number;
 		availVars: AvailVar[];
+		/**
+		 * `template` (default): the value is plain text or one `${ }` runtime expression.
+		 * `jq`: the value is bare jq — used for condition operands.
+		 */
+		mode?: ExprMode;
 		onchange: (val: string) => void;
 	}
 
@@ -27,354 +52,234 @@
 		multiline = false,
 		rows = 3,
 		availVars,
+		mode = 'template',
 		onchange
 	}: Props = $props();
 
-	type LiteralPart = { kind: 'literal'; text: string };
-	type VarPart = { kind: 'var'; source: string; field: string; transform: string };
-	type ExprPart = LiteralPart | VarPart;
+	type AcItem =
+		| { kind: 'var'; v: AvailVar }
+		| { kind: 'ref'; token: VarToken }
+		| { kind: 'transform'; name: string; hint: string }
+		| { kind: 'literal'; text: string };
 
-	interface AcItem {
-		label: string;
-		insert: string;
-		hint: string;
-		category: string;
-		source?: string;
-		varData?: AvailVar;
-	}
-
-	const TRANSFORMS = [
-		'tostring',
-		'tonumber',
-		'ascii_downcase',
-		'ascii_upcase',
-		'length',
-		'@base64',
-		'@uri',
-		'keys',
-		'values',
-		'not',
-		'floor',
-		'ceil',
-		'round',
-		'abs',
-		'reverse',
-		'unique',
-		'sort',
-		'first',
-		'last',
-		'flatten',
-		'type'
-	];
-
-	const SRC_LETTER: Record<string, string> = {
-		$input: 'I',
-		$env: 'E',
-		$data: 'D',
-		$context: 'C',
-		$output: 'O',
-		'.': '·'
-	};
-	const CAT_COLOR: Record<string, string> = {
-		input: 'var(--color-primary)',
-		env: 'var(--color-warning)',
-		data: 'var(--color-success)',
-		context: 'var(--color-info)',
-		output: 'var(--color-secondary)'
-	};
-	const SRC_CAT: Record<string, string> = {
-		$input: 'input',
-		$env: 'env',
-		$data: 'data',
-		$context: 'context',
-		$output: 'output',
-		'.': 'output'
-	};
-
-	// ── Parser ─────────────────────────────────────────────────────────────
-	function splitOnPlus(inner: string): string[] | null {
-		const parts: string[] = [];
-		let current = '';
-		let depth = 0;
-		let inStr = false;
-		let strCh = '';
-		for (let i = 0; i < inner.length; i++) {
-			const ch = inner[i];
-			if (inStr) {
-				current += ch;
-				if (ch === strCh && inner[i - 1] !== '\\') inStr = false;
-				continue;
-			}
-			if (ch === '"' || ch === "'") {
-				inStr = true;
-				strCh = ch;
-				current += ch;
-				continue;
-			}
-			if ('([{'.includes(ch)) {
-				depth++;
-				current += ch;
-				continue;
-			}
-			if (')]}'.includes(ch)) {
-				depth--;
-				current += ch;
-				continue;
-			}
-			if (ch === '+' && depth === 0) {
-				parts.push(current.trim());
-				current = '';
-				continue;
-			}
-			current += ch;
-		}
-		if (current.trim()) parts.push(current.trim());
-		return parts.length > 0 ? parts : null;
-	}
-
-	function parseSingleToken(t: string): ExprPart | null {
-		const parenVar = t.match(/^\(\$(\w+)\.(\w+)\s*(\|[^)]+)\)$/);
-		if (parenVar)
-			return {
-				kind: 'var',
-				source: '$' + parenVar[1],
-				field: parenVar[2],
-				transform: parenVar[3].trim()
-			};
-		const dotVar = t.match(/^\$(\w+)\.(\w+)$/);
-		if (dotVar) return { kind: 'var', source: '$' + dotVar[1], field: dotVar[2], transform: '' };
-		if (t === '.') return { kind: 'var', source: '.', field: '', transform: '' };
-		const simpleVar = t.match(/^\$(\w+)(\s*\|.+)?$/);
-		if (simpleVar)
-			return {
-				kind: 'var',
-				source: '$' + simpleVar[1],
-				field: '',
-				transform: simpleVar[2]?.trim() ?? ''
-			};
-		const strLit = t.match(/^"(.*)"$/s);
-		if (strLit) return { kind: 'literal', text: strLit[1] };
-		return null;
-	}
-
-	function parseValue(val: string): ExprPart[] {
-		if (!val || val.trim() === '') return [];
-		const exprMatch = val.match(/^\$\{\s*([\s\S]+?)\s*\}$/);
-		if (!exprMatch) {
-			// Try plain variable refs without ${ } (e.g. from DSL import)
-			const tok = parseSingleToken(val.trim());
-			if (tok && tok.kind === 'var') return [tok];
-			return [{ kind: 'literal', text: val }];
-		}
-		const inner = exprMatch[1];
-		const rawParts = splitOnPlus(inner);
-		// Complex/unparseable expression → store as a single expression-literal chip
-		if (!rawParts) return [{ kind: 'literal', text: val }];
-		const result: ExprPart[] = [];
-		for (const raw of rawParts) {
-			const tok = parseSingleToken(raw.trim());
-			if (!tok) return [{ kind: 'literal', text: val }];
-			result.push(tok);
-		}
-		return result;
-	}
-
-	function serializeParts(ps: ExprPart[]): string {
-		if (ps.length === 0) return '';
-		const allLiteral = ps.every((p) => p.kind === 'literal');
-		if (ps.length === 1 && allLiteral) return (ps[0] as LiteralPart).text;
-		const inner = ps.map((p) => {
-			if (p.kind === 'literal') return '"' + (p as LiteralPart).text + '"';
-			const vp = p as VarPart;
-			const ref = vp.source + (vp.field ? '.' + vp.field : '');
-			return vp.transform ? '(' + ref + ' ' + vp.transform + ')' : ref;
-		});
-		return '${ ' + inner.join(' + ') + ' }';
-	}
+	const LETTER_SOURCE = Object.fromEntries(
+		VAR_SOURCES.filter((s) => s !== 'dot').map((s) => [SOURCE_LETTER[s].toLowerCase(), s])
+	) as Record<string, VarToken['source']>;
 
 	// ── State ──────────────────────────────────────────────────────────────
-	const _init = untrack(() => parseValue(value));
-	let parts = $state<ExprPart[]>(_init);
+	// The field is controlled by `value`, but re-parsing on every keystroke would throw away
+	// in-progress chip edits. So: remember what this field last emitted, and only re-parse when the
+	// incoming value is something else (a different node, a row above was removed, DSL applied).
+	let lastEmitted = untrack(() => value);
+	let tokens = $state<ExprToken[]>(untrack(() => parseExpression(value, mode)));
 	let rawMode = $state(false);
 	let rawText = $state(untrack(() => value));
-	let currentText = $state('');
-	let chipInputEl = $state<HTMLInputElement | null>(null);
-	let rawInputEl = $state<HTMLInputElement | null>(null);
+	let draft = $state('');
+	let focused = $state(false);
 	let acItems = $state<AcItem[]>([]);
 	let acIdx = $state(0);
-	let acForTransform = $state(false);
-	let focused = $state(false);
+	let editIdx = $state<number | null>(null);
+	let editPath = $state('');
+	let editTransforms = $state('');
 
-	const showAc = $derived(acItems.length > 0);
+	let chipInputEl = $state<HTMLInputElement | null>(null);
+	let textareaEl = $state<HTMLTextAreaElement | null>(null);
 
-	// ── Helpers ────────────────────────────────────────────────────────────
-	function srcColor(source: string): string {
-		return CAT_COLOR[SRC_CAT[source] ?? 'output'] ?? 'currentColor';
-	}
+	$effect(() => {
+		const incoming = value;
+		untrack(() => {
+			if (incoming === lastEmitted) return;
+			lastEmitted = incoming;
+			tokens = parseExpression(incoming, mode);
+			rawText = incoming;
+			editIdx = null;
+		});
+	});
 
-	function trunc(s: string, max = 16): string {
-		return s.length > max ? s.slice(0, max - 1) + '…' : s;
+	const lastVar = $derived.by(() => {
+		const last = tokens[tokens.length - 1];
+		return last?.kind === 'var' ? last : null;
+	});
+	const pathValid = $derived(parsePathText(editPath) !== null);
+	const transformsValid = $derived(parseTransforms(editTransforms) !== null);
+
+	function emitValue(next: string) {
+		lastEmitted = next;
+		onchange(next);
 	}
 
 	function emit() {
-		onchange(serializeParts(parts));
+		emitValue(serializeExpression(tokens, mode));
 	}
 
-	// ── Chip mutations ─────────────────────────────────────────────────────
-	function removePart(i: number) {
-		parts = parts.filter((_, j) => j !== i);
+	function varLabel(t: { source: VarToken['source']; path: VarToken['path'] }): string {
+		const p = pathToText(t.path);
+		return p || (t.source === 'dot' ? '.' : `$${t.source}`);
+	}
+
+	// ── Token mutations ────────────────────────────────────────────────────
+	function pushToken(tok: ExprToken) {
+		tokens = [...tokens, tok];
+		draft = '';
+		emit();
+	}
+
+	function removeToken(i: number) {
+		tokens = tokens.filter((_, j) => j !== i);
+		if (editIdx === i) editIdx = null;
 		emit();
 		chipInputEl?.focus();
 	}
 
-	function removeLastPart() {
-		if (parts.length > 0) {
-			parts = parts.slice(0, -1);
-			emit();
-		}
-	}
-
-	function commitCurrentAsLiteral() {
-		const text = currentText.trim();
+	function commitDraft() {
+		const text = draft.trim();
 		if (!text || text === '|') {
-			currentText = '';
-			if (chipInputEl) chipInputEl.value = '';
+			draft = '';
 			return;
 		}
-		parts = [...parts, { kind: 'literal', text }];
-		currentText = '';
-		if (chipInputEl) chipInputEl.value = '';
-		emit();
-	}
-
-	function isExprLiteral(text: string): boolean {
-		return /^\$\{[\s\S]*\}$/.test(text.trim());
-	}
-
-	function editChip(i: number) {
-		const part = parts[i];
-		parts = parts.filter((_, j) => j !== i);
-		if (part.kind === 'literal' && isExprLiteral((part as LiteralPart).text)) {
-			// Complex expression-literal: open in raw mode for editing
-			rawText = (part as LiteralPart).text;
-			rawMode = true;
+		const ref = parseRef(text);
+		if (ref) {
+			pushToken({ kind: 'var', source: ref.source, path: ref.path, transforms: [] });
+		} else if (/^\$\{[\s\S]*\}$/.test(text)) {
+			tokens = [...tokens, ...parseExpression(text, 'template')];
+			draft = '';
 			emit();
-			setTimeout(() => rawInputEl?.focus(), 0);
-			return;
+		} else if (mode === 'jq' && /^(-?\d+(\.\d+)?|true|false|null)$/.test(text)) {
+			// A bare jq scalar is a value, not the string "3".
+			pushToken({ kind: 'raw', expr: text });
+		} else {
+			pushToken({ kind: 'literal', text: draft });
 		}
-		const txt =
-			part.kind === 'var'
-				? (part as VarPart).field || (part as VarPart).source.replace(/^\$/, '')
-				: (part as LiteralPart).text;
-		currentText = txt;
-		if (chipInputEl) {
-			chipInputEl.value = txt;
-			chipInputEl.focus();
-		}
-		computeChipAc(txt);
-		emit();
 	}
 
 	// ── Autocomplete ───────────────────────────────────────────────────────
-	function computeChipAc(text: string) {
-		if (text === '|') {
-			const hasLastVar = parts.some((p) => p.kind === 'var');
-			if (hasLastVar) {
-				acForTransform = true;
-				acItems = TRANSFORMS.map((t) => ({
-					label: t,
-					insert: t,
-					hint: '',
-					category: 'transform'
-				})).slice(0, 12);
-				acIdx = 0;
+	function varItems(filter: (v: AvailVar) => boolean, limit: number): AcItem[] {
+		return availVars
+			.filter(filter)
+			.slice(0, limit)
+			.map((v) => ({ kind: 'var', v }));
+	}
+
+	function computeAc(text: string) {
+		acIdx = 0;
+		if (text.startsWith('|')) {
+			if (!lastVar) {
+				acItems = [];
 				return;
 			}
-		}
-
-		acForTransform = false;
-
-		if (!text.trim()) {
-			acItems = availVars.slice(0, 10).map((v) => ({
-				label: v.field || v.source,
-				insert: v.rawRef,
-				hint: v.hint || v.source,
-				category: v.category,
-				source: v.source,
-				varData: v
-			}));
-			acIdx = 0;
+			const q = text.slice(1).trim().toLowerCase();
+			const matches: AcItem[] = TRANSFORMS.filter(
+				(t) => !q || t.name.toLowerCase().includes(q) || t.hint.includes(q)
+			)
+				.slice(0, 10)
+				.map((t) => ({ kind: 'transform', name: t.name, hint: t.hint }));
+			const custom = text.slice(1).trim();
+			if (custom && parseTransforms(custom) && !TRANSFORMS.some((t) => t.name === custom)) {
+				matches.unshift({ kind: 'transform', name: custom, hint: 'custom' });
+			}
+			acItems = matches;
 			return;
 		}
 
-		const q = text.toLowerCase();
-		acItems = availVars
-			.filter(
+		const t = text.trim();
+		if (!t) {
+			acItems = varItems(() => true, 12);
+			return;
+		}
+
+		// `$data.us…` / `.sta…` — prefix match on the reference itself.
+		if (t.startsWith('$') || t.startsWith('.')) {
+			const items = varItems((v) => refToJq(v.source, v.path).startsWith(t), 8);
+			const ref = parseRef(t);
+			// The typed reference is the fallback: Enter picks a matching known variable first.
+			if (ref && !availVars.some((v) => refToJq(v.source, v.path) === t)) {
+				items.push({
+					kind: 'ref',
+					token: { kind: 'var', source: ref.source, path: ref.path, transforms: [] }
+				});
+			}
+			acItems = items;
+			return;
+		}
+
+		if (t.startsWith('"')) {
+			acItems = [{ kind: 'literal', text: t.replace(/^"|"$/g, '') }];
+			return;
+		}
+
+		// Letter shortcut from the chip badges: `d:user`, `i.userId`, `e:` …
+		const letter = /^([idcoe])[:.](.*)$/i.exec(t);
+		if (letter) {
+			const source = LETTER_SOURCE[letter[1].toLowerCase()];
+			const rest = letter[2].trim();
+			const items = varItems(
 				(v) =>
-					v.field.toLowerCase().includes(q) ||
-					v.source.slice(1).toLowerCase().includes(q) ||
-					v.hint.toLowerCase().includes(q)
-			)
-			.map((v) => ({
-				label: v.field || v.source,
-				insert: v.rawRef,
-				hint: v.source,
-				category: v.category,
-				source: v.source,
-				varData: v
-			}))
-			.slice(0, 8);
-		acIdx = 0;
+					v.source === source && pathToText(v.path).toLowerCase().startsWith(rest.toLowerCase()),
+				8
+			);
+			const path = parsePathText(rest);
+			if (
+				rest &&
+				path &&
+				!availVars.some((v) => v.source === source && pathToText(v.path) === pathToText(path))
+			) {
+				items.push({ kind: 'ref', token: { kind: 'var', source, path, transforms: [] } });
+			}
+			acItems = items;
+			return;
+		}
+
+		const q = t.toLowerCase();
+		acItems = [
+			...varItems(
+				(v) =>
+					pathToText(v.path).toLowerCase().includes(q) ||
+					(v.path.length === 0 && v.source.includes(q)),
+				8
+			),
+			{ kind: 'literal', text: draft }
+		];
 	}
 
-	function applyAcItem(item: AcItem) {
-		if (item.category === 'transform') {
-			let lastVarIdx = -1;
-			for (let i = parts.length - 1; i >= 0; i--) {
-				if (parts[i].kind === 'var') {
-					lastVarIdx = i;
-					break;
-				}
-			}
-			if (lastVarIdx >= 0) {
-				parts = parts.map((p, i) =>
-					i === lastVarIdx ? { ...p, transform: '| ' + item.insert } : p
-				) as ExprPart[];
+	function applyAc(item: AcItem) {
+		if (item.kind === 'transform') {
+			const stages = parseTransforms(item.name);
+			if (lastVar && stages) {
+				const idx = tokens.length - 1;
+				tokens = tokens.map((tok, i) =>
+					i === idx && tok.kind === 'var'
+						? { ...tok, transforms: [...tok.transforms, ...stages] }
+						: tok
+				);
 				emit();
 			}
-			currentText = '';
-			if (chipInputEl) chipInputEl.value = '';
-		} else if (item.varData) {
-			// currentText is the search term used to find the variable — discard it,
-			// don't commit as a literal chip.
-			parts = [
-				...parts,
-				{ kind: 'var', source: item.varData.source, field: item.varData.field, transform: '' }
-			];
-			currentText = '';
-			if (chipInputEl) chipInputEl.value = '';
-			emit();
+			draft = '';
+		} else if (item.kind === 'var') {
+			pushToken({ kind: 'var', source: item.v.source, path: [...item.v.path], transforms: [] });
+		} else if (item.kind === 'ref') {
+			pushToken(item.token);
+		} else {
+			pushToken({ kind: 'literal', text: item.text });
 		}
 		acItems = [];
-		acForTransform = false;
 		chipInputEl?.focus();
 	}
 
-	function handleChipInput(e: Event) {
-		const el = e.target as HTMLInputElement;
-		currentText = el.value;
-		computeChipAc(currentText);
+	function handleDraftInput(e: Event) {
+		draft = (e.target as HTMLInputElement).value;
+		computeAc(draft);
 	}
 
-	function handleChipKeydown(e: KeyboardEvent) {
-		if (e.key === 'Backspace' && currentText === '') {
+	function handleDraftKeydown(e: KeyboardEvent) {
+		const showAc = acItems.length > 0;
+		if (e.key === 'Backspace' && draft === '') {
 			e.preventDefault();
-			removeLastPart();
+			if (tokens.length > 0) removeToken(tokens.length - 1);
 			return;
 		}
 		if (e.key === 'Enter' && !showAc) {
 			e.preventDefault();
-			commitCurrentAsLiteral();
+			commitDraft();
 			return;
 		}
 		if (!showAc) return;
@@ -386,253 +291,448 @@
 			acIdx = (acIdx - 1 + acItems.length) % acItems.length;
 		} else if (e.key === 'Enter' || e.key === 'Tab') {
 			e.preventDefault();
-			applyAcItem(acItems[acIdx]);
+			applyAc(acItems[acIdx]);
 		} else if (e.key === 'Escape') {
+			e.preventDefault();
 			acItems = [];
 		}
 	}
 
-	// ── Focus tracking ─────────────────────────────────────────────────────
-	// Only the chip input sets focused=true — NOT onfocusin on the container.
-	// This prevents layout shifts (input growing) when the </> button is clicked,
-	// which would move the button between mousedown and mouseup causing missed clicks.
-	function handleChipInputFocus() {
+	function handleDraftFocus() {
 		focused = true;
-		computeChipAc(currentText);
+		editIdx = null;
+		computeAc(draft);
 	}
 
-	function handleContainerFocusout(e: FocusEvent) {
-		const container = e.currentTarget as HTMLElement;
-		if (!container?.contains(e.relatedTarget as Node)) {
-			focused = false;
-			if (currentText.trim() && currentText !== '|') commitCurrentAsLiteral();
-			acItems = [];
+	function handleWrapperFocusout(e: FocusEvent) {
+		const wrapper = e.currentTarget as HTMLElement;
+		if (wrapper.contains(e.relatedTarget as Node)) return;
+		focused = false;
+		acItems = [];
+		editIdx = null;
+		if (draft.trim() && draft.trim() !== '|') commitDraft();
+	}
+
+	// ── Chip editor ────────────────────────────────────────────────────────
+	function openEditor(i: number) {
+		const tok = tokens[i];
+		acItems = [];
+		editIdx = i;
+		if (tok.kind === 'var') {
+			editPath = pathToText(tok.path);
+			editTransforms = tok.transforms.join(' | ');
+		}
+	}
+
+	function closeEditor() {
+		editIdx = null;
+		chipInputEl?.focus();
+	}
+
+	function patchToken(i: number, next: ExprToken) {
+		tokens = tokens.map((tok, j) => (j === i ? next : tok));
+		emit();
+	}
+
+	function editVar(i: number, patch: Partial<VarToken>) {
+		const tok = tokens[i];
+		if (tok?.kind === 'var') patchToken(i, { ...tok, ...patch });
+	}
+
+	function onEditPath(i: number, text: string) {
+		editPath = text;
+		const path = parsePathText(text);
+		if (path) editVar(i, { path });
+	}
+
+	function onEditTransforms(i: number, text: string) {
+		editTransforms = text;
+		const stages = parseTransforms(text);
+		if (stages) editVar(i, { transforms: stages });
+	}
+
+	function appendTransform(i: number, name: string) {
+		const tok = tokens[i];
+		const stages = parseTransforms(name);
+		if (tok?.kind !== 'var' || !stages) return;
+		const transforms = [...tok.transforms, ...stages];
+		editTransforms = transforms.join(' | ');
+		editVar(i, { transforms });
+	}
+
+	function editorKeydown(e: KeyboardEvent) {
+		if (e.key === 'Escape' || (e.key === 'Enter' && !(e.target instanceof HTMLTextAreaElement))) {
+			e.preventDefault();
+			closeEditor();
 		}
 	}
 
 	// ── Raw mode ───────────────────────────────────────────────────────────
 	function toggleRaw() {
 		if (!rawMode) {
-			rawText = serializeParts(parts);
+			rawText = serializeExpression(tokens, mode);
 			rawMode = true;
-			setTimeout(() => rawInputEl?.focus(), 0);
 		} else {
-			parts = parseValue(rawText);
+			tokens = parseExpression(rawText, mode);
 			rawMode = false;
-			onchange(rawText);
 			setTimeout(() => chipInputEl?.focus(), 0);
 		}
 	}
 
 	function handleRawInput(e: Event) {
 		rawText = (e.target as HTMLInputElement | HTMLTextAreaElement).value;
-		onchange(rawText);
+		emitValue(rawText);
 	}
 
-	function handleRawKeydown(e: KeyboardEvent) {
-		if (e.key === 'Escape') {
-			parts = parseValue(rawText);
-			rawMode = false;
-		}
+	// ── Multiline (free text with variable insertion) ──────────────────────
+	let insertOpen = $state(false);
+
+	function insertVar(v: AvailVar) {
+		const ref = refToJq(v.source, v.path);
+		const snippet = mode === 'jq' ? ref : `\${ ${ref} }`;
+		const el = textareaEl;
+		const start = el?.selectionStart ?? rawText.length;
+		const end = el?.selectionEnd ?? rawText.length;
+		rawText = rawText.slice(0, start) + snippet + rawText.slice(end);
+		emitValue(rawText);
+		insertOpen = false;
+		setTimeout(() => {
+			el?.focus();
+			el?.setSelectionRange(start + snippet.length, start + snippet.length);
+		}, 0);
 	}
+
+	const editing = $derived(editIdx !== null ? tokens[editIdx] : undefined);
 </script>
 
+{#snippet badge(source: VarToken['source'], size = 'size-4')}
+	<span
+		class="flex {size} shrink-0 items-center justify-center font-mono text-[9px] font-bold text-white"
+		style:background={SOURCE_COLOR[source]}
+		title={SOURCE_LABEL[source]}>{SOURCE_LETTER[source]}</span
+	>
+{/snippet}
+
 {#if multiline}
-	<textarea
-		class="textarea textarea-xs w-full font-mono text-xs leading-relaxed"
-		{rows}
-		placeholder={placeholder || 'expression or value'}
-		value={rawText}
-		oninput={handleRawInput}></textarea>
+	<div
+		class="relative"
+		onfocusout={(e) => {
+			if (!(e.currentTarget as HTMLElement).contains(e.relatedTarget as Node)) insertOpen = false;
+		}}
+	>
+		<textarea
+			bind:this={textareaEl}
+			class="textarea textarea-xs w-full pr-8 font-mono text-xs leading-relaxed"
+			{rows}
+			placeholder={placeholder || 'expression or value'}
+			value={rawText}
+			oninput={handleRawInput}></textarea>
+		<button
+			type="button"
+			class="btn btn-ghost btn-xs absolute top-1 right-1 px-1 font-mono text-[10px] text-base-content/50"
+			title="Insert variable"
+			aria-expanded={insertOpen}
+			onclick={() => (insertOpen = !insertOpen)}>{'{x}'}</button
+		>
+		{#if insertOpen}
+			<div
+				class="border-base-300 bg-base-100 absolute top-7 right-1 z-50 max-h-64 w-64 overflow-y-auto rounded-lg border shadow-lg"
+				role="listbox"
+				tabindex="-1"
+			>
+				{#each availVars as v (refToJq(v.source, v.path))}
+					<button
+						type="button"
+						role="option"
+						aria-selected="false"
+						class="hover:bg-base-200 flex w-full items-center gap-2 px-2 py-1 text-left"
+						onmousedown={(e) => e.preventDefault()}
+						onclick={() => insertVar(v)}
+					>
+						<span class="overflow-hidden rounded">{@render badge(v.source)}</span>
+						<code class="min-w-0 flex-1 truncate text-[11px]">{varLabel(v)}</code>
+						<span class="text-base-content/30 truncate text-[10px]">{v.hint}</span>
+					</button>
+				{/each}
+			</div>
+		{/if}
+	</div>
 {:else if rawMode}
 	<div class="flex items-center gap-1">
 		<input
-			bind:this={rawInputEl}
 			class="input input-xs min-w-0 flex-1 font-mono"
 			type="text"
-			placeholder={'${ expression }'}
+			placeholder={mode === 'jq' ? 'jq expression' : '${ expression }'}
 			value={rawText}
 			oninput={handleRawInput}
-			onkeydown={handleRawKeydown}
+			onkeydown={(e) => {
+				if (e.key === 'Escape' || e.key === 'Enter') {
+					e.preventDefault();
+					toggleRaw();
+				}
+			}}
+			{@attach (el) => (el as HTMLInputElement).focus()}
 		/>
 		<button
 			type="button"
-			class="btn btn-ghost btn-xs shrink-0 px-1.5 font-mono text-[9px] opacity-50 hover:opacity-100"
+			class="text-base-content/40 hover:text-base-content/80 shrink-0 px-1 font-mono text-[9px]"
 			onclick={toggleRaw}
-			title="Switch to visual chip view">chip</button
+			title="Back to the visual builder">visual</button
 		>
 	</div>
 {:else}
-	<!-- Chip-token input -->
-	<div class="relative">
-		<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+	<div class="relative" onfocusout={handleWrapperFocusout}>
+		<!-- Clicking the field's empty space focuses the text input; the input itself is keyboard-reachable. -->
+		<!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_noninteractive_element_interactions -->
 		<div
-			class="border-base-300 bg-base-100 flex min-h-6.5 w-full cursor-text flex-wrap items-center gap-0.5 rounded-lg border px-1.5 py-0.5 transition-colors focus-within:border-primary/40"
+			class="border-base-300 bg-base-100 focus-within:border-primary/40 flex min-h-6.5 w-full cursor-text flex-wrap items-center gap-1 rounded-lg border px-1.5 py-0.5 transition-colors"
 			role="group"
 			aria-label="Expression builder"
-			onfocusout={handleContainerFocusout}
 			onclick={(e) => {
 				if (e.target === e.currentTarget) chipInputEl?.focus();
 			}}
-			onkeydown={(e) => {
-				if (e.key === 'Enter' && e.target === e.currentTarget) chipInputEl?.focus();
-			}}
 		>
-			{#each parts as part, i (i)}
+			{#each tokens as tok, i (i)}
 				{#if i > 0}
-					<span class="select-none font-mono text-[9px] text-base-content/25">+</span>
+					<span class="text-base-content/25 font-mono text-[9px] select-none">+</span>
 				{/if}
-				{#if part.kind === 'var'}
-					{@const vp = part as VarPart}
-					<span class="group/chip inline-flex items-center gap-0.5 rounded bg-base-200 px-1 py-0.5">
-						<!-- Clickable edit area -->
-						<span
-							class="inline-flex cursor-pointer items-center gap-0.5 leading-none"
-							role="button"
-							tabindex="0"
-							onclick={() => editChip(i)}
-							onkeydown={(e) => e.key === 'Enter' && editChip(i)}
-							title="Click to edit"
-						>
-							<span
-								class="flex size-4 shrink-0 items-center justify-center rounded font-mono text-[8px] font-bold text-white"
-								style:background={srcColor(vp.source)}>{SRC_LETTER[vp.source] ?? '?'}</span
-							>
-							<span
-								class="max-w-24 truncate font-mono text-[10px] text-base-content/80"
-								title={vp.field || vp.source}
-							>
-								{trunc(vp.field || vp.source)}
-							</span>
-							{#if vp.transform}
-								<span class="font-mono text-[9px] text-base-content/40">{vp.transform}</span>
+				<span
+					class={[
+						'group/chip border-base-300 bg-base-200/60 inline-flex max-w-full items-stretch overflow-hidden rounded border font-mono text-[10px] leading-4',
+						editIdx === i && 'ring-primary/50 ring-1'
+					]}
+				>
+					<span
+						class="inline-flex min-w-0 cursor-pointer items-stretch"
+						role="button"
+						tabindex="0"
+						title="Click to edit"
+						onclick={() => openEditor(i)}
+						onkeydown={(e) => {
+							if (e.key === 'Enter' || e.key === ' ') {
+								e.preventDefault();
+								openEditor(i);
+							}
+						}}
+					>
+						{#if tok.kind === 'var'}
+							{@render badge(tok.source)}
+							<span class="text-base-content/80 max-w-32 truncate px-1">{varLabel(tok)}</span>
+							{#if tok.transforms.length > 0}
+								<span class="border-base-300 text-base-content/45 max-w-28 truncate border-l px-1"
+									>{tok.transforms.join(' | ')}</span
+								>
 							{/if}
-						</span>
-						<!-- Remove button -->
-						<button
-							type="button"
-							class="ml-0.5 leading-none text-base-content/20 opacity-0 transition-opacity hover:text-error group-hover/chip:opacity-100"
-							onclick={() => removePart(i)}
-							aria-label="Remove">×</button
-						>
+						{:else if tok.kind === 'literal'}
+							<span class="text-base-content/60 max-w-40 truncate px-1">"{tok.text}"</span>
+						{:else}
+							<span class="text-base-content/40 border-base-300 border-r px-1">&lt;/&gt;</span>
+							<span class="text-base-content/60 max-w-40 truncate px-1 italic">{tok.expr}</span>
+						{/if}
 					</span>
-				{:else}
-					{@const lp = part as LiteralPart}
-					{#if isExprLiteral(lp.text)}
-						<!-- Complex jq expression chip — click to edit in raw mode -->
-						{@const inner = lp.text.replace(/^\$\{\s*/, '').replace(/\s*\}$/, '')}
-						<span
-							class="group/chip inline-flex items-center gap-0.5 rounded border border-base-300 bg-base-200/60 px-1 py-0.5"
-						>
-							<span class="shrink-0 font-mono text-[8px] text-base-content/30">&lt;/&gt;</span>
-							<span
-								class="max-w-28 cursor-pointer truncate font-mono text-[10px] italic text-base-content/60"
-								role="button"
-								tabindex="0"
-								onclick={() => editChip(i)}
-								onkeydown={(e) => e.key === 'Enter' && editChip(i)}
-								title={lp.text}>{trunc(inner, 22)}</span
-							>
-							<button
-								type="button"
-								class="ml-0.5 leading-none text-base-content/20 opacity-0 transition-opacity hover:text-error group-hover/chip:opacity-100"
-								onclick={() => removePart(i)}
-								aria-label="Remove">×</button
-							>
-						</span>
-					{:else}
-						{@const lpLabel = '"' + trunc(lp.text) + '"'}
-						<span class="group/chip inline-flex items-center gap-0 text-base-content/50">
-							<span
-								class="cursor-pointer font-mono text-[10px]"
-								role="button"
-								tabindex="0"
-								onclick={() => editChip(i)}
-								onkeydown={(e) => e.key === 'Enter' && editChip(i)}
-								title={lp.text}>{lpLabel}</span
-							>
-							<button
-								type="button"
-								class="leading-none text-base-content/20 opacity-0 transition-opacity hover:text-error group-hover/chip:opacity-100"
-								onclick={() => removePart(i)}
-								aria-label="Remove">×</button
-							>
-						</span>
-					{/if}
-				{/if}
+					<button
+						type="button"
+						class="text-base-content/25 hover:text-error px-0.5 opacity-0 transition-opacity group-hover/chip:opacity-100 focus:opacity-100"
+						onclick={() => removeToken(i)}
+						aria-label="Remove">×</button
+					>
+				</span>
 			{/each}
 
-			<!-- Trailing + only when focused and chips exist -->
-			{#if focused && parts.length > 0}
-				<span class="select-none font-mono text-[9px] text-base-content/25">+</span>
-			{/if}
-
-			<!-- Inline input: visible when focused or no chips yet -->
 			<input
 				bind:this={chipInputEl}
 				type="text"
 				class={[
-					'bg-transparent font-mono text-[10px] text-base-content outline-none placeholder:text-base-content/20 transition-all',
-					!focused && parts.length > 0 ? 'h-px w-px overflow-hidden opacity-0' : 'min-w-12 flex-1'
-				].join(' ')}
-				placeholder={parts.length === 0 ? placeholder || 'type or select a variable…' : ''}
-				value={currentText}
-				oninput={handleChipInput}
-				onkeydown={handleChipKeydown}
-				onfocus={handleChipInputFocus}
+					'text-base-content placeholder:text-base-content/25 bg-transparent font-mono text-[10px] outline-none',
+					!focused && tokens.length > 0 ? 'w-2 min-w-0' : 'min-w-16 flex-1'
+				]}
+				placeholder={tokens.length === 0 ? placeholder || 'type, pick a variable, or $…' : ''}
+				value={draft}
+				oninput={handleDraftInput}
+				onkeydown={handleDraftKeydown}
+				onfocus={handleDraftFocus}
 				aria-label="Add expression part"
+				aria-autocomplete="list"
 			/>
 
-			<!-- Raw toggle -->
 			<button
 				type="button"
-				class="ml-auto shrink-0 self-center px-0.5 font-mono text-[8px] text-base-content/20 transition-colors hover:text-base-content/60"
+				class="text-base-content/25 hover:text-base-content/70 ml-auto shrink-0 self-center px-0.5 font-mono text-[8px] transition-colors"
 				onclick={toggleRaw}
-				title="Edit raw expression">&lt;/&gt;</button
+				title="Edit as raw text">&lt;/&gt;</button
 			>
 		</div>
 
-		<!-- Autocomplete dropdown -->
-		{#if showAc}
-			<ul
-				class="absolute left-0 top-full z-50 mt-0.5 min-w-52 max-w-80 overflow-hidden rounded-lg border border-base-300 bg-base-100 shadow-lg"
+		<!-- Autocomplete -->
+		{#if acItems.length > 0 && editIdx === null}
+			<div
+				class="border-base-300 bg-base-100 absolute top-full left-0 z-50 mt-0.5 w-72 max-w-[calc(100vw-2rem)] overflow-hidden rounded-lg border shadow-lg"
+				role="listbox"
+				tabindex="-1"
+				onmousedown={(e) => e.preventDefault()}
 			>
-				{#if acForTransform}
-					<li class="border-b border-base-200 px-2 py-1">
-						<span class="text-[9px] font-semibold uppercase tracking-wider text-base-content/40"
-							>Transform — applies to last variable</span
+				{#if acItems[0].kind === 'transform'}
+					<div class="border-base-200 border-b px-2 py-1">
+						<span class="text-base-content/40 text-[9px] font-semibold tracking-wider uppercase"
+							>Transform {lastVar ? varLabel(lastVar) : ''}</span
 						>
-					</li>
+					</div>
 				{/if}
-				{#each acItems as item, idx (item.label)}
-					<li>
-						<button
-							type="button"
-							class="flex w-full items-center gap-2 px-2 py-1.5 text-left transition hover:bg-base-200"
-							class:bg-base-200={idx === acIdx}
-							onmousedown={(e) => {
-								e.preventDefault();
-								applyAcItem(item);
-							}}
-						>
-							{#if item.source}
-								<span
-									class="flex size-4 shrink-0 items-center justify-center rounded font-mono text-[8px] font-bold text-white"
-									style:background={srcColor(item.source)}>{SRC_LETTER[item.source] ?? '?'}</span
-								>
-							{:else if item.category === 'transform'}
-								<span class="shrink-0 font-mono text-[10px] font-bold text-base-content/40">|</span>
-							{/if}
-							<code class="min-w-0 flex-1 truncate font-mono text-xs">{item.label}</code>
-							{#if item.hint}
-								<span class="ml-2 shrink-0 truncate text-[10px] text-base-content/30"
-									>{item.hint}</span
-								>
-							{/if}
-						</button>
-					</li>
+				{#each acItems as item, idx (idx)}
+					<button
+						type="button"
+						role="option"
+						aria-selected={idx === acIdx}
+						class={[
+							'hover:bg-base-200 flex w-full items-center gap-2 px-2 py-1 text-left',
+							idx === acIdx && 'bg-base-200'
+						]}
+						onclick={() => applyAc(item)}
+					>
+						{#if item.kind === 'var'}
+							<span class="overflow-hidden rounded">{@render badge(item.v.source)}</span>
+							<code class="min-w-0 flex-1 truncate text-[11px]">{varLabel(item.v)}</code>
+							<span class="text-base-content/35 max-w-32 truncate text-[10px]">{item.v.hint}</span>
+						{:else if item.kind === 'ref'}
+							<span class="overflow-hidden rounded">{@render badge(item.token.source)}</span>
+							<code class="min-w-0 flex-1 truncate text-[11px]">{varLabel(item.token)}</code>
+							<span class="text-base-content/35 text-[10px]">use reference</span>
+						{:else if item.kind === 'transform'}
+							<span class="text-base-content/40 w-4 text-center font-mono text-[11px] font-bold"
+								>|</span
+							>
+							<code class="min-w-0 flex-1 truncate text-[11px]">{item.name}</code>
+							<span class="text-base-content/35 text-[10px]">{item.hint}</span>
+						{:else}
+							<span class="text-base-content/40 w-4 text-center font-mono text-[10px]">"</span>
+							<code class="min-w-0 flex-1 truncate text-[11px]">{item.text}</code>
+							<span class="text-base-content/35 text-[10px]">text</span>
+						{/if}
+					</button>
 				{/each}
-			</ul>
+				<div class="border-base-200 text-base-content/30 border-t px-2 py-0.5 text-[9px]">
+					↑↓ select · Enter/Tab insert · <kbd>|</kbd> transform · <kbd>d:</kbd> <kbd>i:</kbd>
+					<kbd>c:</kbd> <kbd>o:</kbd> <kbd>e:</kbd> source · Esc close
+				</div>
+			</div>
+		{/if}
+
+		<!-- Chip editor -->
+		{#if editIdx !== null && editing}
+			{@const i = editIdx}
+			<div
+				class="border-base-300 bg-base-100 absolute top-full left-0 z-50 mt-0.5 flex w-72 max-w-[calc(100vw-2rem)] flex-col gap-2 rounded-lg border p-2 shadow-lg"
+				role="dialog"
+				tabindex="-1"
+				aria-label="Edit expression part"
+				onkeydown={editorKeydown}
+			>
+				{#if editing.kind === 'var'}
+					<div class="flex items-center gap-1" role="radiogroup" aria-label="Variable source">
+						{#each VAR_SOURCES as s (s)}
+							<button
+								type="button"
+								role="radio"
+								aria-checked={editing.source === s}
+								title={SOURCE_LABEL[s]}
+								class={[
+									'flex size-6 items-center justify-center rounded font-mono text-[10px] font-bold transition',
+									editing.source === s
+										? 'text-white'
+										: 'bg-base-200 text-base-content/50 hover:text-base-content'
+								]}
+								style:background={editing.source === s ? SOURCE_COLOR[s] : undefined}
+								onclick={() => editVar(i, { source: s })}>{SOURCE_LETTER[s]}</button
+							>
+						{/each}
+						<span class="text-base-content/40 ml-1 text-[10px]">{SOURCE_LABEL[editing.source]}</span
+						>
+					</div>
+					<label class="flex flex-col gap-0.5">
+						<span class="text-base-content/40 text-[9px] font-semibold tracking-wider uppercase"
+							>Variable</span
+						>
+						<input
+							class={['input input-xs font-mono', !pathValid && 'input-error']}
+							placeholder={editing.source === 'dot' ? '(whole value)' : 'field.nested[0]'}
+							value={editPath}
+							oninput={(e) => onEditPath(i, (e.target as HTMLInputElement).value)}
+							{@attach (el) => (el as HTMLInputElement).focus()}
+						/>
+					</label>
+					{#if availVars.some((v) => v.source === editing.source && v.path.length > 0)}
+						<div class="flex max-h-20 flex-wrap gap-1 overflow-y-auto">
+							{#each availVars.filter((v) => v.source === editing.source && v.path.length > 0) as v (refToJq(v.source, v.path))}
+								<button
+									type="button"
+									class="bg-base-200 hover:bg-base-300 rounded px-1 font-mono text-[10px]"
+									title={v.hint}
+									onclick={() => onEditPath(i, pathToText(v.path))}>{pathToText(v.path)}</button
+								>
+							{/each}
+						</div>
+					{/if}
+					<label class="flex flex-col gap-0.5">
+						<span class="text-base-content/40 text-[9px] font-semibold tracking-wider uppercase"
+							>Jq transformer</span
+						>
+						<input
+							class={['input input-xs font-mono', !transformsValid && 'input-error']}
+							placeholder="tostring | ascii_downcase"
+							value={editTransforms}
+							oninput={(e) => onEditTransforms(i, (e.target as HTMLInputElement).value)}
+						/>
+					</label>
+					<div class="flex flex-wrap gap-1">
+						{#each TRANSFORMS.slice(0, 10) as t (t.name)}
+							<button
+								type="button"
+								class="bg-base-200 hover:bg-base-300 rounded px-1 font-mono text-[10px]"
+								title={t.hint}
+								onclick={() => appendTransform(i, t.name)}>{t.name}</button
+							>
+						{/each}
+					</div>
+					<code
+						class="bg-base-200/60 text-base-content/60 truncate rounded px-1.5 py-0.5 text-[10px]"
+						>{[refToJq(editing.source, editing.path), ...editing.transforms].join(' | ')}</code
+					>
+				{:else if editing.kind === 'literal'}
+					<label class="flex flex-col gap-0.5">
+						<span class="text-base-content/40 text-[9px] font-semibold tracking-wider uppercase"
+							>Text</span
+						>
+						<input
+							class="input input-xs font-mono"
+							value={editing.text}
+							oninput={(e) =>
+								patchToken(i, { kind: 'literal', text: (e.target as HTMLInputElement).value })}
+							{@attach (el) => (el as HTMLInputElement).focus()}
+						/>
+					</label>
+				{:else}
+					<label class="flex flex-col gap-0.5">
+						<span class="text-base-content/40 text-[9px] font-semibold tracking-wider uppercase"
+							>jq</span
+						>
+						<textarea
+							class="textarea textarea-xs font-mono"
+							rows="3"
+							value={editing.expr}
+							oninput={(e) =>
+								patchToken(i, { kind: 'raw', expr: (e.target as HTMLTextAreaElement).value })}
+							{@attach (el) => (el as HTMLTextAreaElement).focus()}></textarea>
+					</label>
+				{/if}
+				<div class="flex items-center justify-between">
+					<button
+						type="button"
+						class="btn btn-ghost btn-xs text-error"
+						onclick={() => removeToken(i)}>Remove</button
+					>
+					<button type="button" class="btn btn-primary btn-xs" onclick={closeEditor}>Done</button>
+				</div>
+			</div>
 		{/if}
 	</div>
 {/if}

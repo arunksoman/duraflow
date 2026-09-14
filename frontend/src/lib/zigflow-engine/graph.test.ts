@@ -302,9 +302,9 @@ describe('graphToAst', () => {
 		};
 		const { graph, header: hdr } = astToGraph(original);
 		const rebuilt = graphToAst(graph, hdr);
-		// Task names are re-slugged from the node label (lowercased) on save — "getUser" -> "getuser".
+		// A label that is already a valid task name is kept verbatim, so `$data.getUser` references survive.
 		expect(rebuilt.do[0]).toMatchObject({
-			getuser: {
+			getUser: {
 				call: 'grpc',
 				with: {
 					proto: { endpoint: 'https://example.com/user.proto' },
@@ -319,7 +319,7 @@ describe('graphToAst', () => {
 		expect(result.ok).toBe(true);
 		if (!result.ok) return;
 		const [name, task] = Object.entries(result.document.do[0])[0];
-		expect(name).toBe('getuser');
+		expect(name).toBe('getUser');
 		expect(task).toMatchObject(Object.values(original.do[0])[0]);
 	});
 

@@ -1,7 +1,20 @@
 <script lang="ts">
-	import type { AvailVar } from './ExpressionInput.svelte';
-	import ExpressionInput from './ExpressionInput.svelte';
 	import { untrack } from 'svelte';
+	import type { AvailVar } from './availableVars';
+	import ExpressionInput from './ExpressionInput.svelte';
+	import {
+		COMPARISON_OPS,
+		FUNCTION_OPS,
+		OP_LABEL,
+		UNARY_OPS,
+		isUnary,
+		parseCondition,
+		serializeCondition,
+		type ConditionClause,
+		type ConditionOp,
+		type RightKind
+	} from '$lib/zigflow-engine/condition';
+	import { parseRef, refToJq } from '$lib/zigflow-engine/expression';
 
 	interface Props {
 		value: string;
@@ -10,239 +23,110 @@
 		onchange: (val: string) => void;
 	}
 
-	type Op = '==' | '!=' | '>=' | '<=' | '>' | '<' | '| not';
-	type RightType = 'str' | 'num' | 'bool' | 'null' | 'var';
-
-	interface ConditionClause {
-		left: string;
-		op: Op;
-		rightType: RightType;
-		rightVal: string;
-		join: 'and' | 'or' | null;
-	}
-
-	const OPERATORS: Op[] = ['==', '!=', '>=', '<=', '>', '<', '| not'];
-	const RIGHT_TYPES: RightType[] = ['str', 'num', 'bool', 'null', 'var'];
-	const RIGHT_TYPE_LABELS: Record<RightType, string> = {
-		str: '"…"',
-		num: '123',
-		bool: 'T/F',
-		null: 'nil',
-		var: '$var'
-	};
-
 	let { value, availVars, placeholder = '${ condition }', onchange }: Props = $props();
 
-	// ── Parsing ──────────────────────────────────────────────────────────
+	const RIGHT_KINDS: { kind: RightKind; label: string }[] = [
+		{ kind: 'string', label: 'text' },
+		{ kind: 'number', label: 'number' },
+		{ kind: 'bool', label: 'true/false' },
+		{ kind: 'null', label: 'null' },
+		{ kind: 'expr', label: 'variable' }
+	];
 
-	function parseRightVal(raw: string): { type: RightType; val: string } {
-		const t = raw.trim();
-		if (t === 'null') return { type: 'null', val: '' };
-		if (t === 'true' || t === 'false') return { type: 'bool', val: t };
-		if (/^\d+(\.\d+)?$/.test(t)) return { type: 'num', val: t };
-		if (/^".*"$/s.test(t)) return { type: 'str', val: t.slice(1, -1) };
-		if (/^'.*'$/s.test(t)) return { type: 'str', val: t.slice(1, -1) };
-		if (t.startsWith('$') || t.startsWith('.')) return { type: 'var', val: t };
-		return { type: 'str', val: t };
-	}
+	// Rows get a local id so a removed row never hands its editors to the row below it.
+	type Row = ConditionClause & { id: number };
+	let nextId = 0;
+	const toRows = (cs: ConditionClause[]): Row[] => cs.map((c) => ({ ...c, id: nextId++ }));
 
-	function parseClause(expr: string): Omit<ConditionClause, 'join'> | null {
-		const t = expr.trim();
-		const notM = t.match(/^(.+?)\s*\|\s*not$/s);
-		if (notM) return { left: notM[1].trim(), op: '| not', rightType: 'null', rightVal: '' };
-		const m = t.match(/^(.+?)\s*(==|!=|>=|<=|>|<)\s*(.+)$/s);
-		if (!m) return null;
-		const { type, val } = parseRightVal(m[3].trim());
-		return { left: m[1].trim(), op: m[2] as Op, rightType: type, rightVal: val };
-	}
+	// Same controlled-field contract as ExpressionInput: re-parse only values this field didn't emit.
+	let lastEmitted = untrack(() => value);
+	let rows = $state<Row[]>(untrack(() => toRows(parseCondition(value))));
+	let rawMode = $state(false);
+	let rawText = $state(untrack(() => value));
 
-	function splitOnLogical(inner: string): { part: string; join: 'and' | 'or' | null }[] | null {
-		const results: { part: string; join: 'and' | 'or' | null }[] = [];
-		let current = '';
-		let depth = 0;
-		let inStr = false;
-		let strCh = '';
-		let i = 0;
-		while (i < inner.length) {
-			const ch = inner[i];
-			if (inStr) {
-				current += ch;
-				if (ch === strCh && inner[i - 1] !== '\\') inStr = false;
-				i++;
-				continue;
-			}
-			if (ch === '"' || ch === "'") {
-				inStr = true;
-				strCh = ch;
-				current += ch;
-				i++;
-				continue;
-			}
-			if ('([{'.includes(ch)) {
-				depth++;
-				current += ch;
-				i++;
-				continue;
-			}
-			if (')]}'.includes(ch)) {
-				depth--;
-				current += ch;
-				i++;
-				continue;
-			}
-			if (depth === 0 && inner.slice(i).startsWith(' and ')) {
-				results.push({ part: current.trim(), join: 'and' });
-				current = '';
-				i += 5;
-				continue;
-			}
-			if (depth === 0 && inner.slice(i).startsWith(' or ')) {
-				results.push({ part: current.trim(), join: 'or' });
-				current = '';
-				i += 4;
-				continue;
-			}
-			current += ch;
-			i++;
-		}
-		if (current.trim()) results.push({ part: current.trim(), join: null });
-		return results.length > 0 ? results : null;
-	}
-
-	function parseCondition(val: string): ConditionClause[] | null {
-		if (!val || val.trim() === '') return null;
-		const m = val.match(/^\$\{\s*([\s\S]+?)\s*\}$/);
-		const inner = m ? m[1] : val;
-		const parts = splitOnLogical(inner);
-		if (!parts) return null;
-		const clauses: ConditionClause[] = [];
-		for (const p of parts) {
-			const c = parseClause(p.part);
-			if (!c) return null;
-			clauses.push({ ...c, join: p.join });
-		}
-		return clauses.length > 0 ? clauses : null;
-	}
-
-	// ── Serialization ────────────────────────────────────────────────────
-
-	function serializeRight(type: RightType, val: string): string {
-		if (type === 'str') return `"${val}"`;
-		if (type === 'null') return 'null';
-		if (type === 'bool') return val || 'true';
-		if (type === 'num') return val || '0';
-		return val;
-	}
-
-	function serializeClauses(cs: ConditionClause[]): string {
-		if (cs.length === 0) return '';
-		const exprs = cs.map((c) =>
-			c.op === '| not'
-				? `${c.left} | not`
-				: `${c.left} ${c.op} ${serializeRight(c.rightType, c.rightVal)}`
-		);
-		let result = exprs[0];
-		for (let idx = 1; idx < exprs.length; idx++)
-			result += ` ${cs[idx - 1].join ?? 'and'} ${exprs[idx]}`;
-		return `\${ ${result} }`;
-	}
-
-	function defaultClause(): ConditionClause {
-		return {
-			left: availVars[0]?.rawRef ?? '.',
-			op: '==',
-			rightType: 'str',
-			rightVal: '',
-			join: null
-		};
-	}
-
-	// ExpressionInput emits "${ $input.x }" — strip to raw ref for condition use
-	function rawFromExpr(v: string): string {
-		const m = v.match(/^\$\{\s*([\s\S]+?)\s*\}$/);
-		return m ? m[1].trim() : v;
-	}
-
-	// ── State ─────────────────────────────────────────────────────────────
-
-	const _initValue = untrack(() => value);
-	const _parsed = parseCondition(_initValue);
-	let clauses = $state<ConditionClause[]>(_parsed ?? []);
-	let rawMode = $state(_parsed === null && !!_initValue && _initValue.trim() !== '');
-	let rawText = $state(_initValue);
-	let editingRight = $state<number | null>(null);
-
-	// ── Handlers ─────────────────────────────────────────────────────────
+	$effect(() => {
+		const incoming = value;
+		untrack(() => {
+			if (incoming === lastEmitted) return;
+			lastEmitted = incoming;
+			rows = toRows(parseCondition(incoming));
+			rawText = incoming;
+		});
+	});
 
 	function emit() {
-		onchange(serializeClauses(clauses));
+		const next = serializeCondition(rows);
+		lastEmitted = next;
+		onchange(next);
 	}
 
-	function addClause() {
-		if (clauses.length > 0) {
-			clauses = clauses.map((c, i) => (i === clauses.length - 1 ? { ...c, join: 'and' } : c));
+	/** The right operand that fits the left one's declared type — a boolean flag compares to `true`. */
+	function defaultRight(left: string): ConditionClause['right'] {
+		const ref = parseRef(left);
+		const known =
+			ref && availVars.find((v) => refToJq(v.source, v.path) === refToJq(ref.source, ref.path));
+		if (known?.type === 'number') return { kind: 'number', value: '' };
+		if (known?.type === 'boolean') return { kind: 'bool', value: 'true' };
+		return { kind: 'string', value: '' };
+	}
+
+	function addRow(join: 'and' | 'or') {
+		if (rows.length > 0) rows[rows.length - 1].join = join;
+		rows.push({
+			id: nextId++,
+			left: '',
+			op: '==',
+			right: { kind: 'string', value: '' },
+			join: 'and'
+		});
+		emit();
+	}
+
+	function removeRow(i: number) {
+		rows.splice(i, 1);
+		emit();
+	}
+
+	function setLeft(i: number, left: string) {
+		const row = rows[i];
+		// A fresh row adopts the operand's type the first time a variable is picked.
+		if (!row.left.trim() && row.right.kind === 'string' && !row.right.value)
+			row.right = defaultRight(left);
+		row.left = left;
+		emit();
+	}
+
+	function setOp(i: number, op: ConditionOp) {
+		const row = rows[i];
+		const wasUnary = isUnary(row.op);
+		row.op = op;
+		if (FUNCTION_OPS.includes(op) && row.right.kind !== 'string' && row.right.kind !== 'expr') {
+			row.right = { kind: 'string', value: '' };
+		} else if (wasUnary && !isUnary(op)) {
+			row.right = defaultRight(row.left);
 		}
-		clauses = [...clauses, defaultClause()];
 		emit();
 	}
 
-	function removeClause(i: number) {
-		if (editingRight === i) editingRight = null;
-		if (clauses.length <= 1) {
-			clauses = [];
-			emit();
-			return;
-		} else {
-			const next = clauses.filter((_, j) => j !== i);
-			clauses = next.map((c, j) => (j === next.length - 1 ? { ...c, join: null } : c));
-		}
+	function setRightKind(i: number, kind: RightKind) {
+		const row = rows[i];
+		row.right = { kind, value: kind === 'bool' ? 'true' : '' };
 		emit();
 	}
 
-	function toggleJoin(i: number) {
-		clauses = clauses.map((c, j) =>
-			j === i ? { ...c, join: c.join === 'and' ? 'or' : 'and' } : c
-		);
+	function setRightValue(i: number, v: string) {
+		rows[i].right.value = v;
 		emit();
-	}
-
-	function updateClause(i: number, patch: Partial<ConditionClause>) {
-		clauses = clauses.map((c, j) => (j === i ? { ...c, ...patch } : c));
-		emit();
-	}
-
-	function cycleRightType(i: number) {
-		const c = clauses[i];
-		const next = RIGHT_TYPES[(RIGHT_TYPES.indexOf(c.rightType) + 1) % RIGHT_TYPES.length];
-		const nextVal =
-			next === 'bool'
-				? 'true'
-				: next === 'null'
-					? ''
-					: next === 'var'
-						? (availVars[0]?.rawRef ?? '.')
-						: '';
-		updateClause(i, { rightType: next, rightVal: nextVal });
-		if (next === 'str' || next === 'num') editingRight = i;
-		else editingRight = null;
 	}
 
 	function toggleRaw() {
 		if (!rawMode) {
-			rawText = serializeClauses(clauses);
+			rawText = serializeCondition(rows);
 			rawMode = true;
 		} else {
-			const p = parseCondition(rawText);
-			if (p !== null) {
-				clauses = p;
-				rawMode = false;
-			}
-			onchange(rawText);
+			rows = toRows(parseCondition(rawText));
+			rawMode = false;
 		}
-	}
-
-	function stopEdit(e: KeyboardEvent) {
-		if (e.key === 'Enter' || e.key === 'Escape') (e.target as HTMLInputElement).blur();
 	}
 </script>
 
@@ -255,193 +139,163 @@
 			value={rawText}
 			oninput={(e) => {
 				rawText = (e.target as HTMLInputElement).value;
+				lastEmitted = rawText;
 				onchange(rawText);
+			}}
+			onkeydown={(e) => {
+				if (e.key === 'Enter' || e.key === 'Escape') {
+					e.preventDefault();
+					toggleRaw();
+				}
 			}}
 		/>
 		<button
 			type="button"
-			class="btn btn-ghost btn-xs shrink-0 px-1.5 font-mono text-[9px] opacity-50 hover:opacity-100"
-			onclick={toggleRaw}>chip</button
+			class="text-base-content/40 hover:text-base-content/80 shrink-0 px-1 font-mono text-[9px]"
+			onclick={toggleRaw}
+			title="Back to the visual builder">visual</button
 		>
 	</div>
 {:else}
-	<div
-		class="border-base-300 bg-base-100 flex w-full flex-col rounded-lg border transition-colors focus-within:border-primary/40"
-	>
-		{#each clauses as clause, i (i)}
-			<div
-				class="flex min-w-0 items-center gap-1.5 px-2 py-1 {i > 0
-					? 'border-base-300/50 border-t'
-					: ''}"
-			>
-				<!-- Join / spacer -->
+	<div class="border-base-300 bg-base-100 flex w-full flex-col rounded-lg border">
+		{#each rows as row, i (row.id)}
+			<div class={['flex items-start gap-1.5 px-2 py-1.5', i > 0 && 'border-base-300/50 border-t']}>
 				{#if i > 0}
 					<button
 						type="button"
-						class="w-7 shrink-0 rounded px-1 py-0.5 text-center font-mono text-[9px] font-semibold text-primary/70 hover:bg-primary/10 hover:text-primary"
-						onclick={() => toggleJoin(i - 1)}
-						title="Toggle and / or">{clauses[i - 1].join ?? 'and'}</button
+						class="text-primary/80 hover:bg-primary/10 mt-0.5 w-8 shrink-0 rounded px-1 py-0.5 text-center font-mono text-[9px] font-semibold uppercase"
+						onclick={() => {
+							rows[i - 1].join = rows[i - 1].join === 'and' ? 'or' : 'and';
+							emit();
+						}}
+						title="Toggle AND / OR">{rows[i - 1].join}</button
 					>
 				{:else}
-					<span class="w-7 shrink-0"></span>
+					<span
+						class="text-base-content/35 mt-1 w-8 shrink-0 text-center text-[9px] font-semibold uppercase"
+						>if</span
+					>
 				{/if}
 
-				<!-- Left: ExpressionInput (same component as Start / Set node values) -->
-				<div class="flex-1 min-w-0">
+				<div class="flex min-w-0 flex-1 flex-col gap-1">
 					<ExpressionInput
-						value={clause.left}
+						value={row.left}
+						mode="jq"
 						{availVars}
-						placeholder="variable or field"
-						onchange={(v) => updateClause(i, { left: rawFromExpr(v) })}
+						placeholder="variable…"
+						onchange={(v) => setLeft(i, v)}
 					/>
+					<div class="flex min-w-0 flex-wrap items-center gap-1">
+						<select
+							class="bg-base-200/60 text-base-content/80 shrink-0 cursor-pointer rounded px-1 py-0.5 text-[10px] outline-none"
+							value={row.op}
+							aria-label="Operator"
+							onchange={(e) => setOp(i, (e.target as HTMLSelectElement).value as ConditionOp)}
+						>
+							<optgroup label="Compare">
+								{#each COMPARISON_OPS as op (op)}<option value={op}>{OP_LABEL[op]}</option>{/each}
+							</optgroup>
+							<optgroup label="Text / list">
+								{#each FUNCTION_OPS as op (op)}<option value={op}>{OP_LABEL[op]}</option>{/each}
+							</optgroup>
+							<optgroup label="Check">
+								{#each UNARY_OPS as op (op)}<option value={op}>{OP_LABEL[op]}</option>{/each}
+							</optgroup>
+						</select>
+
+						{#if !isUnary(row.op)}
+							{#if row.right.kind === 'string'}
+								<span
+									class="bg-success/10 focus-within:ring-success/40 inline-flex min-w-0 flex-1 items-center rounded px-1 font-mono text-[10px] focus-within:ring-1"
+								>
+									<span class="text-success/60 select-none">"</span>
+									<input
+										class="text-base-content min-w-0 flex-1 bg-transparent py-0.5 outline-none"
+										placeholder={row.op === 'test' ? 'regex' : 'value'}
+										value={row.right.value}
+										oninput={(e) => setRightValue(i, (e.target as HTMLInputElement).value)}
+									/>
+									<span class="text-success/60 select-none">"</span>
+								</span>
+							{:else if row.right.kind === 'number'}
+								<input
+									class="bg-warning/10 focus:ring-warning/40 min-w-0 flex-1 rounded px-1 py-0.5 font-mono text-[10px] outline-none focus:ring-1"
+									inputmode="decimal"
+									placeholder="0"
+									value={row.right.value}
+									oninput={(e) => setRightValue(i, (e.target as HTMLInputElement).value)}
+								/>
+							{:else if row.right.kind === 'bool'}
+								<button
+									type="button"
+									class="bg-primary/10 text-primary hover:bg-primary/20 rounded px-2 py-0.5 font-mono text-[10px] font-semibold"
+									onclick={() => setRightValue(i, row.right.value === 'false' ? 'true' : 'false')}
+									>{row.right.value === 'false' ? 'false' : 'true'}</button
+								>
+							{:else if row.right.kind === 'null'}
+								<span class="text-base-content/40 px-1 font-mono text-[10px]">null</span>
+							{:else}
+								<div class="min-w-0 flex-1">
+									<ExpressionInput
+										value={row.right.value}
+										mode="jq"
+										{availVars}
+										placeholder="variable…"
+										onchange={(v) => setRightValue(i, v)}
+									/>
+								</div>
+							{/if}
+							<select
+								class="text-base-content/40 hover:text-base-content/70 ml-auto shrink-0 cursor-pointer bg-transparent text-[9px] outline-none"
+								value={row.right.kind}
+								aria-label="Value type"
+								onchange={(e) =>
+									setRightKind(i, (e.target as HTMLSelectElement).value as RightKind)}
+							>
+								{#each RIGHT_KINDS as k (k.kind)}<option value={k.kind}>{k.label}</option>{/each}
+							</select>
+						{/if}
+					</div>
 				</div>
 
-				<!-- Operator: compact bare select -->
-				<select
-					class="shrink-0 cursor-pointer rounded bg-base-200/50 px-1.5 py-0.5 font-mono text-[10px] text-base-content/70 outline-none"
-					value={clause.op}
-					onchange={(e) => {
-						const op = (e.target as HTMLSelectElement).value as Op;
-						updateClause(i, {
-							op,
-							rightType: op === '| not' ? 'null' : clause.rightType,
-							rightVal: op === '| not' ? '' : clause.rightVal
-						});
-						if (op === '| not') editingRight = null;
-					}}
+				<button
+					type="button"
+					class="text-base-content/25 hover:text-error mt-0.5 shrink-0 px-0.5 text-[12px] leading-none"
+					onclick={() => removeRow(i)}
+					aria-label="Remove condition">×</button
 				>
-					{#each OPERATORS as op (op)}
-						<option value={op}>{op}</option>
-					{/each}
-				</select>
-
-				<!-- Right value -->
-				{#if clause.op !== '| not'}
-					{#if clause.rightType === 'bool'}
-						<button
-							type="button"
-							class="shrink-0 rounded bg-primary/10 px-2 py-0.5 font-mono text-[10px] font-semibold text-primary hover:bg-primary/20"
-							onclick={() =>
-								updateClause(i, { rightVal: clause.rightVal === 'true' ? 'false' : 'true' })}
-							>{clause.rightVal || 'true'}</button
-						>
-					{:else if clause.rightType === 'null'}
-						<span class="shrink-0 px-1 font-mono text-[10px] text-base-content/40">null</span>
-					{:else if clause.rightType === 'str'}
-						{#if editingRight === i}
-							<span
-								class="inline-flex items-center rounded bg-success/10 px-1 py-0.5 font-mono text-[10px]"
-							>
-								<span class="select-none text-success/60">"</span>
-								<input
-									{@attach (node) => {
-										(node as HTMLInputElement).focus();
-									}}
-									class="min-w-12 max-w-40 bg-transparent font-mono text-[10px] text-base-content outline-none"
-									value={clause.rightVal}
-									oninput={(e) =>
-										updateClause(i, { rightVal: (e.target as HTMLInputElement).value })}
-									onblur={() => (editingRight = null)}
-									onkeydown={stopEdit}
-								/>
-								<span class="select-none text-success/60">"</span>
-							</span>
-						{:else}
-							<button
-								type="button"
-								class="inline-flex max-w-36 shrink-0 items-center rounded bg-success/10 px-1 py-0.5 font-mono text-[10px] hover:bg-success/20"
-								title={clause.rightVal || 'click to set value'}
-								onclick={() => (editingRight = i)}
-							>
-								<span class="select-none text-success/60">"</span>
-								{#if clause.rightVal}
-									<span class="max-w-28 truncate text-base-content/80">{clause.rightVal}</span>
-								{:else}
-									<span class="italic text-base-content/30">value</span>
-								{/if}
-								<span class="select-none text-success/60">"</span>
-							</button>
-						{/if}
-					{:else if clause.rightType === 'num'}
-						{#if editingRight === i}
-							<span
-								class="inline-flex items-center rounded bg-warning/10 px-1 py-0.5 font-mono text-[10px]"
-							>
-								<span class="mr-0.5 select-none text-warning/60">#</span>
-								<input
-									{@attach (node) => {
-										(node as HTMLInputElement).focus();
-									}}
-									type="number"
-									class="w-20 bg-transparent font-mono text-[10px] text-base-content outline-none"
-									value={clause.rightVal}
-									oninput={(e) =>
-										updateClause(i, { rightVal: (e.target as HTMLInputElement).value })}
-									onblur={() => (editingRight = null)}
-									onkeydown={stopEdit}
-								/>
-							</span>
-						{:else}
-							<button
-								type="button"
-								class="inline-flex shrink-0 items-center rounded bg-warning/10 px-1 py-0.5 font-mono text-[10px] hover:bg-warning/20"
-								title={clause.rightVal || 'click to set number'}
-								onclick={() => (editingRight = i)}
-							>
-								<span class="mr-0.5 select-none text-warning/60">#</span>
-								<span class="text-base-content/80">{clause.rightVal || '0'}</span>
-							</button>
-						{/if}
-					{:else if clause.rightType === 'var'}
-						<!-- Right var: same ExpressionInput as left -->
-						<div class="flex-1 min-w-0">
-							<ExpressionInput
-								value={clause.rightVal}
-								{availVars}
-								placeholder="variable"
-								onchange={(v) => updateClause(i, { rightVal: rawFromExpr(v) })}
-							/>
-						</div>
-					{/if}
-				{:else}
-					<span class="px-0.5 text-[9px] italic text-base-content/30">is falsy</span>
-				{/if}
-
-				<!-- Controls -->
-				<div class="ml-auto flex shrink-0 items-center gap-1">
-					{#if clause.op !== '| not'}
-						<button
-							type="button"
-							class="font-mono text-[9px] text-base-content/20 hover:text-base-content/60"
-							onclick={() => cycleRightType(i)}
-							title="Value type: {RIGHT_TYPE_LABELS[clause.rightType]}"
-							>{RIGHT_TYPE_LABELS[clause.rightType]}</button
-						>
-					{/if}
-					{#if clauses.length > 1}
-						<button
-							type="button"
-							class="font-mono text-[11px] leading-none text-base-content/20 hover:text-error"
-							onclick={() => removeClause(i)}
-							aria-label="Remove condition">×</button
-						>
-					{/if}
-				</div>
 			</div>
 		{/each}
 
-		<!-- Footer -->
-		<div class="border-base-300/50 flex items-center border-t px-2 py-1">
+		<div
+			class={[
+				'flex items-center gap-2 px-2 py-1',
+				rows.length > 0 && 'border-base-300/50 border-t'
+			]}
+		>
+			{#if rows.length === 0}
+				<button
+					type="button"
+					class="text-base-content/40 hover:text-base-content/80 font-mono text-[9px]"
+					onclick={() => addRow('and')}>+ add condition</button
+				>
+			{:else}
+				<button
+					type="button"
+					class="text-base-content/40 hover:text-base-content/80 font-mono text-[9px]"
+					onclick={() => addRow('and')}>+ and</button
+				>
+				<button
+					type="button"
+					class="text-base-content/40 hover:text-base-content/80 font-mono text-[9px]"
+					onclick={() => addRow('or')}>+ or</button
+				>
+			{/if}
 			<button
 				type="button"
-				class="font-mono text-[9px] text-base-content/30 hover:text-base-content/70"
-				onclick={addClause}>+ add condition</button
-			>
-			<button
-				type="button"
-				class="ml-auto font-mono text-[8px] text-base-content/20 hover:text-base-content/60"
+				class="text-base-content/25 hover:text-base-content/70 ml-auto font-mono text-[8px]"
 				onclick={toggleRaw}
-				title="Edit raw jq expression">&lt;/&gt;</button
+				title="Edit raw jq">&lt;/&gt;</button
 			>
 		</div>
 	</div>

@@ -27,7 +27,7 @@ import type {
 	BranchEntry
 } from '../components/builder/builderConfig';
 import type { WorkflowNodeType, InputField } from '../types';
-import { toSlug, uniqueSlug } from './slug';
+import { toTaskName, uniqueSlug } from './slug';
 import { orderNodesInScope, layoutScope } from './layout';
 import {
 	ROOT_SCOPE_ID,
@@ -282,7 +282,7 @@ function nodeToTask(
 			const branches = (data.branches as BranchEntry[]) ?? [];
 			const branchList: TaskList = branches.map((b) => {
 				const childScope = forkBranchScopeKey(scopeId, node.id, b.id);
-				const branchName = toSlug(b.name) || 'branch';
+				const branchName = toTaskName(b.name || 'branch');
 				const body = scopeToTaskList(graph, childScope);
 				// A branch scope holding exactly one task named identically to the branch itself is how
 				// a bare (non-`do`-wrapped) branch task round-trips — e.g. a branch that's just a `for`
@@ -423,7 +423,7 @@ function switchCasesFromData(
 		const when = c.condition?.trim();
 		const body: SwitchCaseBody = { then: resolveThenToAst(c.then, idToName) };
 		if (when) body.when = when;
-		return { [toSlug(c.name) || 'case']: body };
+		return { [toTaskName(c.name || 'case')]: body };
 	});
 }
 

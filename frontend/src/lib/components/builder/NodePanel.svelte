@@ -6,8 +6,11 @@
 	import { NODE_META } from './builderConfig';
 	import type { VarEntry, CaseEntry, EventEntry, BranchEntry } from './builderConfig';
 	import type { WorkflowNodeType } from '$lib/types';
-	import ExpressionInput, { type AvailVar } from './ExpressionInput.svelte';
+	import ExpressionInput from './ExpressionInput.svelte';
 	import ConditionBuilder from './ConditionBuilder.svelte';
+	import DataFlowEditor from './DataFlowEditor.svelte';
+	import { computeAvailableVars } from './availableVars';
+	import { toTaskName } from '$lib/zigflow-engine/slug';
 	import CodeMirrorEditor from '$lib/components/editor/CodeMirrorEditor.svelte';
 	import Accordion from './Accordion.svelte';
 	import { OWNER_SCOPE_TAG } from '$lib/zigflow-engine/inlineScopeView';
@@ -335,135 +338,11 @@
 
 	// ── task slug (DSL id derived from label) ─────────────────────────
 
-	const taskSlug = $derived.by(() => {
-		const lbl = (node?.data?.label as string) ?? nodeType;
-		return (
-			lbl
-				.toLowerCase()
-				.replace(/[^a-z0-9]+/g, '-')
-				.replace(/^-+|-+$/g, '') || 'task'
-		);
-	});
+	const taskSlug = $derived(toTaskName((node?.data?.label as string) ?? nodeType));
 
 	// ── available variables at this node ─────────────────────────────
 
-	const availableVars = $derived.by<AvailVar[]>(() => {
-		const vars: AvailVar[] = [];
-
-		// $input fields
-		for (const field of workflowMeta.inputSchema ?? []) {
-			vars.push({
-				expr: '${ $input.' + field.name + ' }',
-				hint: field.example ? 'e.g. ' + field.example : (field.type ?? 'string'),
-				category: 'input',
-				source: '$input',
-				field: field.name,
-				rawRef: '$input.' + field.name
-			});
-		}
-		if ((workflowMeta.inputSchema ?? []).length === 0) {
-			vars.push({
-				expr: '${ $input }',
-				hint: 'full trigger payload',
-				category: 'input',
-				source: '$input',
-				field: '',
-				rawRef: '$input'
-			});
-		}
-
-		// $env vars
-		for (const e of workflowMeta.envVars ?? []) {
-			vars.push({
-				expr: '${ $env.' + e.name + ' }',
-				hint: e.example ? 'e.g. ' + e.example : (e.description ?? ''),
-				category: 'env',
-				source: '$env',
-				field: e.name,
-				rawRef: '$env.' + e.name
-			});
-		}
-
-		// $output (always)
-		vars.push({
-			expr: '${ . }',
-			hint: 'previous task output (shorthand)',
-			category: 'output',
-			source: '.',
-			field: '',
-			rawRef: '.'
-		});
-		vars.push({
-			expr: '${ $output }',
-			hint: 'previous task full output',
-			category: 'output',
-			source: '$output',
-			field: '',
-			rawRef: '$output'
-		});
-
-		// $data keys from upstream Set nodes (and start node vars)
-		const ancestors: string[] = [];
-		const queue = [node.id];
-		while (queue.length > 0) {
-			const curr = queue.shift()!;
-			for (const edge of edges) {
-				if (edge.target === curr && !ancestors.includes(edge.source)) {
-					ancestors.push(edge.source);
-					queue.push(edge.source);
-				}
-			}
-		}
-
-		const startNode = nodes.find((n) => n.type === 'start');
-		if (startNode) {
-			for (const v of (startNode.data?.variables as VarEntry[]) ?? []) {
-				if (v.key)
-					vars.push({
-						expr: '${ $data.' + v.key + ' }',
-						hint: 'from Start init',
-						category: 'data',
-						source: '$data',
-						field: v.key,
-						rawRef: '$data.' + v.key
-					});
-			}
-		}
-
-		for (const n of nodes) {
-			if (ancestors.includes(n.id) && n.type === 'set') {
-				for (const v of (n.data?.variables as VarEntry[]) ?? []) {
-					if (v.key)
-						vars.push({
-							expr: '${ $data.' + v.key + ' }',
-							hint: 'from Set: ' + (n.data?.label ?? 'Set'),
-							category: 'data',
-							source: '$data',
-							field: v.key,
-							rawRef: '$data.' + v.key
-						});
-				}
-			}
-		}
-
-		// $context hint (when upstream nodes have export.as)
-		const hasExports = ancestors.some((aid) => {
-			const an = nodes.find((n) => n.id === aid);
-			return an && (an.data?.exportAs as string);
-		});
-		if (hasExports) {
-			vars.push({
-				expr: '${ $context }',
-				hint: 'accumulated via export.as',
-				category: 'context',
-				source: '$context',
-				field: '',
-				rawRef: '$context'
-			});
-		}
-
-		return vars;
-	});
+	const availableVars = $derived(computeAvailableVars(node, nodes, edges, workflowMeta));
 
 	// ── switch then options ───────────────────────────────────────────
 
@@ -1041,13 +920,14 @@
 						>in (collection expr)</span
 					>
 					<ExpressionInput
-						value={f('in') || '${ $input.items }'}
-						placeholder={'${ $input.items }'}
+						value={f('in')}
+						placeholder="pick the list to loop over"
 						availVars={availableVars}
 						onchange={(v) => patch('in', v)}
 					/>
 					<p class="text-base-content/30 text-[9px]">
-						Read via ${'${ $data.item }'} and ${'${ $data.index }'} inside the loop
+						Inside the loop: <code>$data.{f('each') || 'item'}</code> (item) and
+						<code>$data.{f('at') || 'index'}</code> (index) — offered as suggestions in the body's tasks.
 					</p>
 				</div>
 				<div class="flex flex-col gap-1">
@@ -1378,15 +1258,14 @@
 						</div>
 					</div>
 					<div class="flex flex-col gap-1">
-						<label class="text-base-content/50 text-[10px] font-semibold uppercase" for="np-srcep"
-							>External source endpoint (optional — overrides inline code below)</label
+						<span class="text-base-content/50 text-[10px] font-semibold uppercase"
+							>External source endpoint (optional — overrides inline code below)</span
 						>
-						<input
-							id="np-srcep"
-							class="input input-xs font-mono w-full"
-							placeholder="$env.SCRIPT_BASE + &quot;/script.js&quot;"
+						<ExpressionInput
 							value={f('sourceEndpoint')}
-							oninput={(e) => patch('sourceEndpoint', (e.target as HTMLInputElement).value)}
+							placeholder="https://… or $env.SCRIPT_BASE"
+							availVars={availableVars}
+							onchange={(v) => patch('sourceEndpoint', v)}
 						/>
 					</div>
 					{#if !f('sourceEndpoint')}
@@ -1634,29 +1513,13 @@
 
 				<!-- ── DATA FLOW ──────────────────────────────────────────── -->
 				<Accordion title="Data Flow" defaultOpen={!!f('outputAs') || !!f('exportAs')}>
-					<div class="flex flex-col gap-2">
-						<div class="flex flex-col gap-0.5">
-							<span class="text-base-content/40 font-mono text-[10px]">output.as</span>
-							<ExpressionInput
-								value={f('outputAs')}
-								placeholder={'${ { key: .field } }  (reshape $output)'}
-								availVars={availableVars}
-								onchange={(v) => patch('outputAs', v)}
-							/>
-						</div>
-						<div class="flex flex-col gap-0.5">
-							<span class="text-base-content/40 font-mono text-[10px]">export.as</span>
-							<ExpressionInput
-								value={f('exportAs')}
-								placeholder={'${ $context + { key: $output } }'}
-								availVars={availableVars}
-								onchange={(v) => patch('exportAs', v)}
-							/>
-							<p class="text-base-content/25 text-[9px]">
-								Accumulated into $context — readable by any downstream task
-							</p>
-						</div>
-					</div>
+					<DataFlowEditor
+						outputAs={f('outputAs')}
+						exportAs={f('exportAs')}
+						taskName={taskSlug}
+						availVars={availableVars}
+						onchange={(p) => onupdate(node.id, p)}
+					/>
 				</Accordion>
 
 				<!-- ── ACTIVITY OPTIONS (metadata.activityOptions) ────────── -->
