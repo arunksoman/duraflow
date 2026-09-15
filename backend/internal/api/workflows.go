@@ -179,7 +179,7 @@ func registerWorkflowRoutes(api huma.API, deps *Deps, base string) {
 		OperationID:   "delete-workflow",
 		Method:        http.MethodDelete,
 		Path:          base + "/workflows/{id}",
-		Summary:       "Delete a workflow",
+		Summary:       "Delete a workflow with its runs, schedules and worker",
 		Tags:          []string{"Workflows"},
 		Security:      authSecurity(),
 		DefaultStatus: http.StatusNoContent,
@@ -190,10 +190,9 @@ func registerWorkflowRoutes(api huma.API, deps *Deps, base string) {
 			return nil, huma.Error404NotFound("workflow not found")
 		}
 
-		if err := deps.DB.WithContext(ctx).Delete(&models.Workflow{}, "id = ?", in.ID).Error; err != nil {
+		if err := deleteWorkflowCascade(ctx, deps, workflow); err != nil {
 			return nil, huma.Error500InternalServerError("failed to delete workflow", err)
 		}
-		stopWorkerRegistration(deps, ctx, workflow)
 		return nil, nil
 	})
 }

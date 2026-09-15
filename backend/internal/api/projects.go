@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 
 	"github.com/danielgtaylor/huma/v2"
@@ -124,18 +125,32 @@ func registerProjectRoutes(api huma.API, deps *Deps, base string) {
 		OperationID:   "delete-project",
 		Method:        http.MethodDelete,
 		Path:          base + "/projects/{id}",
-		Summary:       "Delete a project",
+		Summary:       "Delete a project with all of its workflows, their runs, schedules and workers",
 		Tags:          []string{"Projects"},
 		Security:      authSecurity(),
 		DefaultStatus: http.StatusNoContent,
 		Errors:        []int{404},
 	}, func(ctx context.Context, in *projectIDInput) (*struct{}, error) {
-		result := deps.DB.WithContext(ctx).Delete(&models.Project{}, "id = ?", in.ID)
-		if result.Error != nil {
-			return nil, huma.Error500InternalServerError("failed to delete project", result.Error)
-		}
-		if result.RowsAffected == 0 {
+		var project models.Project
+		if err := deps.DB.WithContext(ctx).First(&project, "id = ?", in.ID).Error; err != nil {
 			return nil, huma.Error404NotFound("project not found")
+		}
+
+		var workflows []models.Workflow
+		if err := deps.DB.WithContext(ctx).Where("project_id = ?", project.ID).Find(&workflows).Error; err != nil {
+			return nil, huma.Error500InternalServerError("failed to delete project", err)
+		}
+		// Workflow by workflow, so a failure part-way leaves a smaller project that can be deleted
+		// again, rather than a project row gone with workflows still pointing at it.
+		for _, workflow := range workflows {
+			if err := deleteWorkflowCascade(ctx, deps, workflow); err != nil {
+				return nil, huma.Error500InternalServerError(
+					fmt.Sprintf("failed to delete workflow %q", workflow.Name), err)
+			}
+		}
+
+		if err := deps.DB.WithContext(ctx).Delete(&models.Project{}, "id = ?", project.ID).Error; err != nil {
+			return nil, huma.Error500InternalServerError("failed to delete project", err)
 		}
 		return nil, nil
 	})

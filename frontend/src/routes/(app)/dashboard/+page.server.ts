@@ -1,5 +1,5 @@
 import { fail } from '@sveltejs/kit';
-import { createProject, listProjects } from '$lib/server/projects';
+import { ProjectsApiError, createProject, deleteProject, listProjects } from '$lib/server/projects';
 import type { Project } from '$lib/types';
 import type { Actions, PageServerLoad } from './$types';
 
@@ -29,6 +29,21 @@ export const actions: Actions = {
 			});
 		} catch {
 			return fail(502, { name, description, error: 'Unable to create the project right now.' });
+		}
+
+		return { success: true };
+	},
+
+	delete: async ({ request, cookies }) => {
+		const data = await request.formData();
+		const id = String(data.get('id') ?? '');
+		if (!id) return fail(400, { deleteError: 'Missing project id.' });
+
+		try {
+			await deleteProject(cookies.get('session'), id);
+		} catch (err) {
+			if (err instanceof ProjectsApiError) return fail(502, { deleteError: err.message });
+			throw err;
 		}
 
 		return { success: true };

@@ -38,6 +38,23 @@ export async function createProject(
 	return response.json();
 }
 
+/** Deletes the project and, with it, every workflow in it — their runs, schedules and workers too. */
+export async function deleteProject(token: string | undefined, id: string): Promise<void> {
+	let response: Response;
+	try {
+		response = await fetch(`${API_BASE_URL}/projects/${id}`, {
+			method: 'DELETE',
+			headers: authHeaders(token)
+		});
+	} catch {
+		throw new ProjectsApiError('Unable to reach the projects service');
+	}
+
+	if (!response.ok) {
+		throw new ProjectsApiError('Unable to delete the project');
+	}
+}
+
 export async function getProject(token: string | undefined, id: string): Promise<Project> {
 	let response: Response;
 	try {

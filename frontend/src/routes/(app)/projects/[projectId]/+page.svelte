@@ -214,7 +214,8 @@
 		<div class="modal-box max-w-md">
 			<h3 id="delete-workflow-title" class="text-lg font-semibold">Delete “{target.name}”?</h3>
 			<p class="text-base-content/70 mt-2 text-sm">
-				The workflow and its design are removed and its worker is stopped. This can't be undone.
+				This deletes the workflow along with all of its runs and schedules, and stops its worker.
+				Runs still in progress are terminated. This can't be undone.
 			</p>
 
 			{#if form?.deleteError}
