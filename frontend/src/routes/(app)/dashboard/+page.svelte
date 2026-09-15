@@ -1,6 +1,9 @@
 <script lang="ts">
 	import { enhance } from '$app/forms';
-	import { FolderKanban, PenSquare, Plus, Search } from '@lucide/svelte';
+	import { resolve } from '$app/paths';
+	import { ArrowRight, FolderKanban, Plus, Search, Workflow } from '@lucide/svelte';
+	import { relativeTime } from '$lib/utils/time';
+	import { tintFor } from '$lib/utils/tint';
 	import type { PageProps } from './$types';
 
 	let { data, form }: PageProps = $props();
@@ -39,40 +42,71 @@
 
 		<button class="btn btn-primary" onclick={() => dialogEl?.showModal()}>
 			<Plus size={16} />
-			New Project
+			New project
 		</button>
 	</div>
 
 	{#if filteredProjects.length === 0}
-		<div class="text-base-content/50 flex flex-col items-center gap-2 py-20">
-			<FolderKanban size={40} />
-			<p>
-				{search ? 'No projects match your search.' : 'No projects yet — create your first one.'}
+		<div
+			class="border-base-300 text-base-content/60 flex flex-col items-center gap-3 rounded-2xl border border-dashed py-16"
+		>
+			<FolderKanban size={36} class="text-base-content/40" />
+			<p class="text-sm">
+				{search ? 'No projects match your search.' : 'No projects yet.'}
 			</p>
+			{#if !search}
+				<button class="btn btn-primary btn-sm" onclick={() => dialogEl?.showModal()}>
+					<Plus size={14} />
+					Create your first project
+				</button>
+			{/if}
 		</div>
 	{:else}
-		<div class="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+		<ul class="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
 			{#each filteredProjects as project (project.id)}
-				<div class="card bg-base-100 border-base-300 border shadow-sm transition hover:shadow-md">
-					<div class="card-body gap-2">
-						<h2 class="card-title text-base">{project.name}</h2>
-						{#if project.description}
-							<p class="text-base-content/60 line-clamp-2 text-sm">{project.description}</p>
-						{/if}
-						<div class="text-base-content/50 mt-2 flex items-center justify-between text-xs">
-							<span>{project.workflowCount} workflow{project.workflowCount === 1 ? '' : 's'}</span>
-							<span>Updated {new Date(project.updatedAt).toLocaleDateString()}</span>
+				<li>
+					<a
+						href={resolve('/(app)/projects/[projectId]', { projectId: project.id })}
+						class="group bg-base-100 border-base-300 hover:border-primary/40 focus-visible:ring-primary/50 flex h-full flex-col gap-3 rounded-2xl border p-5 outline-none transition hover:shadow-md focus-visible:ring-2"
+					>
+						<div class="flex items-start gap-3">
+							<span
+								class="flex size-10 shrink-0 items-center justify-center rounded-xl text-base font-semibold uppercase {tintFor(
+									project.id
+								)}"
+							>
+								{project.name.trim().charAt(0) || '?'}
+							</span>
+							<div class="min-w-0 flex-1">
+								<h2 class="truncate font-semibold">{project.name}</h2>
+								<p
+									class="mt-0.5 line-clamp-2 text-sm {project.description
+										? 'text-base-content/60'
+										: 'text-base-content/35 italic'}"
+								>
+									{project.description || 'No description'}
+								</p>
+							</div>
+							<ArrowRight
+								size={16}
+								class="text-base-content/30 group-hover:text-primary mt-1 shrink-0 transition group-hover:translate-x-0.5"
+							/>
 						</div>
-						<div class="mt-1">
-							<a href="/projects/{project.id}" class="btn btn-primary btn-sm w-full gap-1.5">
-								<PenSquare size={13} />
-								Open Project
-							</a>
+						<div
+							class="text-base-content/55 mt-auto flex items-center justify-between gap-2 pt-1 text-xs"
+						>
+							<span class="inline-flex items-center gap-1.5">
+								<Workflow size={13} />
+								{project.workflowCount} workflow{project.workflowCount === 1 ? '' : 's'}
+							</span>
+							<span title="Updated {new Date(project.updatedAt).toLocaleString()}">
+								Updated {relativeTime(project.updatedAt)}
+							</span>
 						</div>
-					</div>
-				</div>
+					</a>
+				</li>
 			{/each}
-		</div>
+		</ul>
 	{/if}
 </div>
 

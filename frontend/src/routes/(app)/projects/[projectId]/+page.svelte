@@ -1,15 +1,50 @@
 <script lang="ts">
 	import { enhance } from '$app/forms';
-	import { ArrowLeft, PenSquare, Plus, Trash2, Workflow as WorkflowIcon } from '@lucide/svelte';
+	import { resolve } from '$app/paths';
+	import {
+		ArrowLeft,
+		EllipsisVertical,
+		History,
+		PenSquare,
+		Plus,
+		Trash2,
+		Workflow as WorkflowIcon
+	} from '@lucide/svelte';
+	import type { ExecutionStatus, Workflow } from '$lib/types';
+	import { relativeTime } from '$lib/utils/time';
+	import { tintFor } from '$lib/utils/tint';
 	import type { PageProps } from './$types';
 
 	let { data, form }: PageProps = $props();
 
 	let dialogEl: HTMLDialogElement | undefined;
 	let creating = $state(false);
+	let pendingDelete = $state<Workflow | null>(null);
+	let deleting = $state(false);
 
 	function dialogRef(node: HTMLDialogElement) {
 		dialogEl = node;
+	}
+
+	const STATUS: Record<ExecutionStatus, { label: string; dot: string }> = {
+		running: { label: 'Running', dot: 'bg-info animate-pulse' },
+		completed: { label: 'Succeeded', dot: 'bg-success' },
+		failed: { label: 'Failed', dot: 'bg-error' },
+		cancelled: { label: 'Cancelled', dot: 'bg-warning' },
+		terminated: { label: 'Terminated', dot: 'bg-warning' },
+		timed_out: { label: 'Timed out', dot: 'bg-error' }
+	};
+
+	/** Focus-driven daisyUI dropdowns stay open until focus leaves them. */
+	function closeMenu() {
+		(document.activeElement as HTMLElement | null)?.blur();
+	}
+
+	function builderHref(workflow: Workflow) {
+		return resolve('/(app)/projects/[projectId]/workflows/[workflowId]/builder', {
+			projectId: data.project.id,
+			workflowId: workflow.id
+		});
 	}
 </script>
 
@@ -24,75 +59,203 @@
 		</div>
 	{/if}
 
-	<div class="flex flex-wrap items-start justify-between gap-3">
-		<div>
+	<div class="flex flex-wrap items-end justify-between gap-3">
+		<div class="min-w-0">
 			<a
-				href="/dashboard"
-				class="text-base-content/50 hover:text-base-content mb-1 flex items-center gap-1 text-xs transition"
+				href={resolve('/dashboard')}
+				class="text-base-content/50 hover:text-base-content mb-2 inline-flex items-center gap-1 text-xs transition"
 			>
 				<ArrowLeft size={12} />
-				Dashboard
+				All projects
 			</a>
 			<h1 class="text-xl font-semibold">{data.project.name}</h1>
-			{#if data.project.description}
-				<p class="text-base-content/60 mt-1 text-sm">{data.project.description}</p>
-			{/if}
+			<p class="text-base-content/60 mt-0.5 text-sm">
+				{[
+					data.project.description,
+					`${data.workflows.length} workflow${data.workflows.length === 1 ? '' : 's'}`
+				]
+					.filter(Boolean)
+					.join(' · ')}
+			</p>
 		</div>
 
 		<button class="btn btn-primary" onclick={() => dialogEl?.showModal()}>
 			<Plus size={16} />
-			New Workflow
+			New workflow
 		</button>
 	</div>
 
 	{#if data.workflows.length === 0}
-		<div class="text-base-content/50 flex flex-col items-center gap-2 py-20">
-			<WorkflowIcon size={40} />
-			<p>No workflows yet — create your first one.</p>
+		<div
+			class="border-base-300 text-base-content/60 flex flex-col items-center gap-3 rounded-2xl border border-dashed py-16"
+		>
+			<WorkflowIcon size={36} class="text-base-content/40" />
+			<p class="text-sm">No workflows in this project yet.</p>
+			<button class="btn btn-primary btn-sm" onclick={() => dialogEl?.showModal()}>
+				<Plus size={14} />
+				Create your first workflow
+			</button>
 		</div>
 	{:else}
-		<div class="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+		<ul class="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
 			{#each data.workflows as workflow (workflow.id)}
-				<div class="card bg-base-100 border-base-300 border shadow-sm transition hover:shadow-md">
-					<div class="card-body gap-2">
-						<h2 class="card-title text-base">{workflow.name}</h2>
-						{#if workflow.description}
-							<p class="text-base-content/60 line-clamp-2 text-sm">{workflow.description}</p>
-						{/if}
-						<div class="text-base-content/50 mt-2 flex items-center justify-between text-xs">
-							<span>v{workflow.version}</span>
-							<span>Updated {new Date(workflow.updatedAt).toLocaleDateString()}</span>
-						</div>
-						<div class="mt-1 flex gap-2">
+				{@const lastRun = data.lastRuns[workflow.id]}
+				{@const draft = !workflow.dsl?.trim()}
+				<li
+					class="group bg-base-100 border-base-300 hover:border-primary/40 has-[a:focus-visible]:ring-primary/50 relative flex flex-col gap-3 rounded-2xl border p-5 transition hover:shadow-md has-[a:focus-visible]:ring-2"
+				>
+					<div class="flex items-start gap-3">
+						<span
+							class="flex size-10 shrink-0 items-center justify-center rounded-xl {tintFor(
+								workflow.id
+							)}"
+						>
+							<WorkflowIcon size={18} />
+						</span>
+						<div class="min-w-0 flex-1">
+							<!-- Stretched link: the whole card opens the builder. -->
 							<a
-								href="/projects/{data.project.id}/workflows/{workflow.id}/builder"
-								class="btn btn-primary btn-sm flex-1 gap-1.5"
+								href={builderHref(workflow)}
+								class="block truncate font-semibold outline-none after:absolute after:inset-0 after:rounded-2xl"
 							>
-								<PenSquare size={13} />
-								Open Builder
+								{workflow.name}
 							</a>
-							<form
-								method="POST"
-								action="?/deleteWorkflow"
-								use:enhance
-								onsubmit={(e) => {
-									if (!confirm(`Delete "${workflow.name}"? This can't be undone.`)) {
-										e.preventDefault();
-									}
-								}}
+							<p
+								class="mt-0.5 line-clamp-2 text-sm {workflow.description
+									? 'text-base-content/60'
+									: 'text-base-content/35 italic'}"
 							>
-								<input type="hidden" name="id" value={workflow.id} />
-								<button type="submit" class="btn btn-ghost btn-sm text-error" title="Delete workflow">
-									<Trash2 size={14} />
-								</button>
-							</form>
+								{workflow.description || 'No description'}
+							</p>
+						</div>
+
+						<!-- Sits above the stretched link so it stays clickable. -->
+						<div class="dropdown dropdown-end relative z-10 -mt-1 -mr-2">
+							<div
+								tabindex="0"
+								role="button"
+								class="btn btn-ghost btn-sm btn-square text-base-content/50 hover:text-base-content"
+								aria-label="Actions for {workflow.name}"
+								aria-haspopup="menu"
+							>
+								<EllipsisVertical size={16} />
+							</div>
+							<ul
+								tabindex="-1"
+								class="dropdown-content menu bg-base-100 rounded-box border-base-300 z-20 mt-1 w-44 border p-1 shadow-lg"
+								role="menu"
+							>
+								<li role="none">
+									<a role="menuitem" href={builderHref(workflow)}>
+										<PenSquare size={14} /> Open builder
+									</a>
+								</li>
+								<li role="none">
+									<a
+										role="menuitem"
+										href="{resolve('/executions')}?workflowId={encodeURIComponent(workflow.id)}"
+									>
+										<History size={14} /> View runs
+									</a>
+								</li>
+								<li role="none" class="border-base-300 my-1 border-t"></li>
+								<li role="none">
+									<button
+										type="button"
+										role="menuitem"
+										class="text-error"
+										onclick={() => {
+											closeMenu();
+											pendingDelete = workflow;
+										}}
+									>
+										<Trash2 size={14} /> Delete
+									</button>
+								</li>
+							</ul>
 						</div>
 					</div>
-				</div>
+
+					<div
+						class="text-base-content/55 mt-auto flex items-center justify-between gap-2 pt-1 text-xs"
+					>
+						<span class="flex min-w-0 items-center gap-1.5">
+							{#if draft}
+								<span class="badge badge-ghost badge-sm">Draft</span>
+							{:else if lastRun}
+								<span class="size-2 shrink-0 rounded-full {STATUS[lastRun.status].dot}"></span>
+								<span class="truncate">
+									<span class="text-base-content/80">{STATUS[lastRun.status].label}</span>
+									· {relativeTime(lastRun.startedAt)}
+								</span>
+							{:else}
+								<span class="bg-base-300 size-2 shrink-0 rounded-full"></span>
+								<span>Never run</span>
+							{/if}
+						</span>
+						<span class="shrink-0" title="Updated {new Date(workflow.updatedAt).toLocaleString()}">
+							v{workflow.version} · edited {relativeTime(workflow.updatedAt)}
+						</span>
+					</div>
+				</li>
 			{/each}
-		</div>
+		</ul>
 	{/if}
 </div>
+
+{#if pendingDelete}
+	{@const target = pendingDelete}
+	<div
+		class="modal modal-open z-50"
+		role="dialog"
+		aria-modal="true"
+		aria-labelledby="delete-workflow-title"
+	>
+		<div class="modal-box max-w-md">
+			<h3 id="delete-workflow-title" class="text-lg font-semibold">Delete “{target.name}”?</h3>
+			<p class="text-base-content/70 mt-2 text-sm">
+				The workflow and its design are removed and its worker is stopped. This can't be undone.
+			</p>
+
+			{#if form?.deleteError}
+				<div class="alert alert-error mt-3 py-2 text-sm"><span>{form.deleteError}</span></div>
+			{/if}
+
+			<form
+				method="POST"
+				action="?/deleteWorkflow"
+				use:enhance={() => {
+					deleting = true;
+					return async ({ result, update }) => {
+						deleting = false;
+						await update();
+						if (result.type === 'success') pendingDelete = null;
+					};
+				}}
+			>
+				<input type="hidden" name="id" value={target.id} />
+				<div class="modal-action">
+					<button
+						type="button"
+						class="btn"
+						onclick={() => (pendingDelete = null)}
+						disabled={deleting}>Cancel</button
+					>
+					<button type="submit" class="btn btn-error" disabled={deleting}>
+						{#if deleting}<span class="loading loading-spinner loading-xs"></span>{/if}
+						Delete workflow
+					</button>
+				</div>
+			</form>
+		</div>
+		<button
+			type="button"
+			class="modal-backdrop"
+			onclick={() => (pendingDelete = null)}
+			aria-label="Cancel"
+		></button>
+	</div>
+{/if}
 
 <dialog {@attach dialogRef} class="modal">
 	<div class="modal-box">
