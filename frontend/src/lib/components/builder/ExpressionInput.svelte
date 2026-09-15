@@ -132,13 +132,35 @@
 		return parts.length > 0 ? parts : null;
 	}
 
+	/** True when `t` is one parenthesised group, e.g. `(now | strftime("%Y"))` but not `(a) + (b)`. */
+	function isWrappedGroup(t: string): boolean {
+		if (!t.startsWith('(') || !t.endsWith(')')) return false;
+		let depth = 0;
+		let inStr = false;
+		for (let i = 0; i < t.length; i++) {
+			const ch = t[i];
+			if (inStr) {
+				if (ch === '\\') i++;
+				else if (ch === '"') inStr = false;
+				continue;
+			}
+			if (ch === '"') inStr = true;
+			else if (ch === '(') depth++;
+			else if (ch === ')') {
+				depth--;
+				if (depth === 0 && i < t.length - 1) return false;
+			}
+		}
+		return depth === 0;
+	}
+
 	function parseSingleToken(t: string): ExprPart | null {
-		const parenVar = t.match(/^\(\$(\w+)\.(\w+)\s*(\|[^)]+)\)$/);
+		const parenVar = t.match(/^\(\$(\w+)(?:\.(\w+))?\s*(\|[^)]+)\)$/);
 		if (parenVar)
 			return {
 				kind: 'var',
 				source: '$' + parenVar[1],
-				field: parenVar[2],
+				field: parenVar[2] ?? '',
 				transform: parenVar[3].trim()
 			};
 		const dotVar = t.match(/^\$(\w+)\.(\w+)$/);
@@ -152,8 +174,18 @@
 				field: '',
 				transform: simpleVar[2]?.trim() ?? ''
 			};
-		const strLit = t.match(/^"(.*)"$/s);
-		if (strLit) return { kind: 'literal', text: strLit[1] };
+		if (/^"(.*)"$/s.test(t)) {
+			// jq string escapes are JSON's, bar `\(…)` interpolation — which JSON.parse rejects,
+			// so such strings fall back to a whole-expression chip rather than being mangled.
+			try {
+				const text = JSON.parse(t);
+				return typeof text === 'string' ? { kind: 'literal', text } : null;
+			} catch {
+				return null;
+			}
+		}
+		// Any other parenthesised sub-expression stays a (raw) expression chip in its slot.
+		if (isWrappedGroup(t)) return { kind: 'literal', text: '${ ' + t.slice(1, -1).trim() + ' }' };
 		return null;
 	}
 
@@ -184,7 +216,12 @@
 		const allLiteral = ps.every((p) => p.kind === 'literal');
 		if (ps.length === 1 && allLiteral) return (ps[0] as LiteralPart).text;
 		const inner = ps.map((p) => {
-			if (p.kind === 'literal') return '"' + (p as LiteralPart).text + '"';
+			if (p.kind === 'literal') {
+				const text = (p as LiteralPart).text;
+				// An expression chip joins the concatenation as a sub-expression, not as a string.
+				if (isExprLiteral(text)) return '(' + exprInner(text) + ')';
+				return JSON.stringify(text);
+			}
 			const vp = p as VarPart;
 			const ref = vp.source + (vp.field ? '.' + vp.field : '');
 			return vp.transform ? '(' + ref + ' ' + vp.transform + ')' : ref;
@@ -205,7 +242,34 @@
 	let acForTransform = $state(false);
 	let focused = $state(false);
 
+	// In-place chip editing: the chip being edited is lifted out of `parts` and the text input takes
+	// its slot (via CSS `order`, so the input element never remounts and keeps focus). The lifted
+	// chip is put back untouched when the edit is cancelled or its text is left unchanged — editing
+	// never moves a chip or silently turns a variable into a string.
+	let editIdx = $state<number | null>(null);
+	let editOriginal = $state.raw<ExprPart | null>(null);
+	let editSeed = '';
+
+	// The value this component last emitted or adopted. A `value` prop that differs is an external
+	// change (e.g. an index-keyed row above this one was deleted) and has to be re-parsed, since
+	// `parts` is otherwise only seeded once.
+	let lastValue = untrack(() => value);
+
 	const showAc = $derived(acItems.length > 0);
+	const insertIdx = $derived(editIdx ?? parts.length);
+
+	$effect.pre(() => {
+		const v = value;
+		untrack(() => {
+			if (v === lastValue) return;
+			lastValue = v;
+			// Same expression in another spelling (ConditionBuilder strips `${ }`) — keep local state.
+			if (serializeParts(parseValue(v)) === serializeParts(withPending())) return;
+			clearPending();
+			parts = parseValue(v);
+			rawText = v;
+		});
+	});
 
 	// ── Helpers ────────────────────────────────────────────────────────────
 	function srcColor(source: string): string {
@@ -216,70 +280,109 @@
 		return s.length > max ? s.slice(0, max - 1) + '…' : s;
 	}
 
+	function isExprLiteral(text: string): boolean {
+		return /^\$\{[\s\S]*\}$/.test(text.trim());
+	}
+
+	function exprInner(text: string): string {
+		return text
+			.trim()
+			.replace(/^\$\{\s*/, '')
+			.replace(/\s*\}$/, '');
+	}
+
+	/** `parts` with the chip currently being edited put back in its slot. */
+	function withPending(): ExprPart[] {
+		if (editIdx === null || !editOriginal) return parts;
+		return [...parts.slice(0, editIdx), editOriginal, ...parts.slice(editIdx)];
+	}
+
 	function emit() {
-		onchange(serializeParts(parts));
+		const s = serializeParts(withPending());
+		if (s === lastValue) return;
+		lastValue = s;
+		onchange(s);
+	}
+
+	function clearPending() {
+		editIdx = null;
+		editOriginal = null;
+		editSeed = '';
+		currentText = '';
+		if (chipInputEl) chipInputEl.value = '';
+	}
+
+	/**
+	 * Settles the text input into `parts` at its slot: typed text becomes a literal chip, while a
+	 * cancelled or untouched edit restores the chip that was being edited (an edit cleared to empty
+	 * removes it). Returns the index a chip landed at, or -1 when none was inserted.
+	 */
+	function settlePending(mode: 'commit' | 'cancel'): number {
+		const at = insertIdx;
+		const original = editOriginal;
+		const text = currentText;
+		let part: ExprPart | null = null;
+		if (original && (mode === 'cancel' || text === editSeed)) part = original;
+		else if (mode === 'commit' && text.trim() && text.trim() !== '|')
+			part = { kind: 'literal', text };
+		clearPending();
+		if (part) parts = [...parts.slice(0, at), part, ...parts.slice(at)];
+		emit();
+		return part ? at : -1;
+	}
+
+	/** Settles any pending edit, mapping a `parts` index taken before settling to the same chip after. */
+	function settleAndShift(i: number): number {
+		const landed = settlePending('commit');
+		return landed !== -1 && i >= landed ? i + 1 : i;
 	}
 
 	// ── Chip mutations ─────────────────────────────────────────────────────
 	function removePart(i: number) {
+		i = settleAndShift(i);
 		parts = parts.filter((_, j) => j !== i);
 		emit();
 		chipInputEl?.focus();
 	}
 
-	function removeLastPart() {
-		if (parts.length > 0) {
-			parts = parts.slice(0, -1);
-			emit();
-		}
-	}
-
-	function commitCurrentAsLiteral() {
-		const text = currentText.trim();
-		if (!text || text === '|') {
-			currentText = '';
-			if (chipInputEl) chipInputEl.value = '';
-			return;
-		}
-		parts = [...parts, { kind: 'literal', text }];
-		currentText = '';
-		if (chipInputEl) chipInputEl.value = '';
+	/** Backspace in the empty input removes the chip just before it. */
+	function removePartBeforeInput() {
+		const at = insertIdx;
+		if (at === 0) return;
+		parts = parts.filter((_, j) => j !== at - 1);
+		if (editIdx !== null) editIdx = at - 1;
 		emit();
-	}
-
-	function isExprLiteral(text: string): boolean {
-		return /^\$\{[\s\S]*\}$/.test(text.trim());
 	}
 
 	function editChip(i: number) {
+		i = settleAndShift(i);
 		const part = parts[i];
-		parts = parts.filter((_, j) => j !== i);
-		if (part.kind === 'literal' && isExprLiteral((part as LiteralPart).text)) {
-			// Complex expression-literal: open in raw mode for editing
-			rawText = (part as LiteralPart).text;
-			rawMode = true;
-			emit();
-			setTimeout(() => rawInputEl?.focus(), 0);
+		if (!part) return;
+		if (part.kind === 'literal' && isExprLiteral(part.text)) {
+			// Expression chips are edited in raw mode, over the whole value, so the chips around it
+			// are neither dropped nor reordered.
+			openRaw();
 			return;
 		}
-		const txt =
-			part.kind === 'var'
-				? (part as VarPart).field || (part as VarPart).source.replace(/^\$/, '')
-				: (part as LiteralPart).text;
-		currentText = txt;
+		parts = parts.filter((_, j) => j !== i);
+		editIdx = i;
+		editOriginal = part;
+		editSeed = part.kind === 'var' ? part.field || part.source.replace(/^\$/, '') : part.text;
+		currentText = editSeed;
 		if (chipInputEl) {
-			chipInputEl.value = txt;
+			chipInputEl.value = editSeed;
 			chipInputEl.focus();
+			chipInputEl.select();
 		}
-		computeChipAc(txt);
-		emit();
+		computeChipAc(editSeed);
 	}
 
 	// ── Autocomplete ───────────────────────────────────────────────────────
 	function computeChipAc(text: string) {
 		if (text === '|') {
-			const hasLastVar = parts.some((p) => p.kind === 'var');
-			if (hasLastVar) {
+			const hasVar =
+				editOriginal?.kind === 'var' || parts.slice(0, insertIdx).some((p) => p.kind === 'var');
+			if (hasVar) {
 				acForTransform = true;
 				acItems = TRANSFORMS.map((t) => ({
 					label: t,
@@ -329,30 +432,38 @@
 
 	function applyAcItem(item: AcItem) {
 		if (item.category === 'transform') {
-			let lastVarIdx = -1;
-			for (let i = parts.length - 1; i >= 0; i--) {
-				if (parts[i].kind === 'var') {
-					lastVarIdx = i;
-					break;
+			const transform = '| ' + item.insert;
+			if (editOriginal?.kind === 'var') {
+				// `|` typed while editing a variable chip sets that chip's own transform.
+				editOriginal = { ...editOriginal, transform };
+			} else {
+				// Otherwise it applies to the nearest variable before the input.
+				let lastVarIdx = -1;
+				for (let i = insertIdx - 1; i >= 0; i--) {
+					if (parts[i].kind === 'var') {
+						lastVarIdx = i;
+						break;
+					}
+				}
+				if (lastVarIdx >= 0) {
+					parts = parts.map((p, i) => (i === lastVarIdx ? { ...p, transform } : p)) as ExprPart[];
 				}
 			}
-			if (lastVarIdx >= 0) {
-				parts = parts.map((p, i) =>
-					i === lastVarIdx ? { ...p, transform: '| ' + item.insert } : p
-				) as ExprPart[];
-				emit();
-			}
-			currentText = '';
-			if (chipInputEl) chipInputEl.value = '';
+			// Drops the typed `|`; restores (the possibly re-transformed) chip being edited.
+			settlePending('cancel');
 		} else if (item.varData) {
-			// currentText is the search term used to find the variable — discard it,
-			// don't commit as a literal chip.
-			parts = [
-				...parts,
-				{ kind: 'var', source: item.varData.source, field: item.varData.field, transform: '' }
-			];
-			currentText = '';
-			if (chipInputEl) chipInputEl.value = '';
+			// The typed text was only a search term — replace it (and any chip being edited) with the
+			// variable, in the same slot, keeping the edited variable's transform.
+			const at = insertIdx;
+			const transform = editOriginal?.kind === 'var' ? editOriginal.transform : '';
+			const part: VarPart = {
+				kind: 'var',
+				source: item.varData.source,
+				field: item.varData.field,
+				transform
+			};
+			clearPending();
+			parts = [...parts.slice(0, at), part, ...parts.slice(at)];
 			emit();
 		}
 		acItems = [];
@@ -369,12 +480,17 @@
 	function handleChipKeydown(e: KeyboardEvent) {
 		if (e.key === 'Backspace' && currentText === '') {
 			e.preventDefault();
-			removeLastPart();
+			removePartBeforeInput();
+			return;
+		}
+		if (e.key === 'Escape') {
+			if (showAc) acItems = [];
+			else settlePending('cancel');
 			return;
 		}
 		if (e.key === 'Enter' && !showAc) {
 			e.preventDefault();
-			commitCurrentAsLiteral();
+			settlePending('commit');
 			return;
 		}
 		if (!showAc) return;
@@ -387,8 +503,6 @@
 		} else if (e.key === 'Enter' || e.key === 'Tab') {
 			e.preventDefault();
 			applyAcItem(acItems[acIdx]);
-		} else if (e.key === 'Escape') {
-			acItems = [];
 		}
 	}
 
@@ -405,27 +519,38 @@
 		const container = e.currentTarget as HTMLElement;
 		if (!container?.contains(e.relatedTarget as Node)) {
 			focused = false;
-			if (currentText.trim() && currentText !== '|') commitCurrentAsLiteral();
 			acItems = [];
+			settlePending('commit');
 		}
 	}
 
 	// ── Raw mode ───────────────────────────────────────────────────────────
-	function toggleRaw() {
-		if (!rawMode) {
-			rawText = serializeParts(parts);
-			rawMode = true;
-			setTimeout(() => rawInputEl?.focus(), 0);
-		} else {
-			parts = parseValue(rawText);
-			rawMode = false;
+	function openRaw() {
+		settlePending('commit');
+		acItems = [];
+		rawText = serializeParts(parts);
+		rawMode = true;
+		setTimeout(() => rawInputEl?.focus(), 0);
+	}
+
+	function closeRaw() {
+		parts = parseValue(rawText);
+		rawMode = false;
+		if (rawText !== lastValue) {
+			lastValue = rawText;
 			onchange(rawText);
-			setTimeout(() => chipInputEl?.focus(), 0);
 		}
+		setTimeout(() => chipInputEl?.focus(), 0);
+	}
+
+	function toggleRaw() {
+		if (rawMode) closeRaw();
+		else openRaw();
 	}
 
 	function handleRawInput(e: Event) {
 		rawText = (e.target as HTMLInputElement | HTMLTextAreaElement).value;
+		lastValue = rawText;
 		onchange(rawText);
 	}
 
@@ -478,93 +603,100 @@
 				if (e.key === 'Enter' && e.target === e.currentTarget) chipInputEl?.focus();
 			}}
 		>
+			<!-- Chips sit at odd flex orders; the text input takes the even order of its slot. -->
 			{#each parts as part, i (i)}
-				{#if i > 0}
-					<span class="select-none font-mono text-[9px] text-base-content/25">+</span>
-				{/if}
-				{#if part.kind === 'var'}
-					{@const vp = part as VarPart}
-					<span class="group/chip inline-flex items-center gap-0.5 rounded bg-base-200 px-1 py-0.5">
-						<!-- Clickable edit area -->
+				<span class="inline-flex items-center gap-0.5" style:order={i * 2 + 1}>
+					{#if i > 0 || editIdx === 0}
+						<span class="select-none font-mono text-[9px] text-base-content/25">+</span>
+					{/if}
+					{#if part.kind === 'var'}
+						{@const vp = part as VarPart}
 						<span
-							class="inline-flex cursor-pointer items-center gap-0.5 leading-none"
-							role="button"
-							tabindex="0"
-							onclick={() => editChip(i)}
-							onkeydown={(e) => e.key === 'Enter' && editChip(i)}
-							title="Click to edit"
+							class="group/chip inline-flex items-center gap-0.5 rounded bg-base-200 px-1 py-0.5"
 						>
+							<!-- Clickable edit area -->
 							<span
-								class="flex size-4 shrink-0 items-center justify-center rounded font-mono text-[8px] font-bold text-white"
-								style:background={srcColor(vp.source)}>{SRC_LETTER[vp.source] ?? '?'}</span
-							>
-							<span
-								class="max-w-24 truncate font-mono text-[10px] text-base-content/80"
-								title={vp.field || vp.source}
-							>
-								{trunc(vp.field || vp.source)}
-							</span>
-							{#if vp.transform}
-								<span class="font-mono text-[9px] text-base-content/40">{vp.transform}</span>
-							{/if}
-						</span>
-						<!-- Remove button -->
-						<button
-							type="button"
-							class="ml-0.5 leading-none text-base-content/20 opacity-0 transition-opacity hover:text-error group-hover/chip:opacity-100"
-							onclick={() => removePart(i)}
-							aria-label="Remove">×</button
-						>
-					</span>
-				{:else}
-					{@const lp = part as LiteralPart}
-					{#if isExprLiteral(lp.text)}
-						<!-- Complex jq expression chip — click to edit in raw mode -->
-						{@const inner = lp.text.replace(/^\$\{\s*/, '').replace(/\s*\}$/, '')}
-						<span
-							class="group/chip inline-flex items-center gap-0.5 rounded border border-base-300 bg-base-200/60 px-1 py-0.5"
-						>
-							<span class="shrink-0 font-mono text-[8px] text-base-content/30">&lt;/&gt;</span>
-							<span
-								class="max-w-28 cursor-pointer truncate font-mono text-[10px] italic text-base-content/60"
+								class="inline-flex cursor-pointer items-center gap-0.5 leading-none"
 								role="button"
 								tabindex="0"
 								onclick={() => editChip(i)}
 								onkeydown={(e) => e.key === 'Enter' && editChip(i)}
-								title={lp.text}>{trunc(inner, 22)}</span
+								title="Click to edit"
 							>
+								<span
+									class="flex size-4 shrink-0 items-center justify-center rounded font-mono text-[8px] font-bold text-white"
+									style:background={srcColor(vp.source)}>{SRC_LETTER[vp.source] ?? '?'}</span
+								>
+								<span
+									class="max-w-24 truncate font-mono text-[10px] text-base-content/80"
+									title={vp.field || vp.source}
+								>
+									{trunc(vp.field || vp.source)}
+								</span>
+								{#if vp.transform}
+									<span class="font-mono text-[9px] text-base-content/40">{vp.transform}</span>
+								{/if}
+							</span>
+							<!-- Remove button -->
 							<button
 								type="button"
-								class="ml-0.5 leading-none text-base-content/20 opacity-0 transition-opacity hover:text-error group-hover/chip:opacity-100"
+								class="ml-0.5 px-0.5 text-xs leading-none text-base-content/40 transition-colors hover:text-error"
 								onclick={() => removePart(i)}
 								aria-label="Remove">×</button
 							>
 						</span>
 					{:else}
-						{@const lpLabel = '"' + trunc(lp.text) + '"'}
-						<span class="group/chip inline-flex items-center gap-0 text-base-content/50">
+						{@const lp = part as LiteralPart}
+						{#if isExprLiteral(lp.text)}
+							<!-- Complex jq expression chip — click to edit in raw mode -->
 							<span
-								class="cursor-pointer font-mono text-[10px]"
-								role="button"
-								tabindex="0"
-								onclick={() => editChip(i)}
-								onkeydown={(e) => e.key === 'Enter' && editChip(i)}
-								title={lp.text}>{lpLabel}</span
+								class="group/chip inline-flex items-center gap-0.5 rounded border border-base-300 bg-base-200/60 px-1 py-0.5"
 							>
-							<button
-								type="button"
-								class="leading-none text-base-content/20 opacity-0 transition-opacity hover:text-error group-hover/chip:opacity-100"
-								onclick={() => removePart(i)}
-								aria-label="Remove">×</button
-							>
-						</span>
+								<span class="shrink-0 font-mono text-[8px] text-base-content/30">&lt;/&gt;</span>
+								<span
+									class="max-w-28 cursor-pointer truncate font-mono text-[10px] italic text-base-content/60"
+									role="button"
+									tabindex="0"
+									onclick={() => editChip(i)}
+									onkeydown={(e) => e.key === 'Enter' && editChip(i)}
+									title={lp.text}>{trunc(exprInner(lp.text), 22)}</span
+								>
+								<button
+									type="button"
+									class="ml-0.5 px-0.5 text-xs leading-none text-base-content/40 transition-colors hover:text-error"
+									onclick={() => removePart(i)}
+									aria-label="Remove">×</button
+								>
+							</span>
+						{:else}
+							{@const lpLabel = '"' + trunc(lp.text) + '"'}
+							<span class="group/chip inline-flex items-center gap-0 text-base-content/50">
+								<span
+									class="cursor-pointer font-mono text-[10px]"
+									role="button"
+									tabindex="0"
+									onclick={() => editChip(i)}
+									onkeydown={(e) => e.key === 'Enter' && editChip(i)}
+									title={lp.text}>{lpLabel}</span
+								>
+								<button
+									type="button"
+									class="px-0.5 text-xs leading-none text-base-content/40 transition-colors hover:text-error"
+									onclick={() => removePart(i)}
+									aria-label="Remove">×</button
+								>
+							</span>
+						{/if}
 					{/if}
-				{/if}
+				</span>
 			{/each}
 
-			<!-- Trailing + only when focused and chips exist -->
-			{#if focused && parts.length > 0}
-				<span class="select-none font-mono text-[9px] text-base-content/25">+</span>
+			<!-- + before the input when it follows a chip (appending, or editing a non-first chip) -->
+			{#if focused && insertIdx > 0}
+				<span
+					class="select-none font-mono text-[9px] text-base-content/25"
+					style:order={insertIdx * 2}>+</span
+				>
 			{/if}
 
 			<!-- Inline input: visible when focused or no chips yet -->
@@ -575,6 +707,7 @@
 					'bg-transparent font-mono text-[10px] text-base-content outline-none placeholder:text-base-content/20 transition-all',
 					!focused && parts.length > 0 ? 'h-px w-px overflow-hidden opacity-0' : 'min-w-12 flex-1'
 				].join(' ')}
+				style:order={insertIdx * 2}
 				placeholder={parts.length === 0 ? placeholder || 'type or select a variable…' : ''}
 				value={currentText}
 				oninput={handleChipInput}
@@ -586,7 +719,8 @@
 			<!-- Raw toggle -->
 			<button
 				type="button"
-				class="ml-auto shrink-0 self-center px-0.5 font-mono text-[8px] text-base-content/20 transition-colors hover:text-base-content/60"
+				class="ml-auto shrink-0 self-center px-1 font-mono text-[10px] text-base-content/40 transition-colors hover:text-primary"
+				style:order={parts.length * 2 + 2}
 				onclick={toggleRaw}
 				title="Edit raw expression">&lt;/&gt;</button
 			>
@@ -600,7 +734,9 @@
 				{#if acForTransform}
 					<li class="border-b border-base-200 px-2 py-1">
 						<span class="text-[9px] font-semibold uppercase tracking-wider text-base-content/40"
-							>Transform — applies to last variable</span
+							>Transform — applies to {editOriginal?.kind === 'var'
+								? 'this variable'
+								: 'last variable'}</span
 						>
 					</li>
 				{/if}

@@ -19,6 +19,7 @@
 	--run-running: #2563eb;
 	--run-continued: #d97706;
 	--run-error: #dc2626;
+	--panel-text-boost: 25%;
 }
 
 [data-theme='dark'] {
@@ -27,6 +28,7 @@
 	--run-running: #3b82f6;
 	--run-continued: #f59e0b;
 	--run-error: #ef4444;
+	--panel-text-boost: 0%;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -36,5 +38,59 @@
 		--run-running: #3b82f6;
 		--run-continued: #f59e0b;
 		--run-error: #ef4444;
+		--panel-text-boost: 0%;
+	}
+}
+
+/*
+ * Readability in the builder's node panel. Its secondary text uses faint `text-base-content/N`
+ * tints that are fine on a dark ground but wash out on a light one, so on the light theme each
+ * faint tier is darkened by `--panel-text-boost`. `:where()` keeps these at utility specificity,
+ * so `hover:` variants still win.
+ */
+@layer utilities {
+	:where(.builder-panel) {
+		& .text-base-content\/20 {
+			color: color-mix(
+				in oklab,
+				var(--color-base-content) calc(20% + var(--panel-text-boost)),
+				transparent
+			);
+		}
+		& .text-base-content\/25 {
+			color: color-mix(
+				in oklab,
+				var(--color-base-content) calc(25% + var(--panel-text-boost)),
+				transparent
+			);
+		}
+		& .text-base-content\/30 {
+			color: color-mix(
+				in oklab,
+				var(--color-base-content) calc(30% + var(--panel-text-boost)),
+				transparent
+			);
+		}
+		& .text-base-content\/40 {
+			color: color-mix(
+				in oklab,
+				var(--color-base-content) calc(40% + var(--panel-text-boost)),
+				transparent
+			);
+		}
+		& .text-base-content\/50 {
+			color: color-mix(
+				in oklab,
+				var(--color-base-content) calc(50% + var(--panel-text-boost)),
+				transparent
+			);
+		}
+		& .text-base-content\/60 {
+			color: color-mix(
+				in oklab,
+				var(--color-base-content) calc(60% + var(--panel-text-boost)),
+				transparent
+			);
+		}
 	}
 }
