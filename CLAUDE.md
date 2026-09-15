@@ -14,7 +14,7 @@ There is no root-level build tooling — each side is developed and run from wit
 
 ## Running everything
 
-Primary path is Docker: `docker compose up --build` (see root `README.md`). Without Docker, three things need to run: `temporal server start-dev`, `cd backend && go run ./cmd/server`, `cd frontend && pnpm dev` — see `README.md`'s "Quickstart (without Docker)" section for prerequisites (Temporal CLI, Zigflow CLI).
+Primary path is Docker: `docker compose up --build` (see root `CONTRIBUTING.md`). Without Docker, three things need to run: `temporal server start-dev`, `cd backend && go run ./cmd/server`, `cd frontend && pnpm dev` — see `CONTRIBUTING.md`'s "Without Docker" section for prerequisites (Temporal CLI, Zigflow CLI).
 
 The frontend's `API_BASE_URL` (`frontend/src/lib/server/http.ts`) defaults to `http://localhost:8000/api`, matching the backend's built-in default `port`/`basePath`; the backend's `temporal.address` defaults to `localhost:7233` — both need overriding via `DURAFLOW_*`/`API_BASE_URL` env vars when not running on the same host (`docker-compose.yml` does this already). A default admin user is seeded on the backend's first boot (see `docker-compose.yml`'s `DURAFLOW_SEEDADMIN_*` vars).
 

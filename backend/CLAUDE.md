@@ -23,7 +23,7 @@ go vet ./...             # static checks
 go mod tidy              # sync go.mod/go.sum after adding/removing imports
 ```
 
-Needs a Temporal dev server reachable at `temporal.address` (default `localhost:7233`, override with `DURAFLOW_TEMPORAL_ADDRESS`) and the `zigflow` CLI on PATH to actually run workflows — the server still starts and serves the API without either, it just can't spawn workers or execute anything. See root `README.md`'s "Quickstart (without Docker)" for how to get both running locally, or use `docker compose up` from the repo root instead.
+Needs a Temporal dev server reachable at `temporal.address` (default `localhost:7233`, override with `DURAFLOW_TEMPORAL_ADDRESS`) and the `zigflow` CLI on PATH to actually run workflows — the server still starts and serves the API without either, it just can't spawn workers or execute anything. See root `CONTRIBUTING.md`'s "Without Docker" section for how to get both running locally, or use `docker compose up` from the repo root instead.
 
 There is no test suite yet.
 
