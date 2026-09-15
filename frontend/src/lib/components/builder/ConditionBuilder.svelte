@@ -444,7 +444,7 @@
 					{#if clauses.length > 1}
 						<button
 							type="button"
-							class="font-mono text-[11px] leading-none text-base-content/20 hover:text-error"
+							class="px-0.5 font-mono text-sm leading-none text-base-content/40 hover:text-error"
 							onclick={() => removeClause(i)}
 							aria-label="Remove condition">×</button
 						>
@@ -457,12 +457,12 @@
 		<div class="border-base-300/50 flex items-center border-t px-2 py-1">
 			<button
 				type="button"
-				class="font-mono text-[9px] text-base-content/30 hover:text-base-content/70"
+				class="font-mono text-[10px] font-medium text-primary/80 hover:text-primary"
 				onclick={addClause}>+ add condition</button
 			>
 			<button
 				type="button"
-				class="ml-auto font-mono text-[8px] text-base-content/20 hover:text-base-content/60"
+				class="ml-auto px-1 font-mono text-[10px] text-base-content/40 hover:text-primary"
 				onclick={toggleRaw}
 				title="Edit raw jq expression">&lt;/&gt;</button
 			>

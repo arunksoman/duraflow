@@ -640,7 +640,7 @@
 							<!-- Remove button -->
 							<button
 								type="button"
-								class="ml-0.5 leading-none text-base-content/20 opacity-0 transition-opacity hover:text-error group-hover/chip:opacity-100"
+								class="ml-0.5 px-0.5 text-xs leading-none text-base-content/40 transition-colors hover:text-error"
 								onclick={() => removePart(i)}
 								aria-label="Remove">×</button
 							>
@@ -663,7 +663,7 @@
 								>
 								<button
 									type="button"
-									class="ml-0.5 leading-none text-base-content/20 opacity-0 transition-opacity hover:text-error group-hover/chip:opacity-100"
+									class="ml-0.5 px-0.5 text-xs leading-none text-base-content/40 transition-colors hover:text-error"
 									onclick={() => removePart(i)}
 									aria-label="Remove">×</button
 								>
@@ -681,7 +681,7 @@
 								>
 								<button
 									type="button"
-									class="leading-none text-base-content/20 opacity-0 transition-opacity hover:text-error group-hover/chip:opacity-100"
+									class="px-0.5 text-xs leading-none text-base-content/40 transition-colors hover:text-error"
 									onclick={() => removePart(i)}
 									aria-label="Remove">×</button
 								>
@@ -719,7 +719,7 @@
 			<!-- Raw toggle -->
 			<button
 				type="button"
-				class="ml-auto shrink-0 self-center px-0.5 font-mono text-[8px] text-base-content/20 transition-colors hover:text-base-content/60"
+				class="ml-auto shrink-0 self-center px-1 font-mono text-[10px] text-base-content/40 transition-colors hover:text-primary"
 				style:order={parts.length * 2 + 2}
 				onclick={toggleRaw}
 				title="Edit raw expression">&lt;/&gt;</button
