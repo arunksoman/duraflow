@@ -1,16 +1,16 @@
 # Both the backend server and the zigflow CLI must live in this same image — the backend spawns
 # `zigflow run` as a subprocess (os/exec), not over the network.
-FROM golang:1.26-alpine AS build
+FROM golang:1.27-alpine AS build
 
 WORKDIR /src
 ENV CGO_ENABLED=0
 
 COPY go.mod go.sum ./
 RUN go mod download
+RUN mkdir -p /out && go install github.com/zigflow/zigflow@latest && cp "$(go env GOPATH)/bin/zigflow" /out/zigflow
 
 COPY . .
 RUN go build -o /out/server ./cmd/server
-RUN go install github.com/zigflow/zigflow@latest && cp "$(go env GOPATH)/bin/zigflow" /out/zigflow
 
 FROM alpine:3.20
 

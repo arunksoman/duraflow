@@ -1,0 +1,91 @@
+document:
+  dsl: 1.0.0
+  taskQueue: zigflow
+  workflowType: basic
+  version: 0.0.1
+  title: Basic
+  summary: An example of how to use the Open Workflow Specification to define Temporal Workflows
+  metadata:
+    canMaxHistoryLength: 14
+    activityOptions:
+      retryPolicy:
+        maximumAttempts: 3
+      startToCloseTimeout:
+        minutes: 1
+    display: false
+input:
+  schema:
+    format: json
+    document:
+      type: object
+      required:
+        - userId
+      properties:
+        userId:
+          type: number
+do:
+  - basedata:
+      set:
+        envvar: ${ $env.EXAMPLE_ENVVAR }
+        uuid: ${ uuid }
+        object: '{"hello":"world","uuid":"${ uuid }"}'
+        inputUserId: ${ $input.userId }
+        now: ${ now }
+        now_formatted: ${ now | strftime("%Y-%m-%d %H:%M:%S") }
+        timestamp: ${ timestamp }
+        timestamp_formatted: ${ timestamp | strftime("%Y-%m-%d %H:%M:%S") }
+        now_iso8601: ${ timestamp_iso8601 }
+        array: '["${ uuid }",{"hello":"world"}]'
+      export:
+        as:
+          baseData: ${ . }
+  - wait:
+      wait:
+        days: 0
+        hours: 0
+        minutes: 0
+        seconds: 5
+  - getuser:
+      call: http
+      with:
+        method: get
+        endpoint: ${ "https://jsonplaceholder.typicode.com/users/" + ($input.userId | tostring) }
+        headers:
+          x-token: ${ $data.uuid }
+        query:
+          id: ${ $data.uuid }
+      export:
+        as: "${ $context + { getUser: . } }"
+      metadata:
+        activityOptions:
+          retryPolicy:
+            maximumAttempts: 5
+  - raisealarm:
+      fork:
+        branches:
+          - callnurse:
+              call: http
+              with:
+                method: get
+                endpoint: https://jsonplaceholder.typicode.com/users/2
+          - multistep:
+              do:
+                - wait1:
+                    wait:
+                      days: 0
+                      hours: 0
+                      minutes: 0
+                      seconds: 3
+                - wait2:
+                    wait:
+                      days: 0
+                      hours: 0
+                      minutes: 0
+                      seconds: 2
+          - calldoctor:
+              call: http
+              with:
+                method: get
+                endpoint: ${ "https://jsonplaceholder.typicode.com/users/" + ($input.userId | tostring) }
+      output:
+        as: ${ $context + del(.multiStep) }
