@@ -643,18 +643,22 @@
 				onmousedown={startResize}
 				aria-label="Drag to resize panel"
 			></button>
-			<NodePanel
-				node={configNode}
-				{nodes}
-				{edges}
-				{workflowMeta}
-				siblingWorkflows={data.siblingWorkflows}
-				width={panelWidth}
-				onclose={() => (configNodeId = null)}
-				onupdate={updateNodeData}
-				onremovebranch={handleRemoveBranch}
-				onupdatemeta={updateWorkflowMeta}
-			/>
+			<!-- Keyed by node id: NodePanel seeds its local state once, so switching
+			     nodes must remount it or the previous node's fields leak through. -->
+			{#key configNode.id}
+				<NodePanel
+					node={configNode}
+					{nodes}
+					{edges}
+					{workflowMeta}
+					siblingWorkflows={data.siblingWorkflows}
+					width={panelWidth}
+					onclose={() => (configNodeId = null)}
+					onupdate={updateNodeData}
+					onremovebranch={handleRemoveBranch}
+					onupdatemeta={updateWorkflowMeta}
+				/>
+			{/key}
 		{/if}
 	</div>
 </div>

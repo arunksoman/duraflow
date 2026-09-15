@@ -56,7 +56,7 @@
 	const meta = $derived(NODE_META[nodeType]);
 	const Icon = $derived(meta.icon);
 
-	// Panel is destroyed/recreated by {#if configNode} in parent — untrack is safe
+	// Panel is destroyed/recreated per node by {#key configNode.id} in parent — untrack is safe
 	let localVars = $state<VarEntry[]>(
 		untrack(() =>
 			Array.isArray(node?.data?.variables)
