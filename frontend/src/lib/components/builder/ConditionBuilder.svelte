@@ -172,10 +172,31 @@
 	let rawText = $state(_initValue);
 	let editingRight = $state<number | null>(null);
 
+	// The value this component last emitted or adopted. A `value` prop that differs is an external
+	// change (e.g. an index-keyed row above this one was deleted) and has to be re-parsed, since the
+	// state above is otherwise only seeded once.
+	let lastValue = _initValue;
+
+	$effect.pre(() => {
+		const v = value;
+		untrack(() => {
+			if (v === lastValue) return;
+			lastValue = v;
+			if (rawMode ? v === rawText : v === serializeClauses(clauses)) return;
+			const p = parseCondition(v);
+			clauses = p ?? [];
+			rawMode = p === null && !!v && v.trim() !== '';
+			rawText = v;
+			editingRight = null;
+		});
+	});
+
 	// ── Handlers ─────────────────────────────────────────────────────────
 
 	function emit() {
-		onchange(serializeClauses(clauses));
+		const s = serializeClauses(clauses);
+		lastValue = s;
+		onchange(s);
 	}
 
 	function addClause() {
@@ -237,6 +258,7 @@
 				clauses = p;
 				rawMode = false;
 			}
+			lastValue = rawText;
 			onchange(rawText);
 		}
 	}
@@ -255,6 +277,7 @@
 			value={rawText}
 			oninput={(e) => {
 				rawText = (e.target as HTMLInputElement).value;
+				lastValue = rawText;
 				onchange(rawText);
 			}}
 		/>
