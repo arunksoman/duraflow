@@ -6,6 +6,8 @@ import {
 	deleteWorkflow,
 	listWorkflows
 } from '$lib/server/workflows';
+import { listAllExecutions } from '$lib/server/executions';
+import type { Execution } from '$lib/types';
 import type { Actions, PageServerLoad } from './$types';
 
 export const load: PageServerLoad = async ({ params, cookies }) => {
@@ -20,12 +22,38 @@ export const load: PageServerLoad = async ({ params, cookies }) => {
 	}
 
 	try {
-		const workflows = await listWorkflows(token, params.projectId);
-		return { project, workflows, apiError: false };
+		const [workflows, lastRuns] = await Promise.all([
+			listWorkflows(token, params.projectId),
+			latestRunPerWorkflow(token, params.projectId)
+		]);
+		return { project, workflows, lastRuns, apiError: false };
 	} catch {
-		return { project, workflows: [], apiError: true };
+		return { project, workflows: [], lastRuns: {}, apiError: true };
 	}
 };
+
+/**
+ * Each workflow's most recent root run, for the status line on its card. One page of the project's
+ * runs (newest first) covers it; a workflow whose last run is older than that page simply shows no
+ * status. Best-effort — the cards still render if runs can't be loaded.
+ */
+async function latestRunPerWorkflow(
+	token: string | undefined,
+	projectId: string
+): Promise<Record<string, Pick<Execution, 'id' | 'status' | 'startedAt'>>> {
+	try {
+		const { items } = await listAllExecutions(token, { projectId, limit: 500 });
+		const latest: Record<string, Pick<Execution, 'id' | 'status' | 'startedAt'>> = {};
+		for (const run of items) {
+			if (!latest[run.workflowId]) {
+				latest[run.workflowId] = { id: run.id, status: run.status, startedAt: run.startedAt };
+			}
+		}
+		return latest;
+	} catch {
+		return {};
+	}
+}
 
 export const actions: Actions = {
 	createWorkflow: async ({ request, cookies, params }) => {
@@ -53,12 +81,12 @@ export const actions: Actions = {
 	deleteWorkflow: async ({ request, cookies }) => {
 		const data = await request.formData();
 		const id = String(data.get('id') ?? '');
-		if (!id) return fail(400, { error: 'Missing workflow id.' });
+		if (!id) return fail(400, { deleteError: 'Missing workflow id.' });
 
 		try {
 			await deleteWorkflow(cookies.get('session'), id);
 		} catch (err) {
-			if (err instanceof WorkflowsApiError) return fail(502, { error: err.message });
+			if (err instanceof WorkflowsApiError) return fail(502, { deleteError: err.message });
 			throw err;
 		}
 
