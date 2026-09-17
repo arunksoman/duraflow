@@ -222,6 +222,19 @@ export type TaskNode =
 	| TryTask
 	| WaitTask;
 
+// ── Schedule ─────────────────────────────────────────────────────────────
+
+/**
+ * `$defs`-free top-level `schedule:` block. Both keys are optional and *not* mutually exclusive —
+ * zigflow feeds `cron` into a Temporal `ScheduleSpec.CronExpressions` and `every` into
+ * `ScheduleSpec.Intervals`, so setting both means "fire on either". The schema's `after` key is
+ * rejected by zigflow (`schedule.after not supported`) and is deliberately not modelled here.
+ */
+export interface ScheduleSpec {
+	every?: DurationFields;
+	cron?: string;
+}
+
 // ── Document ─────────────────────────────────────────────────────────────
 
 export interface ZigflowDocumentHeader {
@@ -248,5 +261,11 @@ export interface ZigflowDocument {
 	document: ZigflowDocumentHeader;
 	/** Declares the JSON Schema of data a caller must supply when starting/triggering the workflow. */
 	input?: InputConfig;
+	/**
+	 * Present only while the workflow is scheduled. `zigflow run` deletes the matching Temporal
+	 * schedule and recreates it from this block on every worker start, so removing the key is what
+	 * turns a schedule off — see `schedule.ts`.
+	 */
+	schedule?: ScheduleSpec;
 	do: TaskList;
 }

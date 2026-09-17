@@ -36,7 +36,6 @@ func Open(cfg config.DatabaseConfig) (*gorm.DB, error) {
 		&models.Project{},
 		&models.Workflow{},
 		&models.Execution{},
-		&models.Schedule{},
 		&models.Worker{},
 		&models.ExecutionEvent{},
 		&models.WorkflowExecutionRef{},

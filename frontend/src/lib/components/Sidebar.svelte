@@ -1,11 +1,12 @@
 <script lang="ts">
 	import { page } from '$app/state';
-	import { CalendarClock, LayoutDashboard, ListChecks, Server, Workflow } from '@lucide/svelte';
+	import { LayoutDashboard, ListChecks, Server, Workflow } from '@lucide/svelte';
 
+	// A workflow's schedule is part of the workflow itself (its DSL `schedule:` block), edited in
+	// the builder — there is deliberately no separate schedules screen.
 	const navItems = [
 		{ href: '/dashboard', label: 'Dashboard', icon: LayoutDashboard, enabled: true },
 		{ href: '/workers', label: 'Workers', icon: Server, enabled: true },
-		{ href: '/schedules', label: 'Schedules', icon: CalendarClock, enabled: true },
 		{ href: '/executions', label: 'Executions', icon: ListChecks, enabled: true }
 	];
 </script>

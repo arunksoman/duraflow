@@ -1,5 +1,9 @@
 // Global domain types shared between client and server.
 
+import type { WorkflowSchedule } from '$lib/zigflow-engine/schedule';
+
+export type { WorkflowSchedule };
+
 export type Role = 'admin' | 'designer' | 'business';
 
 export interface User {
@@ -120,15 +124,6 @@ export interface Worker {
 	lastHeartbeatAt: string;
 }
 
-export interface Schedule {
-	id: string;
-	workflowId: string;
-	cron: string;
-	timezone: string;
-	enabled: boolean;
-	nextRunAt?: string;
-}
-
 // ── Workflow Builder ────────────────────────────────────────────────
 
 export interface InputField {
@@ -163,4 +158,9 @@ export interface WorkflowMeta {
 	summary?: string;
 	tags?: Record<string, string>;
 	metadata?: Record<string, unknown>;
+	/**
+	 * The workflow's recurring trigger. Stored in the DSL (`schedule:` + a few
+	 * `document.metadata` keys) like everything else — see `zigflow-engine/schedule.ts`.
+	 */
+	schedule?: WorkflowSchedule;
 }

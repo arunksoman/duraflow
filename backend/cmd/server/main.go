@@ -53,8 +53,8 @@ func main() {
 		Resolver: resolver,
 	}
 
-	// A child workflow only becomes visible once its first event arrives, so this is where its
-	// completion watcher gets started.
+	// A child workflow — or a run Temporal started from a workflow's own schedule — only becomes
+	// visible once its first event arrives, so this is where its completion watcher gets started.
 	resolver.OnExecutionDiscovered = func(execution models.Execution) {
 		go api.WatchExecutionUntilClosed(deps, execution.ID)
 	}

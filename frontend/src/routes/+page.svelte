@@ -59,7 +59,8 @@
 		{
 			icon: Server,
 			title: 'Workers & schedules',
-			description: 'Monitor worker health and manage cron-based schedules from one place.'
+			description:
+				'Monitor worker health, and give any workflow a cron or interval schedule from its builder.'
 		}
 	];
 </script>

@@ -79,7 +79,6 @@ func seedWorkflow(t *testing.T, deps *Deps, projectID, name string) models.Workf
 			EventType: "dev.zigflow.task.completed", DedupeKey: execID + string(rune('a'+i)),
 		}).Error)
 	}
-	must(deps.DB.Create(&models.Schedule{WorkflowID: wf.ID, Cron: "0 * * * *"}).Error)
 	upsertWorker(deps, t.Context(), wf.Name, wf.TaskQueue, models.WorkerOnline)
 	return wf
 }
@@ -93,7 +92,7 @@ func count(t *testing.T, deps *Deps, model any, query string, args ...any) int64
 	return n
 }
 
-func TestDeleteWorkflowRemovesRunsSchedulesAndWorker(t *testing.T) {
+func TestDeleteWorkflowRemovesRunsAndWorker(t *testing.T) {
 	api, deps := newDeleteTestAPI(t)
 	project := models.Project{Name: "p"}
 	deps.DB.Create(&project)
@@ -112,7 +111,6 @@ func TestDeleteWorkflowRemovesRunsSchedulesAndWorker(t *testing.T) {
 	}{
 		{"workflow row", &models.Workflow{}, "id = ?", 0},
 		{"runs", &models.Execution{}, "workflow_id = ?", 0},
-		{"schedules", &models.Schedule{}, "workflow_id = ?", 0},
 	}
 	for _, c := range checks {
 		if got := count(t, deps, c.model, c.query, doomed.ID); got != c.want {
@@ -171,9 +169,6 @@ func TestDeleteProjectCascadesToItsWorkflows(t *testing.T) {
 	}
 	if got := count(t, deps, &models.Execution{}, "workflow_id IN ?", []string{a.ID, b.ID}); got != 0 {
 		t.Errorf("runs left: %d", got)
-	}
-	if got := count(t, deps, &models.Schedule{}, "workflow_id IN ?", []string{a.ID, b.ID}); got != 0 {
-		t.Errorf("schedules left: %d", got)
 	}
 	if got := count(t, deps, &models.Worker{}, "identity IN ?", []string{"a", "b"}); got != 0 {
 		t.Errorf("worker rows left: %d", got)

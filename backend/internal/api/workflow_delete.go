@@ -10,10 +10,10 @@ import (
 )
 
 // Deleting a workflow removes everything that only exists because of it: its runs (each as a whole
-// tree, with its event log and Temporal history — see deleteExecutionTrees), its schedules, its
-// worker process and DSL files, and its row on the Workers page. A run still in progress is
-// terminated rather than refused, since the worker it runs on is being stopped anyway. Deleting a
-// project does the same for every workflow in it.
+// tree, with its event log and Temporal history — see deleteExecutionTrees), the Temporal schedule
+// its DSL published, its worker process and DSL files, and its row on the Workers page. A run still
+// in progress is terminated rather than refused, since the worker it runs on is being stopped
+// anyway. Deleting a project does the same for every workflow in it.
 //
 // Child runs this workflow contributed to *another* workflow's run are left alone: they belong to
 // that root run's timeline and go when it does.
@@ -37,9 +37,6 @@ func deleteWorkflowCascade(ctx context.Context, deps *Deps, workflow models.Work
 	}
 
 	err := deps.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		if err := tx.Where("workflow_id = ?", workflow.ID).Delete(&models.Schedule{}).Error; err != nil {
-			return fmt.Errorf("deleting schedules: %w", err)
-		}
 		if err := tx.Delete(&models.Workflow{}, "id = ?", workflow.ID).Error; err != nil {
 			return fmt.Errorf("deleting workflow: %w", err)
 		}
@@ -49,6 +46,9 @@ func deleteWorkflowCascade(ctx context.Context, deps *Deps, workflow models.Work
 		return err
 	}
 
+	// Stopping the worker does not retract the schedule it registered — Temporal would keep
+	// starting workflows nothing is left to run. See workflow_schedule.go.
+	dropWorkflowSchedule(ctx, deps, workflow.DSL)
 	removeWorkerRegistration(deps, ctx, workflow)
 	return nil
 }
