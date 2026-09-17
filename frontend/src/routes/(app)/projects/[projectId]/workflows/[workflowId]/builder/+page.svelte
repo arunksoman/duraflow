@@ -16,6 +16,7 @@
 	import { enhance } from '$app/forms';
 	import {
 		ArrowLeft,
+		CalendarClock,
 		CircleCheck,
 		Code2,
 		Play,
@@ -31,6 +32,7 @@
 	import FlowInterop from '$lib/components/builder/FlowInterop.svelte';
 	import NodePanel from '$lib/components/builder/NodePanel.svelte';
 	import WorkflowVariablesModal from '$lib/components/builder/WorkflowVariablesModal.svelte';
+	import ScheduleModal from '$lib/components/builder/ScheduleModal.svelte';
 	import CodeMirrorEditor from '$lib/components/editor/CodeMirrorEditor.svelte';
 	import { NODE_META, NODE_TYPES } from '$lib/components/builder/builderConfig';
 	import { astToGraph, graphToAst, type ScopeGraph } from '$lib/zigflow-engine/graph';
@@ -43,6 +45,11 @@
 		deserializeZigflowDocument,
 		type DeserializeError
 	} from '$lib/zigflow-engine/deserialize';
+	import {
+		defaultWorkflowSchedule,
+		isScheduleActive,
+		type WorkflowSchedule
+	} from '$lib/zigflow-engine/schedule';
 	import { ROOT_SCOPE_ID, forkBranchScopeKey } from '$lib/zigflow-engine/scopeKey';
 	import { toSlug } from '$lib/zigflow-engine/slug';
 	import {
@@ -80,7 +87,8 @@
 			taskQueue: toSlug(data.project.name),
 			version: '0.1.0',
 			inputSchema: [],
-			envVars: []
+			envVars: [],
+			schedule: defaultWorkflowSchedule()
 		}))
 	);
 
@@ -203,6 +211,14 @@
 	let saved = $state(false);
 	let showDsl = $state(false);
 	let showVariables = $state(false);
+	let showSchedule = $state(false);
+
+	const schedule = $derived(workflowMeta.schedule ?? defaultWorkflowSchedule());
+	const scheduleActive = $derived(isScheduleActive(schedule));
+
+	function updateSchedule(next: WorkflowSchedule) {
+		updateWorkflowMeta({ schedule: next });
+	}
 
 	// ── Run — happens in its own window, against a frozen copy of the design ────
 
@@ -517,6 +533,21 @@
 			Variables
 		</button>
 		<ThemeToggle />
+		<!-- Schedule sits next to Run: same idea, one-off vs. recurring. -->
+		<button
+			class="btn btn-ghost btn-sm gap-1.5"
+			class:btn-active={showSchedule}
+			onclick={() => (showSchedule = true)}
+			title={scheduleActive
+				? 'This workflow runs on a schedule — view or change it'
+				: 'Run this workflow automatically on an interval or cron'}
+		>
+			<CalendarClock size={14} />
+			Schedule
+			{#if scheduleActive}
+				<span class="bg-success size-1.5 rounded-full" aria-label="Schedule active"></span>
+			{/if}
+		</button>
 		<form
 			method="POST"
 			action="?/run"
@@ -681,6 +712,17 @@
 		onrun={startRun}
 		onclear={clearRun}
 		onclose={() => (showRunModal = false)}
+	/>
+{/if}
+
+<!-- Schedule modal — writes straight into the DSL's `schedule:` block -->
+{#if showSchedule}
+	<ScheduleModal
+		{schedule}
+		workflowType={workflowMeta.workflowType}
+		inputFields={workflowMeta.inputSchema ?? []}
+		onclose={() => (showSchedule = false)}
+		onupdate={updateSchedule}
 	/>
 {/if}
 

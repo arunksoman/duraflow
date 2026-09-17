@@ -163,6 +163,7 @@ func registerWorkflowRoutes(api huma.API, deps *Deps, base string) {
 		if in.Body.Description != nil {
 			workflow.Description = *in.Body.Description
 		}
+		previousDSL := workflow.DSL
 		if in.Body.DSL != nil && *in.Body.DSL != workflow.DSL {
 			workflow.DSL = *in.Body.DSL
 			workflow.Version++
@@ -171,6 +172,9 @@ func registerWorkflowRoutes(api huma.API, deps *Deps, base string) {
 		if err := deps.DB.WithContext(ctx).Save(&workflow).Error; err != nil {
 			return nil, huma.Error500InternalServerError("failed to update workflow", err)
 		}
+		// Order matters: retract the old schedule before the restarted worker publishes the new
+		// one, so a renamed schedule id can't leave two live schedules behind.
+		dropRenamedWorkflowSchedule(ctx, deps, previousDSL, workflow.DSL)
 		syncWorkerRegistration(deps, ctx, workflow)
 		return &workflowOutput{Body: workflow}, nil
 	})
@@ -179,7 +183,7 @@ func registerWorkflowRoutes(api huma.API, deps *Deps, base string) {
 		OperationID:   "delete-workflow",
 		Method:        http.MethodDelete,
 		Path:          base + "/workflows/{id}",
-		Summary:       "Delete a workflow with its runs, schedules and worker",
+		Summary:       "Delete a workflow with its runs, schedule and worker",
 		Tags:          []string{"Workflows"},
 		Security:      authSecurity(),
 		DefaultStatus: http.StatusNoContent,

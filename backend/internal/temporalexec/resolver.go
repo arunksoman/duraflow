@@ -11,6 +11,7 @@ import (
 	"time"
 
 	enumspb "go.temporal.io/api/enums/v1"
+	workflowpb "go.temporal.io/api/workflow/v1"
 	"gorm.io/gorm"
 
 	"duraflow/backend/internal/events"
@@ -237,6 +238,14 @@ func (r *Resolver) resolve(ctx context.Context, wfExecID string, depth int) (Res
 	info := desc.GetWorkflowExecutionInfo()
 	parentID := info.GetParentExecution().GetWorkflowId()
 	if parentID == "" {
+		// A root run duraflow never started. The one kind worth adopting is a scheduled run: the
+		// workflow's own DSL asked Temporal to start it, so it belongs in that workflow's run list
+		// even though no create-execution call ever made a row for it.
+		if adopted, ok := r.adoptScheduledRun(ctx, wfExecID, info); ok {
+			res := Resolution{ExecutionID: adopted.ID, RootExecutionID: adopted.ID}
+			r.remember(wfExecID, adopted.TemporalRunID, res)
+			return res, nil
+		}
 		return Resolution{}, fmt.Errorf("%w: %s", errUnresolvable, wfExecID)
 	}
 
@@ -320,6 +329,70 @@ func (r *Resolver) findWorkflow(ctx context.Context, workflowType, taskQueue str
 	// More than one workflow can legitimately declare the same type on the same queue; the first
 	// by creation order is as good a guess as any, and the run is still fully viewable either way.
 	return matches[0], true
+}
+
+// scheduledBySearchAttribute is the system search attribute Temporal stamps on every workflow a
+// schedule starts. Only its presence matters here, so the payload is never decoded.
+const scheduledBySearchAttribute = "TemporalScheduledById"
+
+// adoptScheduledRun creates the Execution row for a run Temporal started from a workflow's own
+// `schedule:` block. It's the counterpart of create-execution for runs nobody asked for
+// interactively: without it, every scheduled run's events would sit unresolved forever and the
+// executions list would show only manual runs.
+//
+// Runs that merely have no parent are left alone — an unrecognised root is far more likely to be
+// something else on the same Temporal namespace than a run of ours.
+func (r *Resolver) adoptScheduledRun(
+	ctx context.Context,
+	wfExecID string,
+	info *workflowpb.WorkflowExecutionInfo,
+) (models.Execution, bool) {
+	if _, scheduled := info.GetSearchAttributes().GetIndexedFields()[scheduledBySearchAttribute]; !scheduled {
+		return models.Execution{}, false
+	}
+
+	workflowType := info.GetType().GetName()
+	wf, ok := r.findWorkflow(ctx, workflowType, info.GetTaskQueue())
+	if !ok {
+		if _, seen := r.warnedOnce.LoadOrStore(workflowType, struct{}{}); !seen {
+			log.Printf(
+				"[telemetry] scheduled run %s of workflow type %q matches no stored workflow — ignoring",
+				wfExecID, workflowType,
+			)
+		}
+		return models.Execution{}, false
+	}
+
+	startedAt := time.Now()
+	if t := info.GetStartTime(); t != nil {
+		startedAt = t.AsTime()
+	}
+	execution := models.Execution{
+		Base:            models.Base{ID: wfExecID},
+		WorkflowID:      wf.ID,
+		WorkflowType:    workflowType,
+		TemporalRunID:   info.GetExecution().GetRunId(),
+		RootExecutionID: wfExecID,
+		Trigger:         models.TriggerScheduled,
+		Status:          models.ExecutionRunning,
+		StartedAt:       startedAt,
+	}
+
+	if err := r.db.WithContext(ctx).Create(&execution).Error; err != nil {
+		// Two events from the same scheduled run can race here; whoever lost re-reads the winner.
+		var existing models.Execution
+		if err := r.db.WithContext(ctx).First(&existing, "id = ?", wfExecID).Error; err == nil {
+			return existing, true
+		}
+		log.Printf("[telemetry] creating scheduled execution %s: %v", wfExecID, err)
+		return models.Execution{}, false
+	}
+
+	// Nothing else is waiting on this run, so without a watcher it would stay `running` forever.
+	if r.OnExecutionDiscovered != nil {
+		r.OnExecutionDiscovered(execution)
+	}
+	return execution, true
 }
 
 // ensureChildExecution records a `run: workflow` child as a run in its own right, linked back to

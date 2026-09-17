@@ -27,6 +27,7 @@ import type {
 	BranchEntry
 } from '../components/builder/builderConfig';
 import type { WorkflowNodeType, InputField } from '../types';
+import { applyWorkflowSchedule, readWorkflowSchedule, type WorkflowSchedule } from './schedule';
 import { toSlug, uniqueSlug } from './slug';
 import { orderNodesInScope, layoutScope } from './layout';
 import {
@@ -55,6 +56,12 @@ export interface WorkflowHeaderFields {
 	tags?: Record<string, string>;
 	metadata?: Record<string, unknown>;
 	inputSchema?: InputField[];
+	/**
+	 * Lives in two places in the document (`schedule:` plus a few `document.metadata` keys), so it
+	 * travels as one UI-level object and `schedule.ts` owns the split — never patch those keys
+	 * through `metadata` directly.
+	 */
+	schedule?: WorkflowSchedule;
 }
 
 function definedEntries<T extends Record<string, unknown>>(obj: T): Partial<T> {
@@ -155,22 +162,23 @@ function stringifyInputSchema(fields: InputField[]): InputConfig | undefined {
 // =========================================================================
 
 export function graphToAst(graph: WorkflowGraph, header: WorkflowHeaderFields): ZigflowDocument {
+	const workflowType = header.workflowType || 'workflow';
+	const scheduleParts = applyWorkflowSchedule(header.schedule, header.metadata, workflowType);
 	const documentHeader: ZigflowDocumentHeader = {
 		dsl: '1.0.0',
 		taskQueue: header.taskQueue || 'zigflow',
-		workflowType: header.workflowType || 'workflow',
+		workflowType,
 		version: header.version || '0.1.0',
 		...(header.title ? { title: header.title } : {}),
 		...(header.summary ? { summary: header.summary } : {}),
 		...(header.tags && Object.keys(header.tags).length > 0 ? { tags: header.tags } : {}),
-		...(header.metadata && Object.keys(header.metadata).length > 0
-			? { metadata: header.metadata }
-			: {})
+		...(scheduleParts.metadata ? { metadata: scheduleParts.metadata } : {})
 	};
 	const input = stringifyInputSchema(header.inputSchema ?? []);
 	return {
 		document: documentHeader,
 		...(input ? { input } : {}),
+		...(scheduleParts.schedule ? { schedule: scheduleParts.schedule } : {}),
 		do: scopeToTaskList(graph, ROOT_SCOPE_ID)
 	};
 }
@@ -539,7 +547,8 @@ export function astToGraph(doc: ZigflowDocument): {
 			summary: doc.document.summary,
 			tags: doc.document.tags,
 			metadata: doc.document.metadata,
-			inputSchema: parseInputSchema(doc.input)
+			inputSchema: parseInputSchema(doc.input),
+			schedule: readWorkflowSchedule(doc)
 		}
 	};
 }

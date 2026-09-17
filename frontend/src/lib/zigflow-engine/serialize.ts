@@ -308,6 +308,7 @@ export function serializeZigflowDocument(doc: ZigflowDocument): string {
 	const obj = {
 		document: buildHeader(doc.document),
 		...(doc.input ? { input: doc.input } : {}),
+		...(doc.schedule ? { schedule: doc.schedule } : {}),
 		do: buildTaskList(doc.do, ['do'], ctx)
 	};
 

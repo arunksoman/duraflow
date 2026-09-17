@@ -25,9 +25,12 @@ const (
 	// TriggerManual is a run someone started by hand — the builder's Run button or the executions
 	// page's "Run workflow" dialog.
 	TriggerManual ExecutionTrigger = "manual"
-	// TriggerScheduled and TriggerBackfill are reserved for the scheduler; nothing writes them yet.
+	// TriggerScheduled is a run Temporal started from the schedule a workflow's DSL declares.
+	// Nothing in duraflow starts those, so the rows are created by the telemetry resolver when the
+	// first CloudEvent from such a run arrives — see temporalexec/resolver.go.
 	TriggerScheduled ExecutionTrigger = "scheduled"
-	TriggerBackfill  ExecutionTrigger = "backfill"
+	// TriggerBackfill is reserved for replaying a schedule over a past window; nothing writes it yet.
+	TriggerBackfill ExecutionTrigger = "backfill"
 )
 
 // Valid reports whether t is one of the known triggers.
