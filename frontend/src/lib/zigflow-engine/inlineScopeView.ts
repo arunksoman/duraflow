@@ -1,7 +1,7 @@
 import type { Node, Edge } from '@xyflow/svelte';
 import type { ScopeGraph } from './graph';
 import { forScopeKey, tryScopeKey, catchScopeKey, forkBranchScopeKey } from './scopeKey';
-import type { BranchEntry } from '../components/builder/builderConfig';
+import type { BranchEntry, CaseEntry } from '../components/builder/builderConfig';
 import {
 	layoutScopeRecursive,
 	orderNodesInScope,
@@ -27,6 +27,19 @@ export const OWNER_SCOPE_TAG = '__ownerScopeId';
 
 /** Marks a synthetic inline-lane edge (entry or continuation) — computed fresh every compose, never persisted. */
 export const SYNTHETIC_SCOPE_EDGE_TAG = 'syntheticScopeEdge';
+
+/** `edge.type` for a switch case's jump edge — resolves to `SwitchCaseEdge.svelte` via `edgeTypes`. */
+export const SWITCH_CASE_EDGE_TYPE = 'switchCase';
+
+/** Matches `NODE_META.switch.color`, so a case edge reads as belonging to the switch that owns it. */
+const SWITCH_CASE_COLOR = '#06b6d4';
+
+/**
+ * How far left of the main column a case edge bows, and how much each further case of the same
+ * switch adds — nesting the bows keeps sibling cases from overdrawing one another.
+ */
+const CASE_BOW_BASE = 72;
+const CASE_BOW_STEP = 34;
 
 export interface ComposedScope {
 	nodes: Node[];
@@ -261,6 +274,115 @@ export function computeTerminalEdges(nodes: Node[], edges: Edge[]): Edge[] {
 	return terminal;
 }
 
+function isSyntheticEdge(edge: Edge): boolean {
+	return Boolean((edge.data as Record<string, unknown> | undefined)?.[SYNTHETIC_SCOPE_EDGE_TAG]);
+}
+
+function switchCasesOf(node: Node): CaseEntry[] {
+	const cases = (node.data as Record<string, unknown> | undefined)?.cases;
+	return Array.isArray(cases) ? (cases as CaseEntry[]) : [];
+}
+
+/** The real (persisted) "and then the next sibling runs" edge leaving a node, if there is one. */
+function fallThroughTargetOf(nodeId: string, edges: Edge[]): string | undefined {
+	return edges.find((e) => e.source === nodeId && !isSyntheticEdge(e))?.target;
+}
+
+/**
+ * Where a single `switch` case actually sends the run, as a node id on the composed canvas:
+ *
+ * - `continue` — the switch's own fall-through target (the next sibling task).
+ * - `exit` / `end` — both stop the path being drawn. They differ in the DSL (leave the current
+ *   scope vs. terminate the workflow) but the canvas has exactly one `end` node, so both point
+ *   there rather than inventing a second terminator per nesting level.
+ * - anything else — a task id, valid only when it names a sibling in the switch's *own* scope
+ *   (the Zigflow spec forbids cross-scope `then`, and `NodePanel`'s picker enforces the same), so
+ *   a stale id left over from a moved/deleted node draws nothing instead of a wrong arrow.
+ */
+function switchCaseTargetId(
+	then: string,
+	switchScopeId: string | undefined,
+	ownerOf: Map<string, string>,
+	byId: Map<string, Node>,
+	fallThroughId: string | undefined,
+	endNodeId: string | undefined
+): string | undefined {
+	if (then === 'continue') return fallThroughId ?? endNodeId;
+	if (then === 'exit' || then === 'end') return endNodeId;
+	const target = byId.get(then);
+	if (!target || ownerOf.get(target.id) !== switchScopeId) return undefined;
+	return target.id;
+}
+
+/**
+ * One labeled edge per `switch` case, from the switch to wherever that case's `then` sends the run.
+ *
+ * Without these a switch is indistinguishable from any other task on the canvas: its cases live
+ * only in `node.data.cases`, while the only edges a scope persists are the plain "next sibling"
+ * chain — so back-to-back switches rendered as a straight column, with nothing showing which task
+ * each case actually jumps to. These are display-only (tagged synthetic, so
+ * `decomposeDisplayedScope` never writes them back): the DSL's `then` remains the single source of
+ * truth, edited in the node panel, never by dragging an edge.
+ *
+ * Note the plain chain edges are kept *as well* — a jumped-to task still falls through to the next
+ * sibling once it finishes, so those arrows are real flow, not an artifact. The one case where they
+ * lie is handled in `computeHiddenRealEdgeIds`.
+ */
+export function computeSwitchCaseEdges(nodes: Node[], edges: Edge[]): Edge[] {
+	const ownerOf = buildOwnerMap(nodes);
+	const byId = new Map(nodes.map((n) => [n.id, n]));
+	const endNodeId = nodes.find((n) => n.type === 'end')?.id;
+	const caseEdges: Edge[] = [];
+
+	for (const node of nodes) {
+		if (node.type !== 'switch') continue;
+		const cases = switchCasesOf(node);
+		if (cases.length === 0) continue;
+
+		const switchScopeId = ownerOf.get(node.id);
+		const fallThroughId = fallThroughTargetOf(node.id, edges);
+		let drawn = 0;
+
+		cases.forEach((c, i) => {
+			const targetId = switchCaseTargetId(
+				c.then,
+				switchScopeId,
+				ownerOf,
+				byId,
+				fallThroughId,
+				endNodeId
+			);
+			// A self-targeting case would render as a degenerate loop on top of the node; the `then`
+			// picker can't produce one, but hand-written DSL can.
+			if (!targetId || targetId === node.id) return;
+
+			const name = c.name || `case ${i + 1}`;
+			// Flow directives aren't visible from the target alone (`end` and a case that happens to
+			// jump to the last task look identical), so they're spelled out next to the case name.
+			const isDirective = c.then === 'continue' || c.then === 'exit' || c.then === 'end';
+			caseEdges.push({
+				id: `switch-case-${node.id}-${i}`,
+				source: node.id,
+				target: targetId,
+				type: SWITCH_CASE_EDGE_TYPE,
+				label: isDirective && name !== c.then ? `${name} · ${c.then}` : name,
+				data: {
+					[SYNTHETIC_SCOPE_EDGE_TAG]: true,
+					kind: 'switchCase',
+					bow: CASE_BOW_BASE + drawn * CASE_BOW_STEP
+				},
+				style: `stroke:${SWITCH_CASE_COLOR};stroke-width:1.5;stroke-dasharray:5 4;`,
+				labelStyle: `color:${SWITCH_CASE_COLOR};font-size:10px;font-weight:600;background:var(--color-base-100);border:1px solid ${SWITCH_CASE_COLOR}55;border-radius:9999px;padding:1px 6px;white-space:nowrap;`,
+				deletable: false,
+				selectable: false
+			});
+			drawn++;
+		});
+	}
+
+	return caseEdges;
+}
+
 /**
  * Ids of real (persisted) edges that `computeLiveSyntheticEdges` has visually replaced with a
  * relocated continuation edge — currently only ever fires for `try` (see `analyzeContainerNodes`).
@@ -271,13 +393,38 @@ export function computeTerminalEdges(nodes: Node[], edges: Edge[]): Edge[] {
  * Known limitation: because the visible replacement is a non-reconnectable synthetic edge (see
  * `ReconnectableEdge.svelte`), there's currently no drag-to-reconnect way to change "what runs
  * after this try/catch" from the canvas — use the DSL editor for that instead.
+ *
+ * Also hides a `switch`'s fall-through edge in the one case it can't fire (see
+ * `switchNeverFallsThrough`) — there the case edges from `computeSwitchCaseEdges` are the whole
+ * truth, and leaving the straight chain arrow up reads as "this switch continues to the next task"
+ * when it never does.
  */
 export function computeHiddenRealEdgeIds(nodes: Node[], edges: Edge[]): Set<string> {
 	const ids = new Set<string>();
 	for (const a of analyzeContainerNodes(nodes, edges)) {
 		if (a.continuationSourceId && a.mainContinuationEdge) ids.add(a.mainContinuationEdge.id);
 	}
+	for (const node of nodes) {
+		if (node.type !== 'switch' || !switchNeverFallsThrough(switchCasesOf(node))) continue;
+		const fallThrough = edges.find((e) => e.source === node.id && !isSyntheticEdge(e));
+		if (fallThrough) ids.add(fallThrough.id);
+	}
 	return ids;
+}
+
+/**
+ * True when every run through this switch is guaranteed to leave via one of its own cases, so the
+ * plain "next sibling" chain edge is unreachable: it needs an unconditional (default) case — one
+ * with no `when`, which always matches if nothing before it did — and no case whose `then` is
+ * `continue`, since that directive *is* the fall-through and gets its own labeled edge to the same
+ * target. A switch whose cases are all conditional keeps its chain edge, because with nothing
+ * matching the run really does carry on to the next task.
+ */
+function switchNeverFallsThrough(cases: CaseEntry[]): boolean {
+	if (cases.length === 0) return false;
+	const hasDefault = cases.some((c) => !c.condition?.trim());
+	const hasContinue = cases.some((c) => c.then === 'continue');
+	return hasDefault && !hasContinue;
 }
 
 /**
@@ -433,11 +580,16 @@ export function composeScopeForDisplay(
 		hiddenIds.has(e.id) ? { ...e, hidden: true } : e
 	);
 	const laneSynthetic = computeLiveSyntheticEdges(allNodes, allRealEdges);
-	const terminalSynthetic = computeTerminalEdges(allNodes, [...displayRealEdges, ...laneSynthetic]);
+	const switchSynthetic = computeSwitchCaseEdges(allNodes, allRealEdges);
+	const terminalSynthetic = computeTerminalEdges(allNodes, [
+		...displayRealEdges,
+		...laneSynthetic,
+		...switchSynthetic
+	]);
 
 	return {
 		nodes: allNodes,
-		edges: [...displayRealEdges, ...laneSynthetic, ...terminalSynthetic],
+		edges: [...displayRealEdges, ...laneSynthetic, ...switchSynthetic, ...terminalSynthetic],
 		laneBounds
 	};
 }

@@ -13,6 +13,7 @@
 
 	import WorkflowNode from '$lib/components/builder/WorkflowNode.svelte';
 	import ReconnectableEdge from '$lib/components/builder/ReconnectableEdge.svelte';
+	import SwitchCaseEdge from '$lib/components/builder/SwitchCaseEdge.svelte';
 	import { NODE_META, NODE_TYPES } from '$lib/components/builder/builderConfig';
 	import { TriangleAlert } from '@lucide/svelte';
 	import { RUN_TONE_VAR, runTone } from '$lib/components/builder/runStatus';
@@ -21,7 +22,10 @@
 	import type { RunIndex } from '$lib/zigflow-engine/runIndex';
 	import type { ScopeGraph } from '$lib/zigflow-engine/graph';
 	import type { NodeRunDetail, NodeRunState } from '$lib/zigflow-engine/runState';
-	import { composeScopeForDisplay } from '$lib/zigflow-engine/inlineScopeView';
+	import {
+		composeScopeForDisplay,
+		SWITCH_CASE_EDGE_TYPE
+	} from '$lib/zigflow-engine/inlineScopeView';
 	import { ROOT_SCOPE_ID } from '$lib/zigflow-engine/scopeKey';
 	import type { WorkflowNodeType } from '$lib/types';
 
@@ -46,7 +50,10 @@
 	let { session, index, scopes, canvasBanner }: Props = $props();
 
 	const nodeTypes = Object.fromEntries(NODE_TYPES.map((t) => [t, WorkflowNode]));
-	const edgeTypes = { default: ReconnectableEdge };
+	const edgeTypes = {
+		default: ReconnectableEdge,
+		[SWITCH_CASE_EDGE_TYPE]: SwitchCaseEdge
+	};
 
 	let selection = $state<RunSelection | null>(null);
 

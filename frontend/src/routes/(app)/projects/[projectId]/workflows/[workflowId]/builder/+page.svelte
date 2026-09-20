@@ -28,6 +28,7 @@
 
 	import WorkflowNode from '$lib/components/builder/WorkflowNode.svelte';
 	import ReconnectableEdge from '$lib/components/builder/ReconnectableEdge.svelte';
+	import SwitchCaseEdge from '$lib/components/builder/SwitchCaseEdge.svelte';
 	import NodePalette from '$lib/components/builder/NodePalette.svelte';
 	import FlowInterop from '$lib/components/builder/FlowInterop.svelte';
 	import NodePanel from '$lib/components/builder/NodePanel.svelte';
@@ -57,11 +58,13 @@
 		decomposeDisplayedScope,
 		computeLiveLaneBounds,
 		computeLiveSyntheticEdges,
+		computeSwitchCaseEdges,
 		computeHiddenRealEdgeIds,
 		computeTerminalEdges,
 		collectDescendantScopeKeysForNode,
 		collectDescendantScopeKeysForLaneKey,
-		OWNER_SCOPE_TAG
+		OWNER_SCOPE_TAG,
+		SWITCH_CASE_EDGE_TYPE
 	} from '$lib/zigflow-engine/inlineScopeView';
 	import type { Diagnostic } from '@codemirror/lint';
 	import type { WorkflowNodeType, WorkflowMeta, InputField } from '$lib/types';
@@ -75,7 +78,10 @@
 	const workflowName = $derived(data.workflow.name);
 
 	const nodeTypes = Object.fromEntries(NODE_TYPES.map((t) => [t, WorkflowNode]));
-	const edgeTypes = { default: ReconnectableEdge };
+	const edgeTypes = {
+		default: ReconnectableEdge,
+		[SWITCH_CASE_EDGE_TYPE]: SwitchCaseEdge
+	};
 
 	// ── Workflow metadata & variables ────────────────────────────────
 
@@ -191,12 +197,13 @@
 	$effect(() => {
 		const currentEdges = untrack(() => edges);
 		const synthetic = computeLiveSyntheticEdges(nodes, currentEdges);
+		const switchCases = computeSwitchCaseEdges(nodes, currentEdges);
 		const hiddenIds = computeHiddenRealEdgeIds(nodes, currentEdges);
 		const real = currentEdges
 			.filter((e) => !(e.data as Record<string, unknown> | undefined)?.syntheticScopeEdge)
 			.map((e) => ({ ...e, hidden: hiddenIds.has(e.id) }));
-		const terminal = computeTerminalEdges(nodes, [...real, ...synthetic]);
-		edges = [...real, ...synthetic, ...terminal];
+		const terminal = computeTerminalEdges(nodes, [...real, ...synthetic, ...switchCases]);
+		edges = [...real, ...synthetic, ...switchCases, ...terminal];
 	});
 
 	/** Recompose `nodes`/`edges` from `scopes` — only needed after `applyDslToCanvas` replaces `scopes` wholesale. */

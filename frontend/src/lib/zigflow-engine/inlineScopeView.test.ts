@@ -5,12 +5,14 @@ import {
 	composeScopeForDisplay,
 	decomposeDisplayedScope,
 	computeLiveSyntheticEdges,
+	computeSwitchCaseEdges,
 	computeHiddenRealEdgeIds,
 	computeTerminalEdges,
 	collectDescendantScopeKeysForNode,
 	collectDescendantScopeKeysForLaneKey,
 	OWNER_SCOPE_TAG,
-	SYNTHETIC_SCOPE_EDGE_TAG
+	SYNTHETIC_SCOPE_EDGE_TAG,
+	SWITCH_CASE_EDGE_TYPE
 } from './inlineScopeView';
 import {
 	forScopeKey,
@@ -640,5 +642,175 @@ describe('computeTerminalEdges', () => {
 	it('returns nothing when there is no end node in scope', () => {
 		const nodes = [node('orphan', 'set')];
 		expect(computeTerminalEdges(nodes, [])).toHaveLength(0);
+	});
+});
+
+describe('computeSwitchCaseEdges', () => {
+	/** Mirrors `example/switch.yaml`: three cases jumping to three sibling handler tasks. */
+	function orderRoutingScope() {
+		const nodes = [
+			node('start', 'start', { [OWNER_SCOPE_TAG]: ROOT_SCOPE_ID }),
+			node('switcher', 'switch', {
+				[OWNER_SCOPE_TAG]: ROOT_SCOPE_ID,
+				cases: [
+					{
+						name: 'electronic',
+						condition: '${ .orderType == "electronic" }',
+						then: 'electronicDo'
+					},
+					{ name: 'physical', condition: '${ .orderType == "physical" }', then: 'physicalDo' },
+					{ name: 'default', condition: '', then: 'unknownDo' }
+				]
+			}),
+			node('electronicDo', 'do', { [OWNER_SCOPE_TAG]: ROOT_SCOPE_ID }),
+			node('physicalDo', 'do', { [OWNER_SCOPE_TAG]: ROOT_SCOPE_ID }),
+			node('unknownDo', 'do', { [OWNER_SCOPE_TAG]: ROOT_SCOPE_ID }),
+			node('end', 'end', { [OWNER_SCOPE_TAG]: ROOT_SCOPE_ID })
+		];
+		const edges = chain(['start', 'switcher', 'electronicDo', 'physicalDo', 'unknownDo', 'end']);
+		return { nodes, edges };
+	}
+
+	it('draws one labeled edge per case, pointing at the task that case jumps to', () => {
+		const { nodes, edges } = orderRoutingScope();
+		const caseEdges = computeSwitchCaseEdges(nodes, edges);
+
+		expect(caseEdges.map((e) => [e.label, e.target])).toEqual([
+			['electronic', 'electronicDo'],
+			['physical', 'physicalDo'],
+			['default', 'unknownDo']
+		]);
+		expect(caseEdges.every((e) => e.source === 'switcher')).toBe(true);
+		expect(caseEdges.every((e) => e.type === SWITCH_CASE_EDGE_TYPE)).toBe(true);
+	});
+
+	it('nests each case edge further out so sibling cases do not overdraw one another', () => {
+		const { nodes, edges } = orderRoutingScope();
+		const bows = computeSwitchCaseEdges(nodes, edges).map(
+			(e) => (e.data as Record<string, unknown>).bow as number
+		);
+		expect(bows).toEqual([...bows].sort((a, b) => a - b));
+		expect(new Set(bows).size).toBe(bows.length);
+	});
+
+	it('tags every case edge synthetic so it is never written back to the scopes map', () => {
+		const { nodes, edges } = orderRoutingScope();
+		const caseEdges = computeSwitchCaseEdges(nodes, edges);
+		expect(
+			caseEdges.every((e) => (e.data as Record<string, unknown>)[SYNTHETIC_SCOPE_EDGE_TAG])
+		).toBe(true);
+		expect(Object.keys(decomposeDisplayedScope(nodes, [...edges, ...caseEdges]))).toEqual([
+			ROOT_SCOPE_ID
+		]);
+		expect(decomposeDisplayedScope(nodes, [...edges, ...caseEdges])[ROOT_SCOPE_ID].edges).toEqual(
+			edges
+		);
+	});
+
+	it('resolves the flow directives: continue to the next sibling, exit/end to the End node', () => {
+		const nodes = [
+			node('flowSwitcher', 'switch', {
+				[OWNER_SCOPE_TAG]: ROOT_SCOPE_ID,
+				cases: [
+					{ name: 'keepGoing', condition: '${ .flow == "continue" }', then: 'continue' },
+					{ name: 'bailOut', condition: '${ .flow == "exit" }', then: 'exit' },
+					{ name: 'stop', condition: '${ .flow == "end" }', then: 'end' }
+				]
+			}),
+			node('afterSwitch', 'wait', { [OWNER_SCOPE_TAG]: ROOT_SCOPE_ID }),
+			node('end', 'end', { [OWNER_SCOPE_TAG]: ROOT_SCOPE_ID })
+		];
+		const edges = chain(['flowSwitcher', 'afterSwitch', 'end']);
+
+		expect(computeSwitchCaseEdges(nodes, edges).map((e) => [e.label, e.target])).toEqual([
+			['keepGoing · continue', 'afterSwitch'],
+			['bailOut · exit', 'end'],
+			['stop · end', 'end']
+		]);
+	});
+
+	it('does not repeat the directive in the label when the case is named after it', () => {
+		const nodes = [
+			node('flowSwitcher', 'switch', {
+				[OWNER_SCOPE_TAG]: ROOT_SCOPE_ID,
+				cases: [{ name: 'end', condition: '', then: 'end' }]
+			}),
+			node('end', 'end', { [OWNER_SCOPE_TAG]: ROOT_SCOPE_ID })
+		];
+		expect(computeSwitchCaseEdges(nodes, []).map((e) => e.label)).toEqual(['end']);
+	});
+
+	it('skips a then that names a task outside the switch own scope — the DSL cannot reach it', () => {
+		const laneKey = forScopeKey(ROOT_SCOPE_ID, 'for1');
+		const nodes = [
+			node('switcher', 'switch', {
+				[OWNER_SCOPE_TAG]: ROOT_SCOPE_ID,
+				cases: [
+					{ name: 'nested', condition: '', then: 'insideLoop' },
+					{ name: 'gone', condition: '', then: 'deletedNodeId' }
+				]
+			}),
+			node('insideLoop', 'set', { [OWNER_SCOPE_TAG]: laneKey })
+		];
+		expect(computeSwitchCaseEdges(nodes, [])).toHaveLength(0);
+	});
+
+	it('draws nothing for a switch with no cases yet', () => {
+		const nodes = [node('switcher', 'switch', { [OWNER_SCOPE_TAG]: ROOT_SCOPE_ID })];
+		expect(computeSwitchCaseEdges(nodes, [])).toHaveLength(0);
+	});
+
+	it('is wired into composeScopeForDisplay', () => {
+		const scopes: Record<string, ScopeGraph> = {
+			[ROOT_SCOPE_ID]: {
+				nodes: [
+					node('start', 'start'),
+					node('switcher', 'switch', {
+						cases: [{ name: 'always', condition: '', then: 'handler' }]
+					}),
+					node('handler', 'call'),
+					node('end', 'end')
+				],
+				edges: chain(['start', 'switcher', 'handler', 'end'])
+			}
+		};
+		const caseEdges = composeScopeForDisplay(scopes, ROOT_SCOPE_ID).edges.filter(
+			(e) => e.type === SWITCH_CASE_EDGE_TYPE
+		);
+		expect(caseEdges.map((e) => [e.source, e.label, e.target])).toEqual([
+			['switcher', 'always', 'handler']
+		]);
+	});
+});
+
+describe('computeHiddenRealEdgeIds — switch fall-through', () => {
+	function switchScope(cases: Record<string, unknown>[]) {
+		const nodes = [
+			node('switcher', 'switch', { [OWNER_SCOPE_TAG]: ROOT_SCOPE_ID, cases }),
+			node('next', 'wait', { [OWNER_SCOPE_TAG]: ROOT_SCOPE_ID }),
+			node('end', 'end', { [OWNER_SCOPE_TAG]: ROOT_SCOPE_ID })
+		];
+		return { nodes, edges: chain(['switcher', 'next', 'end']) };
+	}
+
+	it('hides the chain edge when an unconditional case makes fall-through unreachable', () => {
+		const { nodes, edges } = switchScope([
+			{ name: 'a', condition: '${ .x }', then: 'end' },
+			{ name: 'default', condition: '', then: 'end' }
+		]);
+		expect([...computeHiddenRealEdgeIds(nodes, edges)]).toEqual(['e-switcher-next']);
+	});
+
+	it('keeps the chain edge when every case is conditional — nothing matching really does fall through', () => {
+		const { nodes, edges } = switchScope([{ name: 'a', condition: '${ .x }', then: 'end' }]);
+		expect(computeHiddenRealEdgeIds(nodes, edges).size).toBe(0);
+	});
+
+	it('keeps the chain edge when a case continues — that case owns the same target', () => {
+		const { nodes, edges } = switchScope([
+			{ name: 'a', condition: '${ .x }', then: 'end' },
+			{ name: 'default', condition: '', then: 'continue' }
+		]);
+		expect(computeHiddenRealEdgeIds(nodes, edges).size).toBe(0);
 	});
 });
