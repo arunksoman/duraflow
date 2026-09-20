@@ -43,7 +43,8 @@ Real Zigflow tasks (`for`, `fork`, `try`) contain their own nested task lists (`
 - Click **"Edit loop body"** on a `For` node, **"Edit body"** on a `Fork` branch row, or **"Edit try body"/"Edit catch body"** on a `Try` node to open that nested scope as its own canvas view.
 - A breadcrumb bar (shown once you're drilled in) lets you navigate back up.
 - Each scope is keyed by a deterministic id built from `src/lib/zigflow-engine/scopeKey.ts` (`forScopeKey`, `tryScopeKey`, `catchScopeKey`, `forkBranchScopeKey`) — e.g. `root/<forNodeId>/do`.
-- A `switch` task's `then` can only jump to a task name within the **same scope** (per the DSL spec) — the "then" dropdown in the Switch panel is scoped accordingly.
+- A branch-mode `switch` has one nested scope per case too (`switchCaseScopeKey`), even though no single DSL node backs it — the sibling task holding each branch is materialised on save. See the `switch` section below.
+- A jump-mode `switch` task's `then` can only jump to a task name within the **same scope** (per the DSL spec) — the "then" dropdown in the Switch panel is scoped accordingly.
 - Editing the DSL text directly and letting it sync back to the canvas rebuilds every scope from scratch and returns you to the root view, since node identity can't be preserved across a full text-driven rebuild. This is an intentional simplification, not a bug.
 
 ---
@@ -113,18 +114,25 @@ Writes key-value pairs into `$data`. Special jq builtins `${ uuid }` / `${ times
 ```ts
 node.data = {
   label: string
+  switchMode: 'branches' | 'jump'
   cases: CaseEntry[]
   ...DataFlow
 }
 
 interface CaseEntry {
+  id?:       string   // branches mode only — stable key for this case's lane scope
   name:      string   // case identifier (used as DSL step name)
-  condition: string   // ConditionBuilder — blank = default/fallthrough
-  then:      string   // 'continue' | 'end' | 'exit' | node.id (same scope only)
+  condition: string   // ConditionBuilder — blank = otherwise/default
+  then:      string   // jump mode only — 'continue' | 'end' | 'exit' | node.id (same scope only)
 }
 ```
 
 This is the **real** conditional-branching construct in Zigflow (not a dedicated "If" node). Cases evaluated top-to-bottom, first truthy match wins.
+
+Two shapes, decided per node when the DSL is loaded:
+
+- **`branches`** — what the builder authors, and the default for a new node. Each case owns an inline lane (`switchCaseScopeKey`, keyed by `CaseEntry.id`), drawn side by side like a fork's branches, and `then` is unused. On save each non-empty lane emits as a sibling task whose `then:` is the **converge target** — the task following the switch, or `exit` when nothing does — so branches skip each other and rejoin the main chain. An empty lane emits no task and its case points at the converge target directly. The converge target is re-derived from the graph on every save, never stored.
+- **`jump`** — DSL the builder didn't write: cases name ordinary sibling tasks in the flat list, and a jumped-to task falls through into the next sibling when it finishes. No lanes; the canvas draws labeled jump edges (`computeSwitchCaseEdges` + `SwitchCaseEdge.svelte`) and the panel edits `then` by target. Nothing is restructured on load — see `detectSwitchBranchGroups` in `graph.ts` for the exact conditions a switch must meet to count as `branches`.
 
 ---
 

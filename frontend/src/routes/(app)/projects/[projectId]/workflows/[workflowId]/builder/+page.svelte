@@ -35,7 +35,7 @@
 	import WorkflowVariablesModal from '$lib/components/builder/WorkflowVariablesModal.svelte';
 	import ScheduleModal from '$lib/components/builder/ScheduleModal.svelte';
 	import CodeMirrorEditor from '$lib/components/editor/CodeMirrorEditor.svelte';
-	import { NODE_META, NODE_TYPES } from '$lib/components/builder/builderConfig';
+	import { NODE_META, NODE_TYPES, freshNodeData } from '$lib/components/builder/builderConfig';
 	import { astToGraph, graphToAst, type ScopeGraph } from '$lib/zigflow-engine/graph';
 	import { buildRunIndex, type RunIndex } from '$lib/zigflow-engine/runIndex';
 	import { buildInputSkeleton, coerceInput, validateInput } from '$lib/zigflow-engine/inputSchema';
@@ -51,7 +51,11 @@
 		isScheduleActive,
 		type WorkflowSchedule
 	} from '$lib/zigflow-engine/schedule';
-	import { ROOT_SCOPE_ID, forkBranchScopeKey } from '$lib/zigflow-engine/scopeKey';
+	import {
+		ROOT_SCOPE_ID,
+		forkBranchScopeKey,
+		switchCaseScopeKey
+	} from '$lib/zigflow-engine/scopeKey';
 	import { toSlug } from '$lib/zigflow-engine/slug';
 	import {
 		composeScopeForDisplay,
@@ -378,12 +382,11 @@
 	// ── Node operations ──────────────────────────────────────────────
 
 	function addNode(type: WorkflowNodeType) {
-		const meta = NODE_META[type];
 		const newNode: Node = {
 			id: `node-${crypto.randomUUID()}`,
 			type,
 			position: { x: 120 + Math.random() * 200, y: 120 + Math.random() * 200 },
-			data: { type, ...meta.defaultData, [OWNER_SCOPE_TAG]: ROOT_SCOPE_ID }
+			data: { type, ...freshNodeData(type), [OWNER_SCOPE_TAG]: ROOT_SCOPE_ID }
 		};
 		nodes = [...nodes, newNode];
 	}
@@ -411,7 +414,6 @@
 		e.preventDefault();
 		const type = e.dataTransfer?.getData('application/workflow-node-type') as WorkflowNodeType;
 		if (!type || !(type in NODE_META)) return;
-		const meta = NODE_META[type];
 		const position = screenToFlowPosition
 			? screenToFlowPosition({ x: e.clientX, y: e.clientY })
 			: { x: 200, y: 200 };
@@ -419,7 +421,7 @@
 			id: `node-${crypto.randomUUID()}`,
 			type,
 			position,
-			data: { type, ...meta.defaultData, [OWNER_SCOPE_TAG]: resolveDropOwnerScope(position) }
+			data: { type, ...freshNodeData(type), [OWNER_SCOPE_TAG]: resolveDropOwnerScope(position) }
 		};
 		nodes = [...nodes, newNode];
 	}
@@ -488,14 +490,21 @@
 		pruneOrphanedScopes(orphanScopeKeys);
 	}
 
-	/** A `fork` branch was removed (not the whole node) — prune just that branch's scope + descendants. */
-	function handleRemoveBranch(forkNodeId: string, branchId: string) {
-		const forkNode = nodes.find((n) => n.id === forkNodeId);
-		const ownerScopeId = (forkNode?.data as Record<string, unknown> | undefined)?.[
+	/**
+	 * A single lane was removed from a container node — a `fork` branch or a branch-mode `switch`
+	 * case — rather than the whole node. Prunes just that lane's scope and its descendants, leaving
+	 * its sibling lanes alone.
+	 */
+	function handleRemoveBranch(ownerNodeId: string, laneId: string) {
+		const ownerNode = nodes.find((n) => n.id === ownerNodeId);
+		const ownerScopeId = (ownerNode?.data as Record<string, unknown> | undefined)?.[
 			OWNER_SCOPE_TAG
 		] as string | undefined;
 		if (!ownerScopeId) return;
-		const laneKey = forkBranchScopeKey(ownerScopeId, forkNodeId, branchId);
+		const laneKey =
+			ownerNode?.type === 'switch'
+				? switchCaseScopeKey(ownerScopeId, ownerNodeId, laneId)
+				: forkBranchScopeKey(ownerScopeId, ownerNodeId, laneId);
 		pruneOrphanedScopes(collectDescendantScopeKeysForLaneKey(laneKey, nodes));
 	}
 

@@ -4,7 +4,7 @@
 	import { Plus, Trash2, X } from '@lucide/svelte';
 	import type { WorkflowMeta, InputField, Workflow } from '$lib/types';
 	import { NODE_META } from './builderConfig';
-	import type { VarEntry, CaseEntry, EventEntry, BranchEntry } from './builderConfig';
+	import type { VarEntry, CaseEntry, EventEntry, BranchEntry, SwitchMode } from './builderConfig';
 	import type { WorkflowNodeType } from '$lib/types';
 	import ExpressionInput, { type AvailVar } from './ExpressionInput.svelte';
 	import ConditionBuilder from './ConditionBuilder.svelte';
@@ -55,6 +55,15 @@
 	);
 	const meta = $derived(NODE_META[nodeType]);
 	const Icon = $derived(meta.icon);
+	/**
+	 * `branches` — the switch owns a lane per case, and where a branch goes afterwards is derived
+	 * (it rejoins whatever follows the switch), so there is no `then` to pick. `jump` — loaded from
+	 * DSL whose cases target sibling tasks; those are edited by target and have no lanes. Absent =
+	 * `branches`, matching `inlineScopeView.ts`/`graph.ts`.
+	 */
+	const switchMode = $derived<SwitchMode>(
+		((node?.data as Record<string, unknown> | undefined)?.switchMode as SwitchMode) ?? 'branches'
+	);
 
 	// Panel is destroyed/recreated per node by {#key configNode.id} in parent — untrack is safe
 	let localVars = $state<VarEntry[]>(
@@ -68,7 +77,7 @@
 		untrack(() =>
 			Array.isArray(node?.data?.cases)
 				? (node.data.cases as CaseEntry[]).map((c) => ({ ...c }))
-				: [{ name: 'default', condition: '', then: 'end' }]
+				: [{ id: crypto.randomUUID(), name: 'otherwise', condition: '', then: 'continue' }]
 		)
 	);
 	let localHeaders = $state<VarEntry[]>(
@@ -206,13 +215,25 @@
 	function addCase() {
 		localCases = [
 			...localCases,
-			{ name: `case${localCases.length + 1}`, condition: '', then: 'continue' }
+			// A branch's `id` is the key its canvas lane lives under, so it has to be minted here
+			// and never derived from the (renameable) case name. Jump-mode cases have no lane and
+			// so no id — see `CaseEntry`.
+			{
+				...(switchMode === 'branches' ? { id: crypto.randomUUID() } : {}),
+				name: `case${localCases.length + 1}`,
+				condition: '',
+				then: 'continue'
+			}
 		];
 		saveCases();
 	}
 	function removeCase(i: number) {
+		const removed = localCases[i];
 		localCases = localCases.filter((_, j) => j !== i);
 		saveCases();
+		// A branch-mode case owns a canvas lane, so dropping it has to prune that lane's scope the
+		// same way removing a fork branch does — otherwise its nodes linger, orphaned, in `scopes`.
+		if (removed?.id) onremovebranch(node.id, removed.id);
 	}
 	function updateCase(i: number, k: keyof CaseEntry, v: string) {
 		localCases = localCases.map((c, j) => (j === i ? { ...c, [k]: v } : c));
@@ -954,17 +975,18 @@
 
 			<!-- ── SWITCH ─────────────────────────────────────────────── -->
 			{#if nodeType === 'switch'}
-				<Accordion title="Cases" defaultOpen={true}>
+				<Accordion title={switchMode === 'branches' ? 'Branches' : 'Cases'} defaultOpen={true}>
 					<div class="flex flex-col gap-2">
 						<div class="flex items-center justify-between">
 							<span class="text-base-content/40 text-[10px]"
 								>Evaluated top-to-bottom, first match wins</span
 							>
 							<button class="btn btn-ghost btn-xs text-primary gap-1" onclick={addCase}
-								><Plus size={12} />Add case</button
+								><Plus size={12} />{switchMode === 'branches' ? 'Add branch' : 'Add case'}</button
 							>
 						</div>
-						{#each localCases as c, i (i)}
+						{#each localCases as c, i (c.id ?? i)}
+							{@const isOtherwise = switchMode === 'branches' && !c.condition.trim()}
 							<div class="border-base-300 flex flex-col gap-1.5 rounded-lg border p-2">
 								<div class="flex items-center gap-1.5">
 									<span class="text-base-content/40 w-10 shrink-0 text-[10px]">name</span>
@@ -984,28 +1006,50 @@
 									<span class="text-base-content/40 text-[10px]">when</span>
 									<ConditionBuilder
 										value={c.condition}
-										placeholder={'${ .status == "ok" }  (blank = default)'}
+										placeholder={'${ .status == "ok" }  (blank = otherwise)'}
 										availVars={availableVars}
 										onchange={(val) => updateCase(i, 'condition', val)}
 									/>
 								</div>
-								<div class="flex items-center gap-1.5">
-									<span class="text-base-content/40 w-10 shrink-0 text-[10px]">then</span>
-									<select
-										class="select select-xs min-w-0 flex-1 text-xs"
-										value={c.then}
-										onchange={(e) => updateCase(i, 'then', (e.target as HTMLSelectElement).value)}
-									>
-										{#each thenOptions as opt (opt.value)}
-											<option value={opt.value}>{opt.label}</option>
-										{/each}
-									</select>
-								</div>
+								{#if switchMode === 'branches'}
+									<p class="text-base-content/30 text-[9px]">
+										{isOtherwise
+											? 'Runs when no case above matched.'
+											: 'Runs when this condition matches.'}
+										Build its steps in the
+										<span class="font-mono">{c.name || `case ${i + 1}`}</span> lane on the canvas; it
+										rejoins the flow after this switch.
+									</p>
+								{:else}
+									<div class="flex items-center gap-1.5">
+										<span class="text-base-content/40 w-10 shrink-0 text-[10px]">then</span>
+										<select
+											class="select select-xs min-w-0 flex-1 text-xs"
+											value={c.then}
+											onchange={(e) => updateCase(i, 'then', (e.target as HTMLSelectElement).value)}
+										>
+											{#each thenOptions as opt (opt.value)}
+												<option value={opt.value}>{opt.label}</option>
+											{/each}
+										</select>
+									</div>
+								{/if}
 							</div>
 						{/each}
-						<p class="text-base-content/30 text-[9px]">
-							Cases evaluated top-to-bottom. First match wins. Blank "when" = default.
-						</p>
+						{#if switchMode === 'branches'}
+							<p class="text-base-content/30 text-[9px]">
+								Each branch runs its own lane on the canvas and then rejoins whatever follows this
+								switch. Leave "when" blank for the otherwise branch.
+							</p>
+						{:else}
+							<!-- Loaded from DSL whose cases jump into the surrounding task list rather than into
+							     branches of their own. Restructuring it on load would change how the workflow
+							     runs, so it stays as written and is edited by target instead. -->
+							<p class="text-base-content/30 text-[9px]">
+								This switch came from DSL whose cases jump to sibling tasks, so it has no branch
+								lanes. Cases evaluated top-to-bottom, first match wins; blank "when" = default.
+							</p>
+						{/if}
 					</div>
 				</Accordion>
 			{/if}

@@ -23,12 +23,39 @@ export interface VarEntry {
 	value: string;
 }
 
-/** Switch case. `then` holds a flow directive OR a node.id (resolved to slug at DSL time). */
+/**
+ * One `switch` case.
+ *
+ * In `branches` mode (`SwitchMode` below, the default and the only mode the builder authors) a
+ * case owns an inline lane on the canvas: `id` is its stable scope key — independent of the
+ * mutable `name`, exactly like `BranchEntry` — `condition` is the `when:` guard, an empty one
+ * meaning "otherwise", and `then` is unused because where a branch goes when it finishes is
+ * derived (it converges past its siblings onto whatever follows the switch).
+ *
+ * In `jump` mode — DSL the builder didn't write, whose cases point into a flat sibling list — `id`
+ * is absent, there are no lanes, and `then` is the real target: a flow directive, or a node.id
+ * (resolved to that node's task slug at DSL time).
+ */
 export interface CaseEntry {
+	id?: string;
 	name: string;
 	condition: string;
 	then: string;
 }
+
+/**
+ * How a `switch` node is modeled, decided once per node when the DSL is loaded and then carried in
+ * `node.data`:
+ *
+ * - `branches` — each case owns a lane that runs its own tasks and then rejoins the main chain.
+ *   Drawn side by side like a fork, and the only shape the builder itself produces.
+ * - `jump` — the raw DSL shape: cases name sibling tasks in the same flat list, and a jumped-to
+ *   task falls through into the next sibling when it finishes. Read-only as far as lanes go; the
+ *   canvas draws labeled jump edges over the flat chain instead. Hand-written DSL lands here
+ *   whenever it doesn't match what `branches` round-trips to, so nothing an author wrote is
+ *   silently restructured.
+ */
+export type SwitchMode = 'branches' | 'jump';
 
 /** Event filter for Listen task. */
 export interface EventEntry {
@@ -150,7 +177,16 @@ export const NODE_META: Record<WorkflowNodeType, NodeMeta> = {
 		showInPalette: true,
 		defaultData: {
 			label: 'Switch',
-			cases: [] as CaseEntry[],
+			switchMode: 'branches' as SwitchMode,
+			// A new switch starts with one guarded branch and the always-present "otherwise" (a case
+			// with no `when`), so the node is a complete, runnable decision the moment it's dropped —
+			// and so the no-match path is something the user can see and fill in rather than an
+			// invisible fall-through. `id`s are filled in at drop time (see `createNode`), since
+			// `defaultData` is a shared literal and every case needs its own stable scope key.
+			cases: [
+				{ name: 'case1', condition: '${ . }', then: 'continue' },
+				{ name: 'otherwise', condition: '', then: 'continue' }
+			] as CaseEntry[],
 			...EMPTY_FLOW
 		}
 	},
@@ -283,6 +319,29 @@ export const NODE_META: Record<WorkflowNodeType, NodeMeta> = {
 };
 
 export const NODE_TYPES = Object.keys(NODE_META) as WorkflowNodeType[];
+
+/**
+ * A node's starting `data`, safe to hand to a brand-new node. `NODE_META[...].defaultData` is one
+ * shared literal, so its arrays must be copied rather than aliased — without this, two Switch nodes
+ * would edit the same `cases` array.
+ *
+ * It also mints the stable per-case `id`s a switch's lanes are keyed by (see `switchCaseScopeKey`),
+ * which can't live in the shared literal for the same reason.
+ */
+export function freshNodeData(type: WorkflowNodeType): Record<string, unknown> {
+	const data: Record<string, unknown> = { ...NODE_META[type].defaultData };
+	for (const [key, value] of Object.entries(data)) {
+		if (Array.isArray(value)) {
+			data[key] = value.map((item) =>
+				item && typeof item === 'object' ? { ...(item as object) } : item
+			);
+		}
+	}
+	if (type === 'switch') {
+		data.cases = (data.cases as CaseEntry[]).map((c) => ({ ...c, id: crypto.randomUUID() }));
+	}
+	return data;
+}
 
 export const CATEGORY_LABELS: Record<string, string> = {
 	action: 'Actions',

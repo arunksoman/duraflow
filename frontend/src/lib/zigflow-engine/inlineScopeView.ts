@@ -1,7 +1,13 @@
 import type { Node, Edge } from '@xyflow/svelte';
 import type { ScopeGraph } from './graph';
-import { forScopeKey, tryScopeKey, catchScopeKey, forkBranchScopeKey } from './scopeKey';
-import type { BranchEntry, CaseEntry } from '../components/builder/builderConfig';
+import {
+	forScopeKey,
+	tryScopeKey,
+	catchScopeKey,
+	forkBranchScopeKey,
+	switchCaseScopeKey
+} from './scopeKey';
+import type { BranchEntry, CaseEntry, SwitchMode } from '../components/builder/builderConfig';
 import {
 	layoutScopeRecursive,
 	orderNodesInScope,
@@ -67,20 +73,30 @@ function buildOwnerMap(nodes: Node[]): Map<string, string> {
 }
 
 /**
- * One inline lane a container node (`for`/bare-`do`, `try`, `fork`) needs on the canvas, and
- * the real scope key backing it. `redirectContinuation` is set ONLY for try's first (try-body)
- * lane — see `analyzeContainerNodes` below for what that actually changes.
+ * One inline lane a container node (`for`/bare-`do`, `try`, `fork`, a branch-mode `switch`) needs
+ * on the canvas, and the real scope key backing it.
+ *
+ * Two flags change how the owning node's *continuation* (what runs after it) is drawn, and at most
+ * one of them is ever set on a given node's lanes:
+ *
+ * - `redirectContinuation` — try's first lane only: the continuation is re-sourced from the end of
+ *   that one lane, because a try that doesn't throw carries straight on from its own body.
+ * - `convergeContinuation` — every lane of a branch-mode switch: each lane gets its own edge to
+ *   the continuation, because exactly one branch runs and then they all rejoin. This is what makes
+ *   a switch draw as a diamond instead of a chain.
  */
 interface LaneSpec {
 	key: string;
 	label: string;
 	redirectContinuation?: boolean;
+	convergeContinuation?: boolean;
 }
 
 /**
  * Single data-driven table replacing what used to be three separate `if (n.type !== 'try')
- * continue` guards. Re-derives fresh from `node.data.branches` every call, so fork branch
- * add/remove needs no special-casing anywhere else — every consumer just calls this again.
+ * continue` guards. Re-derives fresh from `node.data.branches` / `node.data.cases` every call, so
+ * a fork branch or switch case added/removed needs no special-casing anywhere else — every
+ * consumer just calls this again.
  */
 function laneSpecsFor(node: Node, parentScopeId: string): LaneSpec[] {
 	switch (node.type) {
@@ -97,6 +113,17 @@ function laneSpecsFor(node: Node, parentScopeId: string): LaneSpec[] {
 			return branches.map((b) => ({
 				key: forkBranchScopeKey(parentScopeId, node.id, b.id),
 				label: b.name || 'branch'
+			}));
+		}
+		case 'switch': {
+			// `jump` mode is DSL this engine didn't write, whose cases point at ordinary sibling
+			// tasks — there are no branch bodies to inline, so it gets no lanes and is drawn with
+			// labeled jump edges instead (`computeSwitchCaseEdges`).
+			if (switchModeOf(node) !== 'branches') return [];
+			return switchCasesOf(node).map((c, i) => ({
+				key: switchCaseScopeKey(parentScopeId, node.id, c.id ?? String(i)),
+				label: c.name || `case ${i + 1}`,
+				convergeContinuation: true
 			}));
 		}
 		default:
@@ -139,6 +166,29 @@ function continuationEdge(sourceId: string, targetId: string, ownerNodeId: strin
 	};
 }
 
+/**
+ * One branch-mode switch lane rejoining the main chain. Unlike `continuationEdge` there are N of
+ * these per node (one per lane), so the id is keyed by lane rather than by owner.
+ */
+function convergeEdge(
+	sourceId: string,
+	targetId: string,
+	ownerNodeId: string,
+	laneKey: string,
+	label?: string
+): Edge {
+	return {
+		id: `converge-edge-${laneKey}`,
+		source: sourceId,
+		target: targetId,
+		type: 'default',
+		...(label ? { label } : {}),
+		data: { [SYNTHETIC_SCOPE_EDGE_TAG]: true, ownerNodeId, laneKey, kind: 'converge' },
+		deletable: false,
+		selectable: false
+	};
+}
+
 function terminalEdge(sourceId: string, targetId: string): Edge {
 	return {
 		id: `terminal-edge-${sourceId}`,
@@ -164,6 +214,8 @@ interface ContainerNodeAnalysis {
 	entrySources: string[];
 	/** Set only when some lane was flagged `redirectContinuation` (currently: try's first lane). */
 	continuationSourceId?: string;
+	/** True when the lanes were flagged `convergeContinuation` (currently: a branch-mode switch). */
+	converges: boolean;
 	/** The real (persisted) edge from this node to whatever runs after it, if any. */
 	mainContinuationEdge?: Edge;
 }
@@ -171,10 +223,15 @@ interface ContainerNodeAnalysis {
 /**
  * Shared traversal behind `computeLiveSyntheticEdges` and `computeHiddenRealEdgeIds`: for every
  * container node (any type with lane specs) in the currently-displayed `nodes`, works out each
- * lane's ordering and — only for lanes flagged `redirectContinuation` — where the *next* lane's
- * entry edge and the main continuation edge should actually be sourced from instead of the control
- * node. `for`/`do`/`fork` lanes never redirect (they're genuine pass-throughs/fan-outs, not
- * "maybe-diverts-but-still-continues" like `try`), so this only ever fires for `try`.
+ * lane's ordering and how the node's continuation should be drawn:
+ *
+ * - default (`for`/`do`/`fork`) — untouched. These are genuine pass-throughs/fan-outs: the real
+ *   chain edge out of the node already says what happens next.
+ * - `redirectContinuation` (try's first lane) — re-sourced from the end of that lane.
+ * - `convergeContinuation` (a branch-mode switch's lanes) — one edge per lane, from the end of
+ *   each, all landing on the same continuation target.
+ *
+ * The last two both supersede the real chain edge, which `computeHiddenRealEdgeIds` then hides.
  */
 function analyzeContainerNodes(nodes: Node[], edges: Edge[]): ContainerNodeAnalysis[] {
 	const ownerOf = buildOwnerMap(nodes);
@@ -190,6 +247,7 @@ function analyzeContainerNodes(nodes: Node[], edges: Edge[]): ContainerNodeAnaly
 		const entrySources: string[] = [];
 		let entrySourceId = n.id;
 		let continuationSourceId: string | undefined;
+		let converges = false;
 
 		for (const spec of specs) {
 			entrySources.push(entrySourceId);
@@ -202,6 +260,8 @@ function analyzeContainerNodes(nodes: Node[], edges: Edge[]): ContainerNodeAnaly
 			const last = ordered[ordered.length - 1];
 			lanes.push({ spec, first, last });
 
+			if (spec.convergeContinuation) converges = true;
+
 			if (spec.redirectContinuation) {
 				entrySourceId = last?.id ?? entrySourceId;
 				continuationSourceId = last?.id ?? n.id;
@@ -210,27 +270,36 @@ function analyzeContainerNodes(nodes: Node[], edges: Edge[]): ContainerNodeAnaly
 			}
 		}
 
-		const mainContinuationEdge = continuationSourceId
-			? edges.find(
-					(e) =>
-						e.source === n.id &&
-						!(e.data as Record<string, unknown> | undefined)?.[SYNTHETIC_SCOPE_EDGE_TAG]
-				)
-			: undefined;
+		const mainContinuationEdge =
+			continuationSourceId || converges
+				? edges.find(
+						(e) =>
+							e.source === n.id &&
+							!(e.data as Record<string, unknown> | undefined)?.[SYNTHETIC_SCOPE_EDGE_TAG]
+					)
+				: undefined;
 
-		result.push({ node: n, lanes, entrySources, continuationSourceId, mainContinuationEdge });
+		result.push({
+			node: n,
+			lanes,
+			entrySources,
+			continuationSourceId,
+			converges,
+			mainContinuationEdge
+		});
 	}
 
 	return result;
 }
 
 /**
- * Computes every inline lane's entry edge (e.g. "body", "try", "catch", or a fork branch's real
- * `name`) plus, only for `try`, the relocated continuation edge — directly from the *currently
- * displayed* `nodes`/`edges` (via their `__ownerScopeId` tags) rather than a one-off scope lookup,
- * so this can be recomputed as a plain reactive `$derived`/effect input off `nodes`/`edges` in the
- * Svelte layer (a node dropped into a lane after the initial load still gets an edge pointing at
- * it, and a fork branch added/removed at runtime is reflected with no extra bookkeeping).
+ * Computes every inline lane's entry edge (e.g. "body", "try", "catch", a fork branch's real
+ * `name`, or a switch case's) plus the relocated/converging continuation edges — directly from the
+ * *currently displayed* `nodes`/`edges` (via their `__ownerScopeId` tags) rather than a one-off
+ * scope lookup, so this can be recomputed as a plain reactive `$derived`/effect input off
+ * `nodes`/`edges` in the Svelte layer (a node dropped into a lane after the initial load still gets
+ * an edge pointing at it, and a fork branch or switch case added/removed at runtime is reflected
+ * with no extra bookkeeping).
  */
 export function computeLiveSyntheticEdges(nodes: Node[], edges: Edge[]): Edge[] {
 	const synthesized: Edge[] = [];
@@ -246,6 +315,24 @@ export function computeLiveSyntheticEdges(nodes: Node[], edges: Edge[]): Edge[] 
 			synthesized.push(
 				continuationEdge(a.continuationSourceId, a.mainContinuationEdge.target, a.node.id)
 			);
+		}
+		// One converge edge per lane, closing the diamond. A lane with nothing in it converges from
+		// the control node itself — that branch really does run straight through — and since the
+		// real chain edge it duplicates is hidden, the picture stays honest rather than doubled.
+		// An empty lane has no entry edge to carry its name, so its converge edge wears the label
+		// instead; otherwise an untouched "otherwise" branch would be an unlabeled line.
+		if (a.converges && a.mainContinuationEdge) {
+			for (const lane of a.lanes) {
+				synthesized.push(
+					convergeEdge(
+						lane.last?.id ?? a.node.id,
+						a.mainContinuationEdge.target,
+						a.node.id,
+						lane.spec.key,
+						lane.first ? undefined : lane.spec.label
+					)
+				);
+			}
 		}
 	}
 	return synthesized;
@@ -283,6 +370,13 @@ function switchCasesOf(node: Node): CaseEntry[] {
 	return Array.isArray(cases) ? (cases as CaseEntry[]) : [];
 }
 
+/** Defaults to `branches` — a switch with no mode recorded is one the builder itself made. */
+function switchModeOf(node: Node): SwitchMode {
+	return (
+		((node.data as Record<string, unknown> | undefined)?.switchMode as SwitchMode) ?? 'branches'
+	);
+}
+
 /** The real (persisted) "and then the next sibling runs" edge leaving a node, if there is one. */
 function fallThroughTargetOf(nodeId: string, edges: Edge[]): string | undefined {
 	return edges.find((e) => e.source === nodeId && !isSyntheticEdge(e))?.target;
@@ -315,18 +409,19 @@ function switchCaseTargetId(
 }
 
 /**
- * One labeled edge per `switch` case, from the switch to wherever that case's `then` sends the run.
+ * One labeled edge per case of a **jump-mode** `switch`, from the switch to wherever that case's
+ * `then` sends the run.
  *
- * Without these a switch is indistinguishable from any other task on the canvas: its cases live
- * only in `node.data.cases`, while the only edges a scope persists are the plain "next sibling"
- * chain — so back-to-back switches rendered as a straight column, with nothing showing which task
- * each case actually jumps to. These are display-only (tagged synthetic, so
- * `decomposeDisplayedScope` never writes them back): the DSL's `then` remains the single source of
- * truth, edited in the node panel, never by dragging an edge.
+ * Branch-mode switches don't come through here at all — their cases own lanes, drawn by
+ * `computeLiveSyntheticEdges` like a fork's. This is the fallback for DSL this engine didn't
+ * write, whose cases name ordinary sibling tasks in a flat list: without these edges such a switch
+ * is indistinguishable from any other task on the canvas, since its routing lives only in
+ * `node.data.cases` while the only edges a scope persists are the plain "next sibling" chain.
  *
- * Note the plain chain edges are kept *as well* — a jumped-to task still falls through to the next
- * sibling once it finishes, so those arrows are real flow, not an artifact. The one case where they
- * lie is handled in `computeHiddenRealEdgeIds`.
+ * Display-only (tagged synthetic, so `decomposeDisplayedScope` never writes them back): the DSL's
+ * `then` stays the single source of truth, edited in the node panel, never by dragging an edge.
+ * The plain chain edges are kept *as well* — in this shape a jumped-to task really does fall
+ * through into the next sibling once it finishes, so those arrows are real flow, not an artifact.
  */
 export function computeSwitchCaseEdges(nodes: Node[], edges: Edge[]): Edge[] {
 	const ownerOf = buildOwnerMap(nodes);
@@ -335,7 +430,7 @@ export function computeSwitchCaseEdges(nodes: Node[], edges: Edge[]): Edge[] {
 	const caseEdges: Edge[] = [];
 
 	for (const node of nodes) {
-		if (node.type !== 'switch') continue;
+		if (node.type !== 'switch' || switchModeOf(node) !== 'jump') continue;
 		const cases = switchCasesOf(node);
 		if (cases.length === 0) continue;
 
@@ -384,47 +479,28 @@ export function computeSwitchCaseEdges(nodes: Node[], edges: Edge[]): Edge[] {
 }
 
 /**
- * Ids of real (persisted) edges that `computeLiveSyntheticEdges` has visually replaced with a
- * relocated continuation edge — currently only ever fires for `try` (see `analyzeContainerNodes`).
- * These must be rendered `hidden: true` rather than removed outright, since the real edge (`try ->
- * next`) still has to survive in `scopes` for DSL ordering to stay correct; only its on-canvas
+ * Ids of real (persisted) edges that `computeLiveSyntheticEdges` has visually replaced: `try`'s
+ * relocated continuation, and a branch-mode `switch`'s chain edge, which its lanes' converge edges
+ * already draw (see `analyzeContainerNodes`). These are rendered `hidden: true` rather than removed
+ * outright, since the real edge still has to survive in `scopes` for DSL ordering to stay correct —
+ * it is what tells the serializer which task a branch converges *onto*. Only its on-canvas
  * presentation is superseded.
+ *
+ * Nothing is hidden for a jump-mode switch: there the chain edge is real flow (a jumped-to task
+ * falls through into the next sibling), and hiding it would strand the following task with no
+ * visible way in.
  *
  * Known limitation: because the visible replacement is a non-reconnectable synthetic edge (see
  * `ReconnectableEdge.svelte`), there's currently no drag-to-reconnect way to change "what runs
- * after this try/catch" from the canvas — use the DSL editor for that instead.
- *
- * Also hides a `switch`'s fall-through edge in the one case it can't fire (see
- * `switchNeverFallsThrough`) — there the case edges from `computeSwitchCaseEdges` are the whole
- * truth, and leaving the straight chain arrow up reads as "this switch continues to the next task"
- * when it never does.
+ * after this try/catch or switch" from the canvas — use the DSL editor for that instead.
  */
 export function computeHiddenRealEdgeIds(nodes: Node[], edges: Edge[]): Set<string> {
 	const ids = new Set<string>();
 	for (const a of analyzeContainerNodes(nodes, edges)) {
-		if (a.continuationSourceId && a.mainContinuationEdge) ids.add(a.mainContinuationEdge.id);
-	}
-	for (const node of nodes) {
-		if (node.type !== 'switch' || !switchNeverFallsThrough(switchCasesOf(node))) continue;
-		const fallThrough = edges.find((e) => e.source === node.id && !isSyntheticEdge(e));
-		if (fallThrough) ids.add(fallThrough.id);
+		const superseded = Boolean(a.continuationSourceId) || a.converges;
+		if (superseded && a.mainContinuationEdge) ids.add(a.mainContinuationEdge.id);
 	}
 	return ids;
-}
-
-/**
- * True when every run through this switch is guaranteed to leave via one of its own cases, so the
- * plain "next sibling" chain edge is unreachable: it needs an unconditional (default) case — one
- * with no `when`, which always matches if nothing before it did — and no case whose `then` is
- * `continue`, since that directive *is* the fall-through and gets its own labeled edge to the same
- * target. A switch whose cases are all conditional keeps its chain edge, because with nothing
- * matching the run really does carry on to the next task.
- */
-function switchNeverFallsThrough(cases: CaseEntry[]): boolean {
-	if (cases.length === 0) return false;
-	const hasDefault = cases.some((c) => !c.condition?.trim());
-	const hasContinue = cases.some((c) => c.then === 'continue');
-	return hasDefault && !hasContinue;
 }
 
 /**

@@ -28,3 +28,17 @@ export function forkBranchScopeKey(
 ): string {
 	return `${parentScopeId}/${forkNodeId}/branch/${branchId}`;
 }
+
+/**
+ * One `switch` case's branch body. Unlike the other nested scopes above, this one has no single
+ * DSL node behind it: a switch case is `then: <sibling task name>`, and the builder materialises
+ * that sibling as a `do:` task carrying the branch (see `graph.ts`). Keyed by the case's stable
+ * `id` — never its mutable `name` — exactly like a fork branch.
+ */
+export function switchCaseScopeKey(
+	parentScopeId: string,
+	switchNodeId: string,
+	caseId: string
+): string {
+	return `${parentScopeId}/${switchNodeId}/case/${caseId}`;
+}

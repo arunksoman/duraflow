@@ -19,6 +19,7 @@ import {
 	tryScopeKey,
 	catchScopeKey,
 	forkBranchScopeKey,
+	switchCaseScopeKey,
 	ROOT_SCOPE_ID
 } from './scopeKey';
 
@@ -652,6 +653,7 @@ describe('computeSwitchCaseEdges', () => {
 			node('start', 'start', { [OWNER_SCOPE_TAG]: ROOT_SCOPE_ID }),
 			node('switcher', 'switch', {
 				[OWNER_SCOPE_TAG]: ROOT_SCOPE_ID,
+				switchMode: 'jump',
 				cases: [
 					{
 						name: 'electronic',
@@ -711,6 +713,7 @@ describe('computeSwitchCaseEdges', () => {
 		const nodes = [
 			node('flowSwitcher', 'switch', {
 				[OWNER_SCOPE_TAG]: ROOT_SCOPE_ID,
+				switchMode: 'jump',
 				cases: [
 					{ name: 'keepGoing', condition: '${ .flow == "continue" }', then: 'continue' },
 					{ name: 'bailOut', condition: '${ .flow == "exit" }', then: 'exit' },
@@ -733,6 +736,7 @@ describe('computeSwitchCaseEdges', () => {
 		const nodes = [
 			node('flowSwitcher', 'switch', {
 				[OWNER_SCOPE_TAG]: ROOT_SCOPE_ID,
+				switchMode: 'jump',
 				cases: [{ name: 'end', condition: '', then: 'end' }]
 			}),
 			node('end', 'end', { [OWNER_SCOPE_TAG]: ROOT_SCOPE_ID })
@@ -745,6 +749,7 @@ describe('computeSwitchCaseEdges', () => {
 		const nodes = [
 			node('switcher', 'switch', {
 				[OWNER_SCOPE_TAG]: ROOT_SCOPE_ID,
+				switchMode: 'jump',
 				cases: [
 					{ name: 'nested', condition: '', then: 'insideLoop' },
 					{ name: 'gone', condition: '', then: 'deletedNodeId' }
@@ -756,8 +761,22 @@ describe('computeSwitchCaseEdges', () => {
 	});
 
 	it('draws nothing for a switch with no cases yet', () => {
-		const nodes = [node('switcher', 'switch', { [OWNER_SCOPE_TAG]: ROOT_SCOPE_ID })];
+		const nodes = [
+			node('switcher', 'switch', { [OWNER_SCOPE_TAG]: ROOT_SCOPE_ID, switchMode: 'jump' })
+		];
 		expect(computeSwitchCaseEdges(nodes, [])).toHaveLength(0);
+	});
+
+	it('draws nothing for a branch-mode switch — its cases own lanes instead', () => {
+		const nodes = [
+			node('switcher', 'switch', {
+				[OWNER_SCOPE_TAG]: ROOT_SCOPE_ID,
+				switchMode: 'branches',
+				cases: [{ id: 'c1', name: 'always', condition: '', then: 'continue' }]
+			}),
+			node('handler', 'call', { [OWNER_SCOPE_TAG]: ROOT_SCOPE_ID })
+		];
+		expect(computeSwitchCaseEdges(nodes, chain(['switcher', 'handler']))).toHaveLength(0);
 	});
 
 	it('is wired into composeScopeForDisplay', () => {
@@ -766,6 +785,7 @@ describe('computeSwitchCaseEdges', () => {
 				nodes: [
 					node('start', 'start'),
 					node('switcher', 'switch', {
+						switchMode: 'jump',
 						cases: [{ name: 'always', condition: '', then: 'handler' }]
 					}),
 					node('handler', 'call'),
@@ -783,34 +803,118 @@ describe('computeSwitchCaseEdges', () => {
 	});
 });
 
-describe('computeHiddenRealEdgeIds — switch fall-through', () => {
-	function switchScope(cases: Record<string, unknown>[]) {
-		const nodes = [
-			node('switcher', 'switch', { [OWNER_SCOPE_TAG]: ROOT_SCOPE_ID, cases }),
-			node('next', 'wait', { [OWNER_SCOPE_TAG]: ROOT_SCOPE_ID }),
-			node('end', 'end', { [OWNER_SCOPE_TAG]: ROOT_SCOPE_ID })
+describe('composeScopeForDisplay — switch (branch mode: N converging lanes)', () => {
+	/** A switch with three branches and a task after it for them to rejoin. */
+	function branchScopes() {
+		const cases = [
+			{ id: 'c1', name: 'electronic', condition: '${ .t == "e" }', then: 'continue' },
+			{ id: 'c2', name: 'physical', condition: '${ .t == "p" }', then: 'continue' },
+			{ id: 'c3', name: 'otherwise', condition: '', then: 'continue' }
 		];
-		return { nodes, edges: chain(['switcher', 'next', 'end']) };
+		const scopes: Record<string, ScopeGraph> = {
+			[ROOT_SCOPE_ID]: {
+				nodes: [
+					node('start', 'start'),
+					node('switcher', 'switch', { switchMode: 'branches', cases }),
+					node('after', 'set'),
+					node('end', 'end')
+				],
+				edges: chain(['start', 'switcher', 'after', 'end'])
+			},
+			[switchCaseScopeKey(ROOT_SCOPE_ID, 'switcher', 'c1')]: {
+				nodes: [node('ship'), node('invoice')],
+				edges: chain(['ship', 'invoice'])
+			},
+			[switchCaseScopeKey(ROOT_SCOPE_ID, 'switcher', 'c2')]: {
+				nodes: [node('pack')],
+				edges: []
+			},
+			[switchCaseScopeKey(ROOT_SCOPE_ID, 'switcher', 'c3')]: { nodes: [], edges: [] }
+		};
+		return scopes;
 	}
 
-	it('hides the chain edge when an unconditional case makes fall-through unreachable', () => {
-		const { nodes, edges } = switchScope([
-			{ name: 'a', condition: '${ .x }', then: 'end' },
-			{ name: 'default', condition: '', then: 'end' }
+	it('inlines every case as its own lane, labeled with the case name, all sourced from the switch', () => {
+		const result = composeScopeForDisplay(branchScopes(), ROOT_SCOPE_ID);
+		const entries = result.edges.filter(
+			(e) => (e.data as Record<string, unknown>)?.kind === 'entry'
+		);
+		expect(entries.map((e) => [e.label, e.target])).toEqual([
+			['electronic', 'ship'],
+			['physical', 'pack']
 		]);
-		expect([...computeHiddenRealEdgeIds(nodes, edges)]).toEqual(['e-switcher-next']);
+		expect(entries.every((e) => e.source === 'switcher')).toBe(true);
+		expect(
+			(result.nodes.find((n) => n.id === 'ship')!.data as Record<string, unknown>)[OWNER_SCOPE_TAG]
+		).toBe(switchCaseScopeKey(ROOT_SCOPE_ID, 'switcher', 'c1'));
 	});
 
-	it('keeps the chain edge when every case is conditional — nothing matching really does fall through', () => {
-		const { nodes, edges } = switchScope([{ name: 'a', condition: '${ .x }', then: 'end' }]);
-		expect(computeHiddenRealEdgeIds(nodes, edges).size).toBe(0);
+	it('converges every lane onto the task after the switch, and hides the chain edge they replace', () => {
+		const result = composeScopeForDisplay(branchScopes(), ROOT_SCOPE_ID);
+		const converge = result.edges.filter(
+			(e) => (e.data as Record<string, unknown>)?.kind === 'converge'
+		);
+		// last of each lane, and the switch itself standing in for the empty "otherwise" lane
+		expect(converge.map((e) => e.source).sort()).toEqual(['invoice', 'pack', 'switcher']);
+		expect(converge.every((e) => e.target === 'after')).toBe(true);
+
+		const chainEdge = result.edges.find((e) => e.id === 'e-switcher-after')!;
+		expect(chainEdge.hidden).toBe(true);
+		// still persisted — it is what tells the serializer where the branches converge
+		expect(
+			decomposeDisplayedScope(result.nodes, result.edges)[ROOT_SCOPE_ID].edges.map((e) => e.id)
+		).toContain('e-switcher-after');
 	});
 
-	it('keeps the chain edge when a case continues — that case owns the same target', () => {
-		const { nodes, edges } = switchScope([
-			{ name: 'a', condition: '${ .x }', then: 'end' },
-			{ name: 'default', condition: '', then: 'continue' }
+	it('draws no case edges for a branch-mode switch — lanes carry the routing', () => {
+		const result = composeScopeForDisplay(branchScopes(), ROOT_SCOPE_ID);
+		expect(result.edges.filter((e) => e.type === SWITCH_CASE_EDGE_TYPE)).toHaveLength(0);
+	});
+
+	it('lets the terminal edge handle a switch that is last in its scope, with nothing to converge onto', () => {
+		const scopes: Record<string, ScopeGraph> = {
+			[ROOT_SCOPE_ID]: {
+				nodes: [
+					node('start', 'start'),
+					node('switcher', 'switch', {
+						switchMode: 'branches',
+						cases: [{ id: 'c1', name: 'only', condition: '', then: 'continue' }]
+					}),
+					node('end', 'end')
+				],
+				edges: chain(['start', 'switcher', 'end'])
+			},
+			[switchCaseScopeKey(ROOT_SCOPE_ID, 'switcher', 'c1')]: { nodes: [node('work')], edges: [] }
+		};
+		const result = composeScopeForDisplay(scopes, ROOT_SCOPE_ID);
+		// the switch's only outgoing chain edge already goes to `end`, so that IS the converge target
+		expect(
+			result.edges
+				.filter((e) => (e.data as Record<string, unknown>)?.kind === 'converge')
+				.map((e) => [e.source, e.target])
+		).toEqual([['work', 'end']]);
+	});
+
+	it('gives every case a lane bounding box, so a brand-new empty branch is still a drop target', () => {
+		const result = composeScopeForDisplay(branchScopes(), ROOT_SCOPE_ID);
+		for (const caseId of ['c1', 'c2', 'c3']) {
+			expect(result.laneBounds.has(switchCaseScopeKey(ROOT_SCOPE_ID, 'switcher', caseId))).toBe(
+				true
+			);
+		}
+	});
+
+	it('prunes every case lane when the switch node is deleted', () => {
+		const switchNode = node('switcher', 'switch', {
+			switchMode: 'branches',
+			cases: [
+				{ id: 'c1', name: 'a', condition: '', then: 'continue' },
+				{ id: 'c2', name: 'b', condition: '', then: 'continue' }
+			]
+		});
+		expect(collectDescendantScopeKeysForNode(switchNode, ROOT_SCOPE_ID, [switchNode])).toEqual([
+			switchCaseScopeKey(ROOT_SCOPE_ID, 'switcher', 'c1'),
+			switchCaseScopeKey(ROOT_SCOPE_ID, 'switcher', 'c2')
 		]);
-		expect(computeHiddenRealEdgeIds(nodes, edges).size).toBe(0);
 	});
 });
