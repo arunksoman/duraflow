@@ -24,38 +24,39 @@ export interface VarEntry {
 }
 
 /**
- * One `switch` case.
+ * Where one `switch` case sends the run.
  *
- * In `branches` mode (`SwitchMode` below, the default and the only mode the builder authors) a
- * case owns an inline lane on the canvas: `id` is its stable scope key — independent of the
- * mutable `name`, exactly like `BranchEntry` — `condition` is the `when:` guard, an empty one
- * meaning "otherwise", and `then` is unused because where a branch goes when it finishes is
- * derived (it converges past its siblings onto whatever follows the switch).
+ * - `task` — a jump at a task the switch can reach: a sibling in its own scope, or a named
+ *   workflow declared alongside the primary one (`then: processElectronicOrder`). This is the only
+ *   shape the DSL has for "go and do that" — a case never owns a body of its own.
+ * - `continue` / `exit` / `end` — the DSL's flow directives, taken as written.
  *
- * In `jump` mode — DSL the builder didn't write, whose cases point into a flat sibling list — `id`
- * is absent, there are no lanes, and `then` is the real target: a flow directive, or a node.id
- * (resolved to that node's task slug at DSL time).
+ * Note there is deliberately no "own branch" routing. A case's `then:` either names something that
+ * already exists or is a directive; a branch that runs and then rejoins is not expressible, because
+ * a named workflow runs to its *own* End (verified against `zigflow graph`).
  */
-export interface CaseEntry {
-	id?: string;
-	name: string;
-	condition: string;
-	then: string;
-}
+export type CaseRouting = 'task' | 'continue' | 'exit' | 'end';
 
 /**
- * How a `switch` node is modeled, decided once per node when the DSL is loaded and then carried in
- * `node.data`:
- *
- * - `branches` — each case owns a lane that runs its own tasks and then rejoins the main chain.
- *   Drawn side by side like a fork, and the only shape the builder itself produces.
- * - `jump` — the raw DSL shape: cases name sibling tasks in the same flat list, and a jumped-to
- *   task falls through into the next sibling when it finishes. Read-only as far as lanes go; the
- *   canvas draws labeled jump edges over the flat chain instead. Hand-written DSL lands here
- *   whenever it doesn't match what `branches` round-trips to, so nothing an author wrote is
- *   silently restructured.
+ * One `switch` case — a condition plus where it sends the run. Cases are evaluated top to bottom
+ * and the first match wins, so the array order is the DSL order.
  */
-export type SwitchMode = 'branches' | 'jump';
+export interface CaseEntry {
+	/** Stable id, independent of the mutable `name` — exactly like `BranchEntry`. */
+	id: string;
+	/** The case's own name, emitted as the `switch:` entry's key. */
+	name: string;
+	/** The `when:` guard. Blank means "otherwise" — the case matches whatever reaches it. */
+	condition: string;
+	routing: CaseRouting;
+	/**
+	 * `routing: 'task'` — the jumped-at task's name as the document had it, used when
+	 * `targetNodeId` no longer resolves (or never did, for a `then:` naming nothing on the canvas).
+	 */
+	taskName?: string;
+	/** `routing: 'task'` only — the node jumped at, so renaming that task keeps the jump. */
+	targetNodeId?: string;
+}
 
 /** Event filter for Listen task. */
 export interface EventEntry {
@@ -108,6 +109,35 @@ export const NODE_META: Record<WorkflowNodeType, NodeMeta> = {
 		category: 'terminal',
 		showInPalette: false,
 		defaultData: { label: 'Start', variables: [] as VarEntry[] }
+	},
+	workflow: {
+		// A root-level `do:` task is a *separate Temporal workflow* named after the task key — the
+		// document's `do:` list can hold several, and `zigflow graph` draws each as its own boxed
+		// sub-flow with its own Start and End. So this is the real "add a Start" gesture: it declares
+		// another workflow beside the primary one. (The `start` node type above is the primary
+		// workflow's single entry point, materialised by the engine, never dropped by hand.)
+		label: 'Start',
+		description: 'Declare another named workflow in this document — with its own start and end',
+		icon: CirclePlay,
+		color: '#22c55e',
+		category: 'terminal',
+		showInPalette: true,
+		// Dropping one asks for the workflow's name straight away (see `WorkflowNameDialog`); this is
+		// only what the field is seeded with. `variables` works exactly as it does on the primary
+		// workflow's Start: it becomes a leading `init: set:` inside this workflow's own `do:`.
+		defaultData: { label: 'Workflow', variables: [] as VarEntry[], ...EMPTY_FLOW }
+	},
+	do: {
+		// Only ever a *nested* grouping task now: at the root a `do:` task is a whole workflow (see
+		// `workflow` above), so nothing drops one of these — they come from hand-written DSL that
+		// groups steps inside a `for`/`try`/`fork` body.
+		label: 'Group',
+		description: 'A named group of steps run in sequence (`do:`)',
+		icon: CheckSquare,
+		color: '#64748b',
+		category: 'structure',
+		showInPalette: false,
+		defaultData: { label: 'Group', ...EMPTY_FLOW }
 	},
 	end: {
 		label: 'End',
@@ -170,22 +200,22 @@ export const NODE_META: Record<WorkflowNodeType, NodeMeta> = {
 	},
 	switch: {
 		label: 'Switch',
-		description: 'Conditional branching — cases evaluated in order, first match wins',
+		description:
+			'Conditional branching — drag from it to a node to add a case; click a case edge to edit its condition',
 		icon: GitBranch,
 		color: '#06b6d4',
 		category: 'control',
 		showInPalette: true,
 		defaultData: {
 			label: 'Switch',
-			switchMode: 'branches' as SwitchMode,
 			// A new switch starts with one guarded branch and the always-present "otherwise" (a case
 			// with no `when`), so the node is a complete, runnable decision the moment it's dropped —
 			// and so the no-match path is something the user can see and fill in rather than an
-			// invisible fall-through. `id`s are filled in at drop time (see `createNode`), since
+			// invisible fall-through. `id`s are filled in at drop time (see `freshNodeData`), since
 			// `defaultData` is a shared literal and every case needs its own stable scope key.
 			cases: [
-				{ name: 'case1', condition: '${ . }', then: 'continue' },
-				{ name: 'otherwise', condition: '', then: 'continue' }
+				{ id: '', name: 'case1', condition: '${ . }', routing: 'continue' },
+				{ id: '', name: 'otherwise', condition: '', routing: 'continue' }
 			] as CaseEntry[],
 			...EMPTY_FLOW
 		}
@@ -291,15 +321,6 @@ export const NODE_META: Record<WorkflowNodeType, NodeMeta> = {
 			workflowType: '',
 			...EMPTY_FLOW
 		}
-	},
-	do: {
-		label: 'Do',
-		description: 'Sequential task group — shown when hand-written DSL groups tasks explicitly',
-		icon: CheckSquare,
-		color: '#64748b',
-		category: 'control',
-		showInPalette: false,
-		defaultData: { label: 'Do', ...EMPTY_FLOW }
 	},
 	childWorkflow: {
 		label: 'Child Flow',

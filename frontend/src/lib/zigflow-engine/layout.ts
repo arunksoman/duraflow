@@ -53,6 +53,14 @@ export const NODE_CARD_WIDTH = 176;
 /** Horizontal pitch (in flow coordinates) between one inline lane/column and the next. */
 export const INLINE_LANE_OFFSET_X = 260;
 
+/**
+ * Vertical room left above a lane's first node and below its last, so the lane's start/end caps
+ * (drawn by `LaneBoxLayer`) have somewhere to sit inside the lane's frame. Two of these gaps must
+ * stay under one `rowHeight`: `positionChain` pays for them with a single extra reserved row, and
+ * a wider gap would push a lane's frame into the next main-chain node.
+ */
+export const LANE_CAP_GAP = 56;
+
 export interface LaneBounds {
 	x: number;
 	yStart: number;
@@ -122,7 +130,15 @@ function positionChain(
 	let row = 0;
 	let columns = 1;
 
+	// A named workflow is not a step of this chain — it is a separate workflow declared alongside
+	// it, so it gets a column of its own rather than a row (laid out after the chain, below).
+	const standalone: Node[] = [];
+
 	for (const node of ordered) {
+		if (node.type === 'workflow') {
+			standalone.push(node);
+			continue;
+		}
 		node.position = { x: originX, y: originY + row * rowHeight };
 		row++;
 
@@ -138,7 +154,7 @@ function positionChain(
 
 		for (const lane of lanes) {
 			const laneX = originX + colOffset * INLINE_LANE_OFFSET_X;
-			const laneY = originY + laneStartRow * rowHeight;
+			const laneY = originY + laneStartRow * rowHeight + LANE_CAP_GAP;
 			const laneOrdered = orderNodesInScope(lane.nodes, lane.edges);
 			const footprint = positionChain(
 				lane.nodes,
@@ -153,16 +169,50 @@ function positionChain(
 			laneBoundsOut.set(lane.key, {
 				x: laneX,
 				yStart: laneY,
-				yEnd: laneY + Math.max(laneOrdered.length, 1) * rowHeight,
+				yEnd: laneY + Math.max(laneOrdered.length, 1) * rowHeight + LANE_CAP_GAP,
 				width: NODE_CARD_WIDTH
 			});
 
 			colOffset += footprint.columns;
-			maxLaneRows = Math.max(maxLaneRows, footprint.rows);
+			// One row beyond the lane's own chain, which is what pays for the two cap gaps the lane
+			// now spans — without it the next main-chain node would land inside the lane's frame.
+			maxLaneRows = Math.max(maxLaneRows, footprint.rows + 1);
 		}
 
 		columns = Math.max(columns, colOffset);
 		row += maxLaneRows;
+	}
+
+	// Each named workflow starts its own column at the top, with its body running straight down
+	// beneath its Start card — the frame around the pair is what says "this is a whole workflow".
+	for (const node of standalone) {
+		const x = originX + columns * INLINE_LANE_OFFSET_X;
+		node.position = { x, y: originY };
+
+		const lane = laneMap.get(node.id)?.[0];
+		if (!lane) {
+			columns += 1;
+			continue;
+		}
+		const laneY = originY + rowHeight + LANE_CAP_GAP;
+		const laneOrdered = orderNodesInScope(lane.nodes, lane.edges);
+		const footprint = positionChain(
+			lane.nodes,
+			lane.edges,
+			lane.laneMap,
+			x,
+			laneY,
+			rowHeight,
+			laneBoundsOut
+		);
+		laneBoundsOut.set(lane.key, {
+			x,
+			yStart: laneY,
+			yEnd: laneY + Math.max(laneOrdered.length, 1) * rowHeight + LANE_CAP_GAP,
+			width: NODE_CARD_WIDTH
+		});
+		columns += footprint.columns;
+		row = Math.max(row, footprint.rows + 2);
 	}
 
 	return { rows: Math.max(row, 1), columns };

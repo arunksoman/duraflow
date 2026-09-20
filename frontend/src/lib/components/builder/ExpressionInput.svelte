@@ -1,16 +1,6 @@
-<script lang="ts" module>
-	export interface AvailVar {
-		expr: string;
-		hint: string;
-		category: 'input' | 'env' | 'data' | 'context' | 'output';
-		source: string;
-		field: string;
-		rawRef: string;
-	}
-</script>
-
 <script lang="ts">
 	import { untrack } from 'svelte';
+	import type { AvailVar } from './availableVars';
 
 	interface Props {
 		value: string;

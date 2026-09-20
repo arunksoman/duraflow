@@ -3,7 +3,7 @@ import { astToGraph } from './graph';
 import type { ZigflowDocument } from './ast';
 import { buildRunIndex, scopeNameKey } from './runIndex';
 import { resolveNode, resolveScopePath, describeScopePath } from './runScope';
-import { ROOT_SCOPE_ID, forScopeKey, tryScopeKey } from './scopeKey';
+import { ROOT_SCOPE_ID, forScopeKey, tryScopeKey, workflowScopeKey } from './scopeKey';
 
 function header() {
 	return { dsl: '1.0.0', taskQueue: 'zigflow', workflowType: 'example', version: '0.1.0' };
@@ -47,17 +47,37 @@ describe('buildRunIndex', () => {
 	});
 
 	it('records a nested `do` as an inline scope and a `for` as a child workflow scope', () => {
+		// The `do:` group has to be nested: at the root, a `do:` task is a whole separate workflow.
 		const { index } = indexFor({
 			document: header(),
 			do: [
-				{ group: { do: [{ inner: httpTask() }] } },
-				{ loop: { for: { each: 'i', in: '${ [1] }' }, do: [{ looped: httpTask() }] } }
+				{
+					loop: {
+						for: { each: 'i', in: '${ [1] }' },
+						do: [{ group: { do: [{ inner: httpTask() }] } }, { looped: httpTask() }]
+					}
+				}
 			]
 		});
 
-		const children = index.childScopesByParent.get(ROOT_SCOPE_ID) ?? [];
-		expect(children.find((c) => c.kind === 'do')?.inline).toBe(true);
-		expect(children.find((c) => c.kind === 'for')?.inline).toBe(false);
+		const loopScope = index.childScopesByParent.get(ROOT_SCOPE_ID)!.find((c) => c.kind === 'for')!;
+		expect(loopScope.inline).toBe(false);
+		const inner = index.childScopesByParent.get(loopScope.childScopeId) ?? [];
+		expect(inner.find((c) => c.kind === 'do')?.inline).toBe(true);
+	});
+
+	it('indexes a named workflow as its own root, never as a child scope of the primary one', () => {
+		const { index, graph } = indexFor({
+			document: header(),
+			do: [{ fetch: httpTask() }, { handler: { do: [{ inner: httpTask() }] } }]
+		});
+
+		// nothing can resolve a scope path into it — it is a separate Temporal workflow
+		expect(index.childScopesByParent.get(ROOT_SCOPE_ID)).toBeUndefined();
+
+		const handler = graph.scopes[ROOT_SCOPE_ID].nodes.find((n) => n.type === 'workflow')!;
+		const innerId = index.byScopeAndName.get(scopeNameKey(workflowScopeKey(handler.id), 'inner'));
+		expect(innerId).toBeTruthy();
 	});
 
 	it('flags a scope whose two `for` tasks zigflow cannot tell apart', () => {
@@ -156,10 +176,17 @@ describe('resolveNode', () => {
 	it('finds a task inside an inline `do` block reported at the parent scope path', () => {
 		const { index } = indexFor({
 			document: header(),
-			do: [{ group: { do: [{ inner: httpTask() }] } }]
+			do: [
+				{
+					loop: {
+						for: { each: 'i', in: '${ [1] }' },
+						do: [{ group: { do: [{ inner: httpTask() }] } }]
+					}
+				}
+			]
 		});
 
-		const match = resolveNode(index, '', 'inner');
+		const match = resolveNode(index, 'for_0', 'inner');
 		expect(match.confidence).toBe('exact');
 		expect(match.nodeId).toBeTruthy();
 	});

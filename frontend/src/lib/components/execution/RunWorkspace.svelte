@@ -14,6 +14,7 @@
 	import WorkflowNode from '$lib/components/builder/WorkflowNode.svelte';
 	import ReconnectableEdge from '$lib/components/builder/ReconnectableEdge.svelte';
 	import SwitchCaseEdge from '$lib/components/builder/SwitchCaseEdge.svelte';
+	import LaneBoxLayer from '$lib/components/builder/LaneBoxLayer.svelte';
 	import { NODE_META, NODE_TYPES } from '$lib/components/builder/builderConfig';
 	import { TriangleAlert } from '@lucide/svelte';
 	import { RUN_TONE_VAR, runTone } from '$lib/components/builder/runStatus';
@@ -24,7 +25,8 @@
 	import type { NodeRunDetail, NodeRunState } from '$lib/zigflow-engine/runState';
 	import {
 		composeScopeForDisplay,
-		SWITCH_CASE_EDGE_TYPE
+		SWITCH_CASE_EDGE_TYPE,
+		type LaneBox
 	} from '$lib/zigflow-engine/inlineScopeView';
 	import { ROOT_SCOPE_ID } from '$lib/zigflow-engine/scopeKey';
 	import type { WorkflowNodeType } from '$lib/types';
@@ -60,7 +62,7 @@
 	const composed = $derived(
 		Object.keys(scopes).length > 0
 			? composeScopeForDisplay(scopes, ROOT_SCOPE_ID)
-			: { nodes: [] as Node[], edges: [] as Edge[] }
+			: { nodes: [] as Node[], edges: [] as Edge[], laneBoxes: new Map<string, LaneBox>() }
 	);
 
 	const labelById = $derived(
@@ -219,6 +221,7 @@
 					onnodeclick={({ node }) => selectNode(node.id)}
 					onpaneclick={() => (selection = null)}
 				>
+					<LaneBoxLayer boxes={[...composed.laneBoxes.values()]} />
 					<Background variant={BackgroundVariant.Dots} gap={20} size={1.2} />
 					<Controls showLock={false} />
 					<MiniMap zoomable pannable />

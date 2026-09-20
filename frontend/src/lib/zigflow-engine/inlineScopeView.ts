@@ -5,14 +5,16 @@ import {
 	tryScopeKey,
 	catchScopeKey,
 	forkBranchScopeKey,
-	switchCaseScopeKey
+	workflowScopeKey
 } from './scopeKey';
-import type { BranchEntry, CaseEntry, SwitchMode } from '../components/builder/builderConfig';
+import type { BranchEntry, CaseEntry } from '../components/builder/builderConfig';
+import { isDirectiveRouting, switchCasesOf } from './switchCases';
 import {
 	layoutScopeRecursive,
 	orderNodesInScope,
 	NODE_CARD_WIDTH,
 	INLINE_LANE_OFFSET_X,
+	LANE_CAP_GAP,
 	type LaneMap,
 	type ScopeLane,
 	type LaneBounds
@@ -34,8 +36,16 @@ export const OWNER_SCOPE_TAG = '__ownerScopeId';
 /** Marks a synthetic inline-lane edge (entry or continuation) — computed fresh every compose, never persisted. */
 export const SYNTHETIC_SCOPE_EDGE_TAG = 'syntheticScopeEdge';
 
-/** `edge.type` for a switch case's jump edge — resolves to `SwitchCaseEdge.svelte` via `edgeTypes`. */
+/** `edge.type` for a switch case's edge — resolves to `SwitchCaseEdge.svelte` via `edgeTypes`. */
 export const SWITCH_CASE_EDGE_TYPE = 'switchCase';
+
+/**
+ * Tags on a case edge's `data`, read by the builder to open the case editor when one is clicked and
+ * to know which case to drop when one is deleted. Present on both kinds of case edge — the entry
+ * edge into a branch lane, and the jump edge a directive/`task` case draws.
+ */
+export const SWITCH_NODE_TAG = 'switchNodeId';
+export const SWITCH_CASE_TAG = 'switchCaseId';
 
 /** Matches `NODE_META.switch.color`, so a case edge reads as belonging to the switch that owns it. */
 const SWITCH_CASE_COLOR = '#06b6d4';
@@ -45,13 +55,15 @@ const SWITCH_CASE_COLOR = '#06b6d4';
  * switch adds — nesting the bows keeps sibling cases from overdrawing one another.
  */
 const CASE_BOW_BASE = 72;
-const CASE_BOW_STEP = 34;
+const CASE_BOW_STEP = 48;
 
 export interface ComposedScope {
 	nodes: Node[];
 	edges: Edge[];
 	/** Bounding box per lane, keyed by the lane's own scope key (already globally unique). */
 	laneBounds: Map<string, LaneBounds>;
+	/** The same lanes as drawable, titled frames — see `LaneBox`. */
+	laneBoxes: Map<string, LaneBox>;
 }
 
 function tagNode(node: Node, ownerScopeId: string): Node {
@@ -87,9 +99,22 @@ function buildOwnerMap(nodes: Node[]): Map<string, string> {
  */
 interface LaneSpec {
 	key: string;
+	/** What the edge into this lane says. */
 	label: string;
+	/**
+	 * What the lane's box on the canvas is called — the name the DSL knows this group of tasks by
+	 * (`processElectronicOrder`, a fork branch's name, `try`/`catch`). Separate from `label` because
+	 * a switch case's edge carries its condition while its box carries the task name.
+	 */
+	title: string;
 	redirectContinuation?: boolean;
-	convergeContinuation?: boolean;
+	/**
+	 * Set on a named workflow's lane: its frame encloses the owning node as well as the lane, because
+	 * that node *is* the workflow's Start — the frame is the whole workflow, not a body hanging off
+	 * a control task. Such a lane draws no start cap (the Start card is one) and no frame title (the
+	 * card already carries the workflow's name).
+	 */
+	framesOwner?: boolean;
 }
 
 /**
@@ -102,28 +127,44 @@ function laneSpecsFor(node: Node, parentScopeId: string): LaneSpec[] {
 	switch (node.type) {
 		case 'for':
 		case 'do':
-			return [{ key: forScopeKey(parentScopeId, node.id), label: 'body' }];
+			return [
+				{
+					key: forScopeKey(parentScopeId, node.id),
+					label: 'body',
+					// A bare `do` *is* its group: the DSL knows those tasks by the task's own name, so
+					// that is what the box is called. A `for`'s body is one iteration of it.
+					title: node.type === 'do' ? nodeLabel(node) : `${nodeLabel(node)} body`
+				}
+			];
 		case 'try':
 			return [
-				{ key: tryScopeKey(parentScopeId, node.id), label: 'try', redirectContinuation: true },
-				{ key: catchScopeKey(parentScopeId, node.id), label: 'catch' }
+				{
+					key: tryScopeKey(parentScopeId, node.id),
+					label: 'try',
+					title: `${nodeLabel(node)} try`,
+					redirectContinuation: true
+				},
+				{
+					key: catchScopeKey(parentScopeId, node.id),
+					label: 'catch',
+					title: `${nodeLabel(node)} catch`
+				}
+			];
+		case 'workflow':
+			return [
+				{
+					key: workflowScopeKey(node.id),
+					label: '',
+					title: '',
+					framesOwner: true
+				}
 			];
 		case 'fork': {
 			const branches = (node.data?.branches as BranchEntry[] | undefined) ?? [];
 			return branches.map((b) => ({
 				key: forkBranchScopeKey(parentScopeId, node.id, b.id),
-				label: b.name || 'branch'
-			}));
-		}
-		case 'switch': {
-			// `jump` mode is DSL this engine didn't write, whose cases point at ordinary sibling
-			// tasks — there are no branch bodies to inline, so it gets no lanes and is drawn with
-			// labeled jump edges instead (`computeSwitchCaseEdges`).
-			if (switchModeOf(node) !== 'branches') return [];
-			return switchCasesOf(node).map((c, i) => ({
-				key: switchCaseScopeKey(parentScopeId, node.id, c.id ?? String(i)),
-				label: c.name || `case ${i + 1}`,
-				convergeContinuation: true
+				label: b.name || 'branch',
+				title: b.name || 'branch'
 			}));
 		}
 		default:
@@ -131,27 +172,70 @@ function laneSpecsFor(node: Node, parentScopeId: string): LaneSpec[] {
 	}
 }
 
+function nodeLabel(node: Node): string {
+	return ((node.data as Record<string, unknown> | undefined)?.label as string) || node.type || '';
+}
+
 function laneEntryEdge(
 	sourceId: string,
-	label: string,
 	targetId: string,
 	ownerNodeId: string,
-	laneKey: string
+	spec: LaneSpec
 ): Edge {
 	return {
-		id: `lane-entry-${laneKey}`,
+		id: `lane-entry-${spec.key}`,
 		source: sourceId,
 		target: targetId,
 		type: 'default',
-		label,
+		label: spec.label,
 		// `deletable`/`selectable: false` are real Edge fields xyflow itself enforces (delete-key
 		// and click-select both no-op). There's no `reconnectable` field on this version's Edge
 		// type — reconnect-drag is instead blocked by `ReconnectableEdge.svelte` checking this same
 		// `syntheticScopeEdge` tag and skipping its `EdgeReconnectAnchor`s for tagged edges.
-		data: { [SYNTHETIC_SCOPE_EDGE_TAG]: true, ownerNodeId, laneKey, kind: 'entry' },
+		data: {
+			[SYNTHETIC_SCOPE_EDGE_TAG]: true,
+			ownerNodeId,
+			laneKey: spec.key,
+			kind: 'entry'
+		},
 		deletable: false,
 		selectable: false
 	};
+}
+
+/** Shared presentation for a case's jump edge, so every case of a switch reads as one family. */
+function caseEdgeStyling(): Partial<Edge> {
+	return {
+		style: `stroke:${SWITCH_CASE_COLOR};stroke-width:1.5;`,
+		labelStyle: `color:${SWITCH_CASE_COLOR};font-size:10px;font-weight:600;background:var(--color-base-100);border:1px solid ${SWITCH_CASE_COLOR}55;border-radius:9999px;padding:1px 6px;white-space:nowrap;cursor:pointer;`
+	};
+}
+
+/** How long a condition may be before the edge label truncates it. */
+const CASE_LABEL_CONDITION_MAX = 16;
+
+/** Same problem for the bowed jump edges, solved by walking each one's label further back. */
+const JUMP_LABEL_T_BASE = 0.78;
+const JUMP_LABEL_T_STEP = 0.19;
+
+/**
+ * What a case edge says: the case's name, plus its condition when it has one — the condition is the
+ * thing a reader is actually trying to follow, and a diagram where every branch is labeled only
+ * `case1`/`case2` explains nothing. A blank condition is the "otherwise" case and says so by
+ * carrying just the name.
+ */
+export function caseEdgeLabel(c: CaseEntry, index: number): string {
+	const name = c.name || `case ${index + 1}`;
+	const condition = shortCondition(c);
+	return condition ? `${name} · ${condition}` : name;
+}
+
+function shortCondition(c: CaseEntry): string {
+	const condition = (c.condition ?? '').trim();
+	if (!condition) return '';
+	return condition.length > CASE_LABEL_CONDITION_MAX
+		? `${condition.slice(0, CASE_LABEL_CONDITION_MAX - 1)}…`
+		: condition;
 }
 
 function continuationEdge(sourceId: string, targetId: string, ownerNodeId: string): Edge {
@@ -161,29 +245,6 @@ function continuationEdge(sourceId: string, targetId: string, ownerNodeId: strin
 		target: targetId,
 		type: 'default',
 		data: { [SYNTHETIC_SCOPE_EDGE_TAG]: true, ownerNodeId, kind: 'continue' },
-		deletable: false,
-		selectable: false
-	};
-}
-
-/**
- * One branch-mode switch lane rejoining the main chain. Unlike `continuationEdge` there are N of
- * these per node (one per lane), so the id is keyed by lane rather than by owner.
- */
-function convergeEdge(
-	sourceId: string,
-	targetId: string,
-	ownerNodeId: string,
-	laneKey: string,
-	label?: string
-): Edge {
-	return {
-		id: `converge-edge-${laneKey}`,
-		source: sourceId,
-		target: targetId,
-		type: 'default',
-		...(label ? { label } : {}),
-		data: { [SYNTHETIC_SCOPE_EDGE_TAG]: true, ownerNodeId, laneKey, kind: 'converge' },
 		deletable: false,
 		selectable: false
 	};
@@ -214,8 +275,6 @@ interface ContainerNodeAnalysis {
 	entrySources: string[];
 	/** Set only when some lane was flagged `redirectContinuation` (currently: try's first lane). */
 	continuationSourceId?: string;
-	/** True when the lanes were flagged `convergeContinuation` (currently: a branch-mode switch). */
-	converges: boolean;
 	/** The real (persisted) edge from this node to whatever runs after it, if any. */
 	mainContinuationEdge?: Edge;
 }
@@ -225,13 +284,11 @@ interface ContainerNodeAnalysis {
  * container node (any type with lane specs) in the currently-displayed `nodes`, works out each
  * lane's ordering and how the node's continuation should be drawn:
  *
- * - default (`for`/`do`/`fork`) — untouched. These are genuine pass-throughs/fan-outs: the real
- *   chain edge out of the node already says what happens next.
- * - `redirectContinuation` (try's first lane) — re-sourced from the end of that lane.
- * - `convergeContinuation` (a branch-mode switch's lanes) — one edge per lane, from the end of
- *   each, all landing on the same continuation target.
- *
- * The last two both supersede the real chain edge, which `computeHiddenRealEdgeIds` then hides.
+ * - default (`for`/`do`/`fork`/a named workflow) — untouched. These are genuine
+ *   pass-throughs/fan-outs: the real chain edge out of the node already says what happens next,
+ *   and a named workflow has no chain edge at all.
+ * - `redirectContinuation` (try's first lane) — re-sourced from the end of that lane, superseding
+ *   the real chain edge, which `computeHiddenRealEdgeIds` then hides.
  */
 function analyzeContainerNodes(nodes: Node[], edges: Edge[]): ContainerNodeAnalysis[] {
 	const ownerOf = buildOwnerMap(nodes);
@@ -247,7 +304,6 @@ function analyzeContainerNodes(nodes: Node[], edges: Edge[]): ContainerNodeAnaly
 		const entrySources: string[] = [];
 		let entrySourceId = n.id;
 		let continuationSourceId: string | undefined;
-		let converges = false;
 
 		for (const spec of specs) {
 			entrySources.push(entrySourceId);
@@ -260,8 +316,6 @@ function analyzeContainerNodes(nodes: Node[], edges: Edge[]): ContainerNodeAnaly
 			const last = ordered[ordered.length - 1];
 			lanes.push({ spec, first, last });
 
-			if (spec.convergeContinuation) converges = true;
-
 			if (spec.redirectContinuation) {
 				entrySourceId = last?.id ?? entrySourceId;
 				continuationSourceId = last?.id ?? n.id;
@@ -270,23 +324,15 @@ function analyzeContainerNodes(nodes: Node[], edges: Edge[]): ContainerNodeAnaly
 			}
 		}
 
-		const mainContinuationEdge =
-			continuationSourceId || converges
-				? edges.find(
-						(e) =>
-							e.source === n.id &&
-							!(e.data as Record<string, unknown> | undefined)?.[SYNTHETIC_SCOPE_EDGE_TAG]
-					)
-				: undefined;
+		const mainContinuationEdge = continuationSourceId
+			? edges.find(
+					(e) =>
+						e.source === n.id &&
+						!(e.data as Record<string, unknown> | undefined)?.[SYNTHETIC_SCOPE_EDGE_TAG]
+				)
+			: undefined;
 
-		result.push({
-			node: n,
-			lanes,
-			entrySources,
-			continuationSourceId,
-			converges,
-			mainContinuationEdge
-		});
+		result.push({ node: n, lanes, entrySources, continuationSourceId, mainContinuationEdge });
 	}
 
 	return result;
@@ -306,33 +352,13 @@ export function computeLiveSyntheticEdges(nodes: Node[], edges: Edge[]): Edge[] 
 	for (const a of analyzeContainerNodes(nodes, edges)) {
 		a.lanes.forEach((lane, i) => {
 			if (lane.first) {
-				synthesized.push(
-					laneEntryEdge(a.entrySources[i], lane.spec.label, lane.first.id, a.node.id, lane.spec.key)
-				);
+				synthesized.push(laneEntryEdge(a.entrySources[i], lane.first.id, a.node.id, lane.spec));
 			}
 		});
 		if (a.continuationSourceId && a.mainContinuationEdge) {
 			synthesized.push(
 				continuationEdge(a.continuationSourceId, a.mainContinuationEdge.target, a.node.id)
 			);
-		}
-		// One converge edge per lane, closing the diamond. A lane with nothing in it converges from
-		// the control node itself — that branch really does run straight through — and since the
-		// real chain edge it duplicates is hidden, the picture stays honest rather than doubled.
-		// An empty lane has no entry edge to carry its name, so its converge edge wears the label
-		// instead; otherwise an untouched "otherwise" branch would be an unlabeled line.
-		if (a.converges && a.mainContinuationEdge) {
-			for (const lane of a.lanes) {
-				synthesized.push(
-					convergeEdge(
-						lane.last?.id ?? a.node.id,
-						a.mainContinuationEdge.target,
-						a.node.id,
-						lane.spec.key,
-						lane.first ? undefined : lane.spec.label
-					)
-				);
-			}
 		}
 	}
 	return synthesized;
@@ -345,6 +371,10 @@ export function computeLiveSyntheticEdges(nodes: Node[], edges: Edge[]): Edge[] 
  * looking open-ended (matching the same "always show where a path terminates" convention `start`/
  * `end` already establish for the main chain). Purely visual: tagged synthetic, never persisted.
  *
+ * Named workflows are excluded, along with everything inside them: each runs to its *own* End (the
+ * cap on its frame), so a line from its last task to the primary workflow's `End` node would draw
+ * a handover that does not happen.
+ *
  * `edges` must already include every other synthetic edge (`computeLiveSyntheticEdges`'s output),
  * or a node whose only "outgoing" connection is itself synthetic (e.g. try's redirected
  * continuation source) would be wrongly treated as a dead end.
@@ -353,9 +383,19 @@ export function computeTerminalEdges(nodes: Node[], edges: Edge[]): Edge[] {
 	const endNode = nodes.find((n) => n.type === 'end');
 	if (!endNode) return [];
 	const hasOutgoing = new Set(edges.map((e) => e.source));
+	const ownerOf = buildOwnerMap(nodes);
+	const workflowScopes = nodes
+		.filter((n) => n.type === 'workflow')
+		.map((n) => workflowScopeKey(n.id));
+	const inNamedWorkflow = (n: Node): boolean => {
+		if (n.type === 'workflow') return true;
+		const owner = ownerOf.get(n.id);
+		return Boolean(owner && workflowScopes.some((k) => owner === k || owner.startsWith(`${k}/`)));
+	};
+
 	const terminal: Edge[] = [];
 	for (const n of nodes) {
-		if (n.id === endNode.id || hasOutgoing.has(n.id)) continue;
+		if (n.id === endNode.id || hasOutgoing.has(n.id) || inNamedWorkflow(n)) continue;
 		terminal.push(terminalEdge(n.id, endNode.id));
 	}
 	return terminal;
@@ -365,63 +405,47 @@ function isSyntheticEdge(edge: Edge): boolean {
 	return Boolean((edge.data as Record<string, unknown> | undefined)?.[SYNTHETIC_SCOPE_EDGE_TAG]);
 }
 
-function switchCasesOf(node: Node): CaseEntry[] {
-	const cases = (node.data as Record<string, unknown> | undefined)?.cases;
-	return Array.isArray(cases) ? (cases as CaseEntry[]) : [];
-}
-
-/** Defaults to `branches` — a switch with no mode recorded is one the builder itself made. */
-function switchModeOf(node: Node): SwitchMode {
-	return (
-		((node.data as Record<string, unknown> | undefined)?.switchMode as SwitchMode) ?? 'branches'
-	);
-}
-
 /** The real (persisted) "and then the next sibling runs" edge leaving a node, if there is one. */
 function fallThroughTargetOf(nodeId: string, edges: Edge[]): string | undefined {
 	return edges.find((e) => e.source === nodeId && !isSyntheticEdge(e))?.target;
 }
 
 /**
- * Where a single `switch` case actually sends the run, as a node id on the composed canvas:
+ * Where a case that owns no lane sends the run, as a node id on the composed canvas:
  *
- * - `continue` — the switch's own fall-through target (the next sibling task).
+ * - `continue` — the switch's own fall-through target (the next sibling task), which is also where
+ *   its branch lanes converge, so a `continue` case visibly rejoins the same place they do.
  * - `exit` / `end` — both stop the path being drawn. They differ in the DSL (leave the current
  *   scope vs. terminate the workflow) but the canvas has exactly one `end` node, so both point
  *   there rather than inventing a second terminator per nesting level.
- * - anything else — a task id, valid only when it names a sibling in the switch's *own* scope
- *   (the Zigflow spec forbids cross-scope `then`, and `NodePanel`'s picker enforces the same), so
- *   a stale id left over from a moved/deleted node draws nothing instead of a wrong arrow.
+ * - `task` — a jump at a sibling, valid only when that node is in the switch's *own* scope (the
+ *   Zigflow spec forbids cross-scope `then`), so a stale target draws nothing rather than a wrong
+ *   arrow.
  */
-function switchCaseTargetId(
-	then: string,
+function caseJumpTargetId(
+	c: CaseEntry,
 	switchScopeId: string | undefined,
 	ownerOf: Map<string, string>,
 	byId: Map<string, Node>,
 	fallThroughId: string | undefined,
 	endNodeId: string | undefined
 ): string | undefined {
-	if (then === 'continue') return fallThroughId ?? endNodeId;
-	if (then === 'exit' || then === 'end') return endNodeId;
-	const target = byId.get(then);
+	if (c.routing === 'continue') return fallThroughId ?? endNodeId;
+	if (c.routing === 'exit' || c.routing === 'end') return endNodeId;
+	const target = c.targetNodeId ? byId.get(c.targetNodeId) : undefined;
 	if (!target || ownerOf.get(target.id) !== switchScopeId) return undefined;
 	return target.id;
 }
 
 /**
- * One labeled edge per case of a **jump-mode** `switch`, from the switch to wherever that case's
- * `then` sends the run.
+ * One labeled edge per case that owns no branch lane — a flow directive, or a raw jump at a sibling
+ * task this engine couldn't safely lift into a lane (see `planSwitchCases`). Branch cases don't
+ * come through here: their edge is the lane entry edge, drawn by `computeLiveSyntheticEdges`.
  *
- * Branch-mode switches don't come through here at all — their cases own lanes, drawn by
- * `computeLiveSyntheticEdges` like a fork's. This is the fallback for DSL this engine didn't
- * write, whose cases name ordinary sibling tasks in a flat list: without these edges such a switch
- * is indistinguishable from any other task on the canvas, since its routing lives only in
- * `node.data.cases` while the only edges a scope persists are the plain "next sibling" chain.
- *
- * Display-only (tagged synthetic, so `decomposeDisplayedScope` never writes them back): the DSL's
- * `then` stays the single source of truth, edited in the node panel, never by dragging an edge.
- * The plain chain edges are kept *as well* — in this shape a jumped-to task really does fall
- * through into the next sibling once it finishes, so those arrows are real flow, not an artifact.
+ * Display-only (tagged synthetic, so `decomposeDisplayedScope` never writes them back): the case
+ * list on the switch node stays the single source of truth, edited by clicking the edge or from the
+ * node panel. They carry the same `switchNodeId`/`switchCaseId` tags a lane entry edge does, so the
+ * builder handles a click or a delete on either one identically.
  */
 export function computeSwitchCaseEdges(nodes: Node[], edges: Edge[]): Edge[] {
 	const ownerOf = buildOwnerMap(nodes);
@@ -430,46 +454,40 @@ export function computeSwitchCaseEdges(nodes: Node[], edges: Edge[]): Edge[] {
 	const caseEdges: Edge[] = [];
 
 	for (const node of nodes) {
-		if (node.type !== 'switch' || switchModeOf(node) !== 'jump') continue;
-		const cases = switchCasesOf(node);
-		if (cases.length === 0) continue;
-
+		if (node.type !== 'switch') continue;
 		const switchScopeId = ownerOf.get(node.id);
 		const fallThroughId = fallThroughTargetOf(node.id, edges);
 		let drawn = 0;
 
-		cases.forEach((c, i) => {
-			const targetId = switchCaseTargetId(
-				c.then,
-				switchScopeId,
-				ownerOf,
-				byId,
-				fallThroughId,
-				endNodeId
-			);
-			// A self-targeting case would render as a degenerate loop on top of the node; the `then`
-			// picker can't produce one, but hand-written DSL can.
+		switchCasesOf(node).forEach((c, i) => {
+			const targetId = caseJumpTargetId(c, switchScopeId, ownerOf, byId, fallThroughId, endNodeId);
+			// A self-targeting case would render as a degenerate loop on top of the node; the case
+			// editor can't produce one, but hand-written DSL can.
 			if (!targetId || targetId === node.id) return;
 
-			const name = c.name || `case ${i + 1}`;
-			// Flow directives aren't visible from the target alone (`end` and a case that happens to
-			// jump to the last task look identical), so they're spelled out next to the case name.
-			const isDirective = c.then === 'continue' || c.then === 'exit' || c.then === 'end';
+			// The directive isn't visible from the target alone (`end` and a case that happens to jump
+			// to the last task look identical), so it's spelled out next to the case name — unless the
+			// case is named after it already, which would just read `end · end`.
+			const label = caseEdgeLabel(c, i);
+			const spellOut = isDirectiveRouting(c.routing) && c.name !== c.routing;
 			caseEdges.push({
-				id: `switch-case-${node.id}-${i}`,
+				id: `switch-case-${node.id}-${c.id}`,
 				source: node.id,
 				target: targetId,
 				type: SWITCH_CASE_EDGE_TYPE,
-				label: isDirective && name !== c.then ? `${name} · ${c.then}` : name,
+				label: spellOut ? `${label} · ${c.routing}` : label,
 				data: {
 					[SYNTHETIC_SCOPE_EDGE_TAG]: true,
 					kind: 'switchCase',
-					bow: CASE_BOW_BASE + drawn * CASE_BOW_STEP
+					[SWITCH_NODE_TAG]: node.id,
+					[SWITCH_CASE_TAG]: c.id,
+					bow: CASE_BOW_BASE + drawn * CASE_BOW_STEP,
+					labelT: Math.max(0.15, JUMP_LABEL_T_BASE - drawn * JUMP_LABEL_T_STEP)
 				},
+				...caseEdgeStyling(),
 				style: `stroke:${SWITCH_CASE_COLOR};stroke-width:1.5;stroke-dasharray:5 4;`,
-				labelStyle: `color:${SWITCH_CASE_COLOR};font-size:10px;font-weight:600;background:var(--color-base-100);border:1px solid ${SWITCH_CASE_COLOR}55;border-radius:9999px;padding:1px 6px;white-space:nowrap;`,
-				deletable: false,
-				selectable: false
+				deletable: true,
+				selectable: true
 			});
 			drawn++;
 		});
@@ -479,41 +497,83 @@ export function computeSwitchCaseEdges(nodes: Node[], edges: Edge[]): Edge[] {
 }
 
 /**
- * Ids of real (persisted) edges that `computeLiveSyntheticEdges` has visually replaced: `try`'s
- * relocated continuation, and a branch-mode `switch`'s chain edge, which its lanes' converge edges
- * already draw (see `analyzeContainerNodes`). These are rendered `hidden: true` rather than removed
- * outright, since the real edge still has to survive in `scopes` for DSL ordering to stay correct —
- * it is what tells the serializer which task a branch converges *onto*. Only its on-canvas
- * presentation is superseded.
+ * Ids of real (persisted) edges that `computeLiveSyntheticEdges` has visually replaced — currently
+ * only `try`'s relocated continuation. Rendered `hidden: true` rather than removed outright, since
+ * the real edge still has to survive in `scopes` for DSL ordering to stay correct; only its
+ * on-canvas presentation is superseded.
  *
- * Nothing is hidden for a jump-mode switch: there the chain edge is real flow (a jumped-to task
- * falls through into the next sibling), and hiding it would strand the following task with no
- * visible way in.
+ * Nothing is hidden for a `switch`: its chain edge is real flow (a case that falls through runs the
+ * next sibling), and hiding it would strand the following task with no visible way in.
  *
  * Known limitation: because the visible replacement is a non-reconnectable synthetic edge (see
  * `ReconnectableEdge.svelte`), there's currently no drag-to-reconnect way to change "what runs
- * after this try/catch or switch" from the canvas — use the DSL editor for that instead.
+ * after this try/catch" from the canvas — use the DSL editor for that instead.
  */
 export function computeHiddenRealEdgeIds(nodes: Node[], edges: Edge[]): Set<string> {
 	const ids = new Set<string>();
 	for (const a of analyzeContainerNodes(nodes, edges)) {
-		const superseded = Boolean(a.continuationSourceId) || a.converges;
-		if (superseded && a.mainContinuationEdge) ids.add(a.mainContinuationEdge.id);
+		if (a.continuationSourceId && a.mainContinuationEdge) ids.add(a.mainContinuationEdge.id);
 	}
 	return ids;
 }
 
 /**
- * Computes bounding boxes for every inline lane directly from the *currently displayed* `nodes`
- * array's actual positions — no scope lookup, no re-layout. Returns one flat map keyed by the
- * lane's own scope key (already globally unique across the whole workflow, at any nesting depth),
- * so it covers `for`'s single lane, `try`'s two, and `fork`'s N branches uniformly. Falls back to a
- * placeholder box positioned relative to the owning node when a lane has no nodes in it yet (so the
- * very first node dropped into an empty lane still has something to hit-test against).
+ * One inline lane's box on the canvas: where it is, and what the DSL calls the group of tasks in
+ * it. Drawn as a titled dotted frame (`LaneBoxLayer.svelte`) so a nested body reads as the
+ * self-contained sub-flow the DSL says it is, rather than as a loose column of cards.
  */
-export function computeLiveLaneBounds(nodes: Node[]): Map<string, LaneBounds> {
+export interface LaneBox extends LaneBounds {
+	key: string;
+	/** Empty for a named workflow's frame — its Start card inside already carries the name. */
+	title: string;
+	/** The node the lane belongs to, so clicking the box's title can open its config. */
+	ownerNodeId: string;
+	caps: LaneCaps;
+}
+
+/**
+ * Where a lane's start/end caps are drawn. The DSL gives every named group its own entry and exit
+ * (`processElectronicOrder: do: [...]` runs from its first task to its last, then rejoins), and
+ * without caps a framed lane is just a column of cards with no visible beginning — so each lane
+ * gets an explicit start and end marker, connected to its chain by a short stub.
+ *
+ * All five numbers are flow coordinates of the lane's *own* column, captured before a frame is
+ * grown to enclose its nested lanes — the caps belong to this lane's chain, not to the union.
+ */
+export interface LaneCaps {
+	/** Centre of the lane's own column. */
+	x: number;
+	/** Centre of the start cap, and of the end cap. */
+	startY: number;
+	endY: number;
+	/** Top of the lane's first node and bottom of its last — where the stubs meet the chain. */
+	chainTop: number;
+	chainBottom: number;
+	/**
+	 * False on a named workflow's frame: the owning node inside it is the workflow's Start, so a
+	 * cap above it would be a second one.
+	 */
+	showStart: boolean;
+}
+
+/**
+ * Computes a box for every inline lane directly from the *currently displayed* `nodes` array's
+ * actual positions — no scope lookup, no re-layout. Returns one flat map keyed by the lane's own
+ * scope key (already globally unique across the whole workflow, at any nesting depth), so it covers
+ * `for`'s single lane, `try`'s two, `fork`'s N branches and a `switch`'s branch lanes uniformly.
+ * Falls back to a placeholder box positioned relative to the owning node when a lane has no nodes
+ * in it yet (so the very first node dropped into an empty lane still has something to hit-test
+ * against, and an empty branch still shows as an empty frame rather than vanishing).
+ *
+ * A lane's box also covers every lane nested inside it — a fork branch holding a for-loop draws
+ * around that loop's body too — which is what makes nesting legible. Descendant lane keys are
+ * always prefixed by their ancestor's (see `scopeKey.ts`), so the union needs no tree walk. The
+ * caps are deliberately left out of that union: they mark where *this* lane's own chain begins and
+ * ends, which a nested lane's extent has nothing to do with.
+ */
+export function computeLiveLaneBoxes(nodes: Node[]): Map<string, LaneBox> {
 	const ownerOf = buildOwnerMap(nodes);
-	const laneBounds = new Map<string, LaneBounds>();
+	const boxes = new Map<string, LaneBox>();
 
 	for (const n of nodes) {
 		const parentScopeId = ownerOf.get(n.id);
@@ -523,18 +583,51 @@ export function computeLiveLaneBounds(nodes: Node[]): Map<string, LaneBounds> {
 
 		specs.forEach((spec, i) => {
 			const laneNodes = nodes.filter((ln) => ownerOf.get(ln.id) === spec.key);
-			laneBounds.set(
-				spec.key,
-				laneBoundsFromNodes(
-					laneNodes,
-					n.position.x + INLINE_LANE_OFFSET_X * (i + 1),
-					n.position.y + ROW_HEIGHT
-				)
+			const own = laneBoundsFromNodes(
+				laneNodes,
+				n.position.x + (spec.framesOwner ? 0 : INLINE_LANE_OFFSET_X * (i + 1)),
+				n.position.y + ROW_HEIGHT + LANE_CAP_GAP
 			);
+			const caps: LaneCaps = {
+				x: own.x + NODE_CARD_WIDTH / 2,
+				startY: own.yStart - LANE_CAP_GAP / 2,
+				endY: own.yEnd + LANE_CAP_GAP / 2,
+				chainTop: own.yStart,
+				chainBottom: own.yEnd,
+				showStart: !spec.framesOwner
+			};
+			// A named workflow's frame is the workflow: it wraps the Start card as well as the body,
+			// so the two read as one thing rather than a card with a box next to it.
+			if (spec.framesOwner) {
+				own.width = Math.max(
+					own.width,
+					n.position.x + NODE_CARD_WIDTH - Math.min(own.x, n.position.x)
+				);
+				own.x = Math.min(own.x, n.position.x);
+				own.yStart = Math.min(own.yStart, n.position.y);
+				caps.chainTop = own.yStart;
+			}
+			boxes.set(spec.key, {
+				...own,
+				key: spec.key,
+				title: spec.title,
+				ownerNodeId: n.id,
+				caps
+			});
 		});
 	}
 
-	return laneBounds;
+	for (const [key, box] of boxes) {
+		for (const [otherKey, other] of boxes) {
+			if (otherKey === key || !otherKey.startsWith(`${key}/`)) continue;
+			box.x = Math.min(box.x, other.x);
+			box.yStart = Math.min(box.yStart, other.yStart);
+			box.yEnd = Math.max(box.yEnd, other.yEnd);
+			box.width = Math.max(box.width, other.x + other.width - box.x);
+		}
+	}
+
+	return boxes;
 }
 
 function laneBoundsFromNodes(laneNodes: Node[], fallbackX: number, fallbackY: number): LaneBounds {
@@ -666,7 +759,8 @@ export function composeScopeForDisplay(
 	return {
 		nodes: allNodes,
 		edges: [...displayRealEdges, ...laneSynthetic, ...switchSynthetic, ...terminalSynthetic],
-		laneBounds
+		laneBounds,
+		laneBoxes: computeLiveLaneBoxes(allNodes)
 	};
 }
 

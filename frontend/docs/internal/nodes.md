@@ -43,8 +43,9 @@ Real Zigflow tasks (`for`, `fork`, `try`) contain their own nested task lists (`
 - Click **"Edit loop body"** on a `For` node, **"Edit body"** on a `Fork` branch row, or **"Edit try body"/"Edit catch body"** on a `Try` node to open that nested scope as its own canvas view.
 - A breadcrumb bar (shown once you're drilled in) lets you navigate back up.
 - Each scope is keyed by a deterministic id built from `src/lib/zigflow-engine/scopeKey.ts` (`forScopeKey`, `tryScopeKey`, `catchScopeKey`, `forkBranchScopeKey`) — e.g. `root/<forNodeId>/do`.
-- A branch-mode `switch` has one nested scope per case too (`switchCaseScopeKey`), even though no single DSL node backs it — the sibling task holding each branch is materialised on save. See the `switch` section below.
-- A jump-mode `switch` task's `then` can only jump to a task name within the **same scope** (per the DSL spec) — the "then" dropdown in the Switch panel is scoped accordingly.
+- A root-level `do:` task is a whole separate Temporal workflow, not a group — it loads as a `workflow` node whose body is the scope `workflowScopeKey(nodeId)`. A `switch` owns no nested scope at all: every case is a jump. See the `switch` and `workflow` sections below.
+- Every one of these lanes is drawn as a titled dotted frame (`LaneBoxLayer.svelte` + `computeLiveLaneBoxes`), named after the task the DSL saves that group as, with a start cap above its first node and an end cap below its last (`LaneBox.caps`; the room for them comes from `layout.ts`'s `LANE_CAP_GAP`). A frame encloses any lanes nested inside it, so a drop resolves to the **deepest** frame under the cursor — the caps, though, stay on the lane's own chain.
+- A `switch` case's `then` can only name a task within the **same scope** (per the DSL spec), plus any named workflow, which is declared at the document's top level — the case editor's target picker offers exactly those.
 - Editing the DSL text directly and letting it sync back to the canvas rebuilds every scope from scratch and returns you to the root view, since node identity can't be preserved across a full text-driven rebuild. This is an intentional simplification, not a bug.
 
 ---
@@ -114,25 +115,42 @@ Writes key-value pairs into `$data`. Special jq builtins `${ uuid }` / `${ times
 ```ts
 node.data = {
   label: string
-  switchMode: 'branches' | 'jump'
   cases: CaseEntry[]
   ...DataFlow
 }
 
 interface CaseEntry {
-  id?:       string   // branches mode only — stable key for this case's lane scope
-  name:      string   // case identifier (used as DSL step name)
-  condition: string   // ConditionBuilder — blank = otherwise/default
-  then:      string   // jump mode only — 'continue' | 'end' | 'exit' | node.id (same scope only)
+  id:            string        // stable key for this case and its edge
+  name:          string        // case identifier (used as the DSL `switch:` entry key)
+  condition:     string        // ConditionBuilder — blank = otherwise/default
+  routing:       CaseRouting   // 'task' | 'continue' | 'exit' | 'end'
+  taskName?:     string        // task: the name the document's `then:` had, as a fallback
+  targetNodeId?: string        // task: the node jumped at — a sibling, or a named workflow
 }
 ```
 
-This is the **real** conditional-branching construct in Zigflow (not a dedicated "If" node). Cases evaluated top-to-bottom, first truthy match wins.
+This is the **real** conditional-branching construct in Zigflow (not a dedicated "If" node). Cases
+are evaluated top-to-bottom, first truthy match wins, and their array order is the DSL order — the
+node panel can reorder them.
 
-Two shapes, decided per node when the DSL is loaded:
+Every case is a jump, and one switch can mix the kinds:
 
-- **`branches`** — what the builder authors, and the default for a new node. Each case owns an inline lane (`switchCaseScopeKey`, keyed by `CaseEntry.id`), drawn side by side like a fork's branches, and `then` is unused. On save each non-empty lane emits as a sibling task whose `then:` is the **converge target** — the task following the switch, or `exit` when nothing does — so branches skip each other and rejoin the main chain. An empty lane emits no task and its case points at the converge target directly. The converge target is re-derived from the graph on every save, never stored.
-- **`jump`** — DSL the builder didn't write: cases name ordinary sibling tasks in the flat list, and a jumped-to task falls through into the next sibling when it finishes. No lanes; the canvas draws labeled jump edges (`computeSwitchCaseEdges` + `SwitchCaseEdge.svelte`) and the panel edits `then` by target. Nothing is restructured on load — see `detectSwitchBranchGroups` in `graph.ts` for the exact conditions a switch must meet to count as `branches`.
+- **`task`** — the case's `then:` names something: a task at the switch's own nesting depth, or a
+  named workflow (top-level, so reachable from anywhere). Drawn as a labeled bowed edge
+  (`computeSwitchCaseEdges` + `SwitchCaseEdge.svelte`). Re-resolved through `targetNodeId` on save so
+  renaming the target keeps the jump, falling back to `taskName`.
+- **`continue` / `exit` / `end`** — the flow directives, taken as written and drawn as a labeled
+  edge to the next task / the `End` node.
+
+There is no "own branch" routing and nothing converges. A case cannot run steps of its own and then
+rejoin: `then:` names a task or a workflow, and a named workflow runs to its _own_ End (`zigflow
+graph` ignores a `then:` on a root-level `do:` task outright). `planSwitchCases` in `graph.ts`
+therefore restructures nothing — it reads each `then:` and keeps it.
+
+Authoring is on the canvas: drag from the switch onto a reachable task, a named workflow's Start, or
+the `End` node to add a case (the condition editor opens), click a case edge to edit its
+condition/routing, delete a case edge to drop the case. The node panel's Cases list does the same in
+list form. Both go through `switchCases.ts`, the one place `node.data.cases` is read.
 
 ---
 
@@ -277,13 +295,43 @@ Invokes another registered workflow (`run: { workflow: {...} }` in the DSL). Not
 
 ---
 
-### `do` — control · has a nested scope (`do`)
+### `workflow` — terminal · has a nested scope, shown in the palette as "Start"
+
+```ts
+node.data = { label: string, variables: VarEntry[], ...DataFlow };
+```
+
+A whole separate Temporal workflow declared in the same document, emitted as a root-level
+`<label>: do: [...]`. This is zigflow's own model, verifiable with the CLI: `zigflow graph` draws
+each root-level `do:` task as its own subgraph with its own Start and End, and the primary workflow
+(the root tasks that aren't `do:` tasks) as another, named by `document.workflowType`.
+
+The node **is** that workflow's Start, which is why the palette calls it Start and why it carries
+`variables` exactly like the primary `start` node does — emitted as a leading `init: set:` inside
+its own `do:`, and read back as an ordinary `set` node, same as the primary workflow's. The label is
+its whole identity (the DSL task key, the Temporal workflow type, and what a switch case's `then:`
+names), so dropping one from the palette asks for it immediately (`WorkflowNameDialog`) and
+cancelling removes the node.
+
+It never joins the primary chain: no edges are wired to it, `scopeToTaskList` emits these after the
+chain, and `positionChain` gives each its own column with its body running straight down beneath it.
+The frame around the pair carries no title and no start cap — the Start card is both.
+
+Only the **root** produces these; a `do:` task nested in a `for`/`try`/`fork` body is a plain group
+(`do` node, below).
+
+---
+
+### `do` — structure · has a nested scope (`do`)
 
 ```ts
 node.data = { label: string, ...DataFlow };
 ```
 
-Sequential task group. `showInPalette: false` — not manually added from the palette, but shown (with a drill-in button) when hand-written/imported DSL uses an explicit grouping `do:` task outside a `for`/`fork`/`try` context.
+A named group of steps run in sequence, emitted as `<label>: do: [...]`. Not in the palette: at the
+root a `do:` task is a whole workflow (above), so these only arrive from hand-written DSL that groups
+steps inside a `for`/`try`/`fork` body. Its body is the lane keyed by `forScopeKey`, framed and
+capped like every other lane.
 
 ---
 
@@ -295,9 +343,12 @@ interface VarEntry {
 	value: string;
 }
 interface CaseEntry {
+	id: string;
 	name: string;
 	condition: string;
-	then: string;
+	routing: CaseRouting; // 'task' | 'continue' | 'exit' | 'end'
+	taskName?: string;
+	targetNodeId?: string;
 }
 interface EventEntry {
 	id: string;

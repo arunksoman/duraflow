@@ -30,15 +30,10 @@ export function forkBranchScopeKey(
 }
 
 /**
- * One `switch` case's branch body. Unlike the other nested scopes above, this one has no single
- * DSL node behind it: a switch case is `then: <sibling task name>`, and the builder materialises
- * that sibling as a `do:` task carrying the branch (see `graph.ts`). Keyed by the case's stable
- * `id` — never its mutable `name` — exactly like a fork branch.
+ * A named workflow's body. A root-level `do:` task is a whole Temporal workflow of its own (the
+ * document's `do:` list may declare several), and its steps live under the same key shape as any
+ * other nested body so every consumer — lanes, frames, drag-and-drop — treats it uniformly.
  */
-export function switchCaseScopeKey(
-	parentScopeId: string,
-	switchNodeId: string,
-	caseId: string
-): string {
-	return `${parentScopeId}/${switchNodeId}/case/${caseId}`;
+export function workflowScopeKey(nodeId: string): string {
+	return forScopeKey(ROOT_SCOPE_ID, nodeId);
 }

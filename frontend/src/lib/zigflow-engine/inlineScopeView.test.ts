@@ -12,16 +12,20 @@ import {
 	collectDescendantScopeKeysForLaneKey,
 	OWNER_SCOPE_TAG,
 	SYNTHETIC_SCOPE_EDGE_TAG,
-	SWITCH_CASE_EDGE_TYPE
+	SWITCH_CASE_EDGE_TYPE,
+	SWITCH_CASE_TAG,
+	SWITCH_NODE_TAG,
+	computeLiveLaneBoxes
 } from './inlineScopeView';
 import {
 	forScopeKey,
 	tryScopeKey,
 	catchScopeKey,
 	forkBranchScopeKey,
-	switchCaseScopeKey,
+	workflowScopeKey,
 	ROOT_SCOPE_ID
 } from './scopeKey';
+import { NODE_CARD_WIDTH } from './layout';
 
 function node(id: string, type = 'set', extraData: Record<string, unknown> = {}): Node {
 	return { id, type, position: { x: 0, y: 0 }, data: { label: id, ...extraData } };
@@ -647,21 +651,28 @@ describe('computeTerminalEdges', () => {
 });
 
 describe('computeSwitchCaseEdges', () => {
-	/** Mirrors `example/switch.yaml`: three cases jumping to three sibling handler tasks. */
+	/** Three cases jumping at three sibling handler tasks the engine could not lift into lanes. */
 	function orderRoutingScope() {
 		const nodes = [
 			node('start', 'start', { [OWNER_SCOPE_TAG]: ROOT_SCOPE_ID }),
 			node('switcher', 'switch', {
 				[OWNER_SCOPE_TAG]: ROOT_SCOPE_ID,
-				switchMode: 'jump',
 				cases: [
 					{
+						id: 'c1',
 						name: 'electronic',
-						condition: '${ .orderType == "electronic" }',
-						then: 'electronicDo'
+						condition: '',
+						routing: 'task',
+						targetNodeId: 'electronicDo'
 					},
-					{ name: 'physical', condition: '${ .orderType == "physical" }', then: 'physicalDo' },
-					{ name: 'default', condition: '', then: 'unknownDo' }
+					{
+						id: 'c2',
+						name: 'physical',
+						condition: '',
+						routing: 'task',
+						targetNodeId: 'physicalDo'
+					},
+					{ id: 'c3', name: 'default', condition: '', routing: 'task', targetNodeId: 'unknownDo' }
 				]
 			}),
 			node('electronicDo', 'do', { [OWNER_SCOPE_TAG]: ROOT_SCOPE_ID }),
@@ -713,11 +724,10 @@ describe('computeSwitchCaseEdges', () => {
 		const nodes = [
 			node('flowSwitcher', 'switch', {
 				[OWNER_SCOPE_TAG]: ROOT_SCOPE_ID,
-				switchMode: 'jump',
 				cases: [
-					{ name: 'keepGoing', condition: '${ .flow == "continue" }', then: 'continue' },
-					{ name: 'bailOut', condition: '${ .flow == "exit" }', then: 'exit' },
-					{ name: 'stop', condition: '${ .flow == "end" }', then: 'end' }
+					{ id: 'c1', name: 'keepGoing', condition: '', routing: 'continue' },
+					{ id: 'c2', name: 'bailOut', condition: '', routing: 'exit' },
+					{ id: 'c3', name: 'stop', condition: '', routing: 'end' }
 				]
 			}),
 			node('afterSwitch', 'wait', { [OWNER_SCOPE_TAG]: ROOT_SCOPE_ID }),
@@ -736,8 +746,7 @@ describe('computeSwitchCaseEdges', () => {
 		const nodes = [
 			node('flowSwitcher', 'switch', {
 				[OWNER_SCOPE_TAG]: ROOT_SCOPE_ID,
-				switchMode: 'jump',
-				cases: [{ name: 'end', condition: '', then: 'end' }]
+				cases: [{ id: 'c1', name: 'end', condition: '', routing: 'end' }]
 			}),
 			node('end', 'end', { [OWNER_SCOPE_TAG]: ROOT_SCOPE_ID })
 		];
@@ -749,10 +758,9 @@ describe('computeSwitchCaseEdges', () => {
 		const nodes = [
 			node('switcher', 'switch', {
 				[OWNER_SCOPE_TAG]: ROOT_SCOPE_ID,
-				switchMode: 'jump',
 				cases: [
-					{ name: 'nested', condition: '', then: 'insideLoop' },
-					{ name: 'gone', condition: '', then: 'deletedNodeId' }
+					{ id: 'c1', name: 'nested', condition: '', routing: 'task', targetNodeId: 'insideLoop' },
+					{ id: 'c2', name: 'gone', condition: '', routing: 'task', targetNodeId: 'deletedNodeId' }
 				]
 			}),
 			node('insideLoop', 'set', { [OWNER_SCOPE_TAG]: laneKey })
@@ -761,22 +769,35 @@ describe('computeSwitchCaseEdges', () => {
 	});
 
 	it('draws nothing for a switch with no cases yet', () => {
-		const nodes = [
-			node('switcher', 'switch', { [OWNER_SCOPE_TAG]: ROOT_SCOPE_ID, switchMode: 'jump' })
-		];
+		const nodes = [node('switcher', 'switch', { [OWNER_SCOPE_TAG]: ROOT_SCOPE_ID })];
 		expect(computeSwitchCaseEdges(nodes, [])).toHaveLength(0);
 	});
 
-	it('draws nothing for a branch-mode switch — its cases own lanes instead', () => {
+	it('draws nothing for a branch case — its lane entry edge carries it instead', () => {
 		const nodes = [
 			node('switcher', 'switch', {
 				[OWNER_SCOPE_TAG]: ROOT_SCOPE_ID,
-				switchMode: 'branches',
-				cases: [{ id: 'c1', name: 'always', condition: '', then: 'continue' }]
+				cases: [{ id: 'c1', name: 'always', condition: '', routing: 'branch' }]
 			}),
 			node('handler', 'call', { [OWNER_SCOPE_TAG]: ROOT_SCOPE_ID })
 		];
 		expect(computeSwitchCaseEdges(nodes, chain(['switcher', 'handler']))).toHaveLength(0);
+	});
+
+	it('tags each case edge with its switch and case, so a click or a delete can find it', () => {
+		const { nodes, edges } = orderRoutingScope();
+		expect(
+			computeSwitchCaseEdges(nodes, edges).map((e) => [
+				(e.data as Record<string, unknown>)[SWITCH_NODE_TAG],
+				(e.data as Record<string, unknown>)[SWITCH_CASE_TAG],
+				e.selectable,
+				e.deletable
+			])
+		).toEqual([
+			['switcher', 'c1', true, true],
+			['switcher', 'c2', true, true],
+			['switcher', 'c3', true, true]
+		]);
 	});
 
 	it('is wired into composeScopeForDisplay', () => {
@@ -785,8 +806,9 @@ describe('computeSwitchCaseEdges', () => {
 				nodes: [
 					node('start', 'start'),
 					node('switcher', 'switch', {
-						switchMode: 'jump',
-						cases: [{ name: 'always', condition: '', then: 'handler' }]
+						cases: [
+							{ id: 'c1', name: 'always', condition: '', routing: 'task', targetNodeId: 'handler' }
+						]
 					}),
 					node('handler', 'call'),
 					node('end', 'end')
@@ -803,118 +825,202 @@ describe('computeSwitchCaseEdges', () => {
 	});
 });
 
-describe('composeScopeForDisplay — switch (branch mode: N converging lanes)', () => {
-	/** A switch with three branches and a task after it for them to rejoin. */
-	function branchScopes() {
-		const cases = [
-			{ id: 'c1', name: 'electronic', condition: '${ .t == "e" }', then: 'continue' },
-			{ id: 'c2', name: 'physical', condition: '${ .t == "p" }', then: 'continue' },
-			{ id: 'c3', name: 'otherwise', condition: '', then: 'continue' }
-		];
-		const scopes: Record<string, ScopeGraph> = {
-			[ROOT_SCOPE_ID]: {
-				nodes: [
-					node('start', 'start'),
-					node('switcher', 'switch', { switchMode: 'branches', cases }),
-					node('after', 'set'),
-					node('end', 'end')
-				],
-				edges: chain(['start', 'switcher', 'after', 'end'])
-			},
-			[switchCaseScopeKey(ROOT_SCOPE_ID, 'switcher', 'c1')]: {
-				nodes: [node('ship'), node('invoice')],
-				edges: chain(['ship', 'invoice'])
-			},
-			[switchCaseScopeKey(ROOT_SCOPE_ID, 'switcher', 'c2')]: {
-				nodes: [node('pack')],
-				edges: []
-			},
-			[switchCaseScopeKey(ROOT_SCOPE_ID, 'switcher', 'c3')]: { nodes: [], edges: [] }
-		};
-		return scopes;
-	}
+/** Two named workflows declared beside the primary flow, which a switch jumps into. */
+function workflowScopesFixture(): Record<string, ScopeGraph> {
+	const cases = [
+		{
+			id: 'c1',
+			name: 'electronic',
+			condition: '${ .t == "e" }',
+			routing: 'task',
+			targetNodeId: 'wfE'
+		},
+		{
+			id: 'c2',
+			name: 'physical',
+			condition: '${ .t == "p" }',
+			routing: 'task',
+			targetNodeId: 'wfP'
+		},
+		{ id: 'c3', name: 'otherwise', condition: '', routing: 'continue' }
+	];
+	return {
+		[ROOT_SCOPE_ID]: {
+			nodes: [
+				node('start', 'start'),
+				node('switcher', 'switch', { cases }),
+				node('after', 'set'),
+				node('wfE', 'workflow', { label: 'processElectronicOrder' }),
+				node('wfP', 'workflow', { label: 'processPhysicalOrder' }),
+				node('end', 'end')
+			],
+			edges: chain(['start', 'switcher', 'after', 'end'])
+		},
+		[workflowScopeKey('wfE')]: {
+			nodes: [node('ship'), node('invoice')],
+			edges: chain(['ship', 'invoice'])
+		},
+		[workflowScopeKey('wfP')]: { nodes: [node('pack')], edges: [] }
+	};
+}
 
-	it('inlines every case as its own lane, labeled with the case name, all sourced from the switch', () => {
-		const result = composeScopeForDisplay(branchScopes(), ROOT_SCOPE_ID);
+describe('composeScopeForDisplay — named workflows', () => {
+	it("inlines each workflow's body as its own lane, entered from its Start node", () => {
+		const result = composeScopeForDisplay(workflowScopesFixture(), ROOT_SCOPE_ID);
 		const entries = result.edges.filter(
 			(e) => (e.data as Record<string, unknown>)?.kind === 'entry'
 		);
-		expect(entries.map((e) => [e.label, e.target])).toEqual([
-			['electronic', 'ship'],
-			['physical', 'pack']
+		expect(entries.map((e) => [e.source, e.target])).toEqual([
+			['wfE', 'ship'],
+			['wfP', 'pack']
 		]);
-		expect(entries.every((e) => e.source === 'switcher')).toBe(true);
+	});
+
+	it('draws a case that jumps into a workflow as an edge at that workflow, and a directive at its target', () => {
+		const result = composeScopeForDisplay(workflowScopesFixture(), ROOT_SCOPE_ID);
+		const caseEdges = result.edges.filter((e) => e.type === SWITCH_CASE_EDGE_TYPE);
+		expect(caseEdges.map((e) => [e.source, e.target])).toEqual([
+			['switcher', 'wfE'],
+			['switcher', 'wfP'],
+			// `continue` falls through to whatever the switch already flows into
+			['switcher', 'after']
+		]);
+	});
+
+	it('never converges a named workflow back into the primary flow', () => {
+		const result = composeScopeForDisplay(workflowScopesFixture(), ROOT_SCOPE_ID);
 		expect(
-			(result.nodes.find((n) => n.id === 'ship')!.data as Record<string, unknown>)[OWNER_SCOPE_TAG]
-		).toBe(switchCaseScopeKey(ROOT_SCOPE_ID, 'switcher', 'c1'));
+			result.edges.filter((e) => (e.data as Record<string, unknown>)?.kind === 'converge')
+		).toEqual([]);
+		// the switch's own chain edge stays visible — a case that falls through really does run `after`
+		const chainEdge = result.edges.find((e) => e.source === 'switcher' && e.target === 'after');
+		expect(chainEdge?.hidden).toBeFalsy();
 	});
 
-	it('converges every lane onto the task after the switch, and hides the chain edge they replace', () => {
-		const result = composeScopeForDisplay(branchScopes(), ROOT_SCOPE_ID);
-		const converge = result.edges.filter(
-			(e) => (e.data as Record<string, unknown>)?.kind === 'converge'
-		);
-		// last of each lane, and the switch itself standing in for the empty "otherwise" lane
-		expect(converge.map((e) => e.source).sort()).toEqual(['invoice', 'pack', 'switcher']);
-		expect(converge.every((e) => e.target === 'after')).toBe(true);
-
-		const chainEdge = result.edges.find((e) => e.id === 'e-switcher-after')!;
-		expect(chainEdge.hidden).toBe(true);
-		// still persisted — it is what tells the serializer where the branches converge
-		expect(
-			decomposeDisplayedScope(result.nodes, result.edges)[ROOT_SCOPE_ID].edges.map((e) => e.id)
-		).toContain('e-switcher-after');
-	});
-
-	it('draws no case edges for a branch-mode switch — lanes carry the routing', () => {
-		const result = composeScopeForDisplay(branchScopes(), ROOT_SCOPE_ID);
-		expect(result.edges.filter((e) => e.type === SWITCH_CASE_EDGE_TYPE)).toHaveLength(0);
-	});
-
-	it('lets the terminal edge handle a switch that is last in its scope, with nothing to converge onto', () => {
-		const scopes: Record<string, ScopeGraph> = {
-			[ROOT_SCOPE_ID]: {
-				nodes: [
-					node('start', 'start'),
-					node('switcher', 'switch', {
-						switchMode: 'branches',
-						cases: [{ id: 'c1', name: 'only', condition: '', then: 'continue' }]
-					}),
-					node('end', 'end')
-				],
-				edges: chain(['start', 'switcher', 'end'])
-			},
-			[switchCaseScopeKey(ROOT_SCOPE_ID, 'switcher', 'c1')]: { nodes: [node('work')], edges: [] }
-		};
+	it('gives a workflow with an empty body a lane bounding box, so it is still a drop target', () => {
+		const scopes = workflowScopesFixture();
+		scopes[workflowScopeKey('wfP')] = { nodes: [], edges: [] };
 		const result = composeScopeForDisplay(scopes, ROOT_SCOPE_ID);
-		// the switch's only outgoing chain edge already goes to `end`, so that IS the converge target
-		expect(
-			result.edges
-				.filter((e) => (e.data as Record<string, unknown>)?.kind === 'converge')
-				.map((e) => [e.source, e.target])
-		).toEqual([['work', 'end']]);
+		expect(result.laneBounds.has(workflowScopeKey('wfP'))).toBe(true);
 	});
 
-	it('gives every case a lane bounding box, so a brand-new empty branch is still a drop target', () => {
-		const result = composeScopeForDisplay(branchScopes(), ROOT_SCOPE_ID);
-		for (const caseId of ['c1', 'c2', 'c3']) {
-			expect(result.laneBounds.has(switchCaseScopeKey(ROOT_SCOPE_ID, 'switcher', caseId))).toBe(
-				true
-			);
-		}
-	});
-
-	it('prunes every case lane when the switch node is deleted', () => {
-		const switchNode = node('switcher', 'switch', {
-			switchMode: 'branches',
-			cases: [
-				{ id: 'c1', name: 'a', condition: '', then: 'continue' },
-				{ id: 'c2', name: 'b', condition: '', then: 'continue' }
-			]
-		});
-		expect(collectDescendantScopeKeysForNode(switchNode, ROOT_SCOPE_ID, [switchNode])).toEqual([
-			switchCaseScopeKey(ROOT_SCOPE_ID, 'switcher', 'c1'),
-			switchCaseScopeKey(ROOT_SCOPE_ID, 'switcher', 'c2')
+	it("prunes a workflow's body when its Start node is deleted", () => {
+		const wf = node('wfE', 'workflow', { label: 'processElectronicOrder' });
+		expect(collectDescendantScopeKeysForNode(wf, ROOT_SCOPE_ID, [wf])).toEqual([
+			workflowScopeKey('wfE')
 		]);
+	});
+
+	it("never runs a terminal edge from a named workflow's last task to the primary End", () => {
+		const result = composeScopeForDisplay(workflowScopesFixture(), ROOT_SCOPE_ID);
+		const terminal = result.edges.filter(
+			(e) => (e.data as Record<string, unknown>)?.kind === 'terminal'
+		);
+		// each named workflow ends at its own frame cap, not at the primary workflow's End node
+		expect(terminal.map((e) => e.source)).not.toContain('invoice');
+		expect(terminal.map((e) => e.source)).not.toContain('pack');
+		expect(terminal.map((e) => e.source)).not.toContain('wfE');
+	});
+
+	it('owns no lanes at all for a switch — every case is a jump', () => {
+		const result = composeScopeForDisplay(workflowScopesFixture(), ROOT_SCOPE_ID);
+		expect([...result.laneBoxes.keys()]).toEqual([
+			workflowScopeKey('wfE'),
+			workflowScopeKey('wfP')
+		]);
+	});
+});
+
+describe('computeLiveLaneBoxes', () => {
+	it("leaves a named workflow's frame untitled and uncapped at the top — its Start card is both", () => {
+		const lane = workflowScopeKey('wfE');
+		const nodes = [
+			{
+				...node('wfE', 'workflow', {
+					[OWNER_SCOPE_TAG]: ROOT_SCOPE_ID,
+					label: 'processElectronicOrder'
+				}),
+				position: { x: 400, y: 80 }
+			},
+			{ ...node('ship', 'call', { [OWNER_SCOPE_TAG]: lane }), position: { x: 400, y: 256 } }
+		];
+		const box = computeLiveLaneBoxes(nodes).get(lane)!;
+		expect(box.title).toBe('');
+		expect(box.caps.showStart).toBe(false);
+		expect(box.ownerNodeId).toBe('wfE');
+		// the frame wraps the Start card as well as the body
+		expect(box.yStart).toBe(80);
+		expect(box.caps.endY).toBeGreaterThan(256);
+	});
+
+	it('names a bare `do` frame after the process itself, and a `for` frame after its body', () => {
+		const doLane = forScopeKey(ROOT_SCOPE_ID, 'group');
+		const forLane = forScopeKey(ROOT_SCOPE_ID, 'loop');
+		const nodes = [
+			node('group', 'do', { [OWNER_SCOPE_TAG]: ROOT_SCOPE_ID, label: 'processElectronicOrder' }),
+			node('loop', 'for', { [OWNER_SCOPE_TAG]: ROOT_SCOPE_ID, label: 'eachOrder' }),
+			node('step', 'call', { [OWNER_SCOPE_TAG]: doLane }),
+			node('iterate', 'call', { [OWNER_SCOPE_TAG]: forLane })
+		];
+		const boxes = computeLiveLaneBoxes(nodes);
+		expect(boxes.get(doLane)?.title).toBe('processElectronicOrder');
+		expect(boxes.get(forLane)?.title).toBe('eachOrder body');
+	});
+
+	it('grows a frame to enclose the lanes nested inside it', () => {
+		const branchLane = forkBranchScopeKey(ROOT_SCOPE_ID, 'fork1', 'b1');
+		const nestedLane = forScopeKey(branchLane, 'loop');
+		const nodes = [
+			node('fork1', 'fork', {
+				[OWNER_SCOPE_TAG]: ROOT_SCOPE_ID,
+				branches: [{ id: 'b1', name: 'left' }]
+			}),
+			{ ...node('loop', 'for', { [OWNER_SCOPE_TAG]: branchLane }), position: { x: 400, y: 200 } },
+			{ ...node('inner', 'call', { [OWNER_SCOPE_TAG]: nestedLane }), position: { x: 700, y: 320 } }
+		];
+		const boxes = computeLiveLaneBoxes(nodes);
+		const branch = boxes.get(branchLane)!;
+		const nested = boxes.get(nestedLane)!;
+		expect(branch.x + branch.width).toBeGreaterThanOrEqual(nested.x + nested.width);
+		expect(branch.yEnd).toBeGreaterThanOrEqual(nested.yEnd);
+	});
+
+	it("caps a lane above its first node and below its last, centred on the lane's own column", () => {
+		const lane = forScopeKey(ROOT_SCOPE_ID, 'group');
+		const nodes = [
+			node('group', 'do', { [OWNER_SCOPE_TAG]: ROOT_SCOPE_ID, label: 'processOrder' }),
+			{ ...node('first', 'call', { [OWNER_SCOPE_TAG]: lane }), position: { x: 400, y: 200 } },
+			{ ...node('last', 'call', { [OWNER_SCOPE_TAG]: lane }), position: { x: 400, y: 320 } }
+		];
+		const { caps, yStart, yEnd } = computeLiveLaneBoxes(nodes).get(lane)!;
+		expect(caps.x).toBe(400 + NODE_CARD_WIDTH / 2);
+		expect(caps.chainTop).toBe(yStart);
+		expect(caps.chainBottom).toBe(yEnd);
+		expect(caps.startY).toBeLessThan(yStart);
+		expect(caps.endY).toBeGreaterThan(yEnd);
+	});
+
+	it("keeps a lane's caps on its own chain even when its frame grows around a nested lane", () => {
+		const branchLane = forkBranchScopeKey(ROOT_SCOPE_ID, 'fork1', 'b1');
+		const nestedLane = forScopeKey(branchLane, 'loop');
+		const nodes = [
+			node('fork1', 'fork', {
+				[OWNER_SCOPE_TAG]: ROOT_SCOPE_ID,
+				branches: [{ id: 'b1', name: 'left' }]
+			}),
+			{ ...node('loop', 'for', { [OWNER_SCOPE_TAG]: branchLane }), position: { x: 400, y: 200 } },
+			{ ...node('inner', 'call', { [OWNER_SCOPE_TAG]: nestedLane }), position: { x: 700, y: 560 } }
+		];
+		const branch = computeLiveLaneBoxes(nodes).get(branchLane)!;
+		// The frame stretches down to cover the nested loop's body...
+		expect(branch.yEnd).toBe(640);
+		// ...but the end cap still marks where the branch's own chain stops.
+		expect(branch.caps.chainBottom).toBe(280);
+		expect(branch.caps.x).toBe(400 + NODE_CARD_WIDTH / 2);
+	});
+
+	it('is carried on composeScopeForDisplay, one frame per lane', () => {
+		const result = composeScopeForDisplay(workflowScopesFixture(), ROOT_SCOPE_ID);
+		expect([...result.laneBoxes.values()].map((b) => b.ownerNodeId)).toEqual(['wfE', 'wfP']);
 	});
 });

@@ -8,10 +8,11 @@ import {
 	forkBranchScopeKey,
 	tryScopeKey,
 	catchScopeKey,
-	switchCaseScopeKey,
+	workflowScopeKey,
 	ROOT_SCOPE_ID
 } from './scopeKey';
 import type { ZigflowDocument } from './ast';
+import type { CaseEntry } from '../components/builder/builderConfig';
 
 function header() {
 	return { dsl: '1.0.0', taskQueue: 'zigflow', workflowType: 'example', version: '0.1.0' };
@@ -174,7 +175,7 @@ describe('astToGraph', () => {
 		]);
 	});
 
-	it('resolves a switch `then` task-name reference to the target node id', () => {
+	it('loads a case pointing at a sibling as a jump at that node, and a directive as a routing', () => {
 		const doc: ZigflowDocument = {
 			document: header(),
 			do: [
@@ -190,14 +191,18 @@ describe('astToGraph', () => {
 			]
 		};
 		const { graph } = astToGraph(doc);
-		const switchNode = graph.scopes[ROOT_SCOPE_ID].nodes.find((n) => n.type === 'switch')!;
-		const shipItNode = graph.scopes[ROOT_SCOPE_ID].nodes.find(
-			(n) => (n.data?.label as string) === 'shipIt'
-		)!;
-		const cases = switchNode.data?.cases as { then: string }[];
-		expect(cases[0].then).toBe(shipItNode.id);
-		expect(cases[1].then).toBe('end');
+		const root = graph.scopes[ROOT_SCOPE_ID];
+		const switchNode = root.nodes.find((n) => n.type === 'switch')!;
+		const cases = switchNode.data?.cases as CaseEntry[];
+
+		expect(cases.map((c) => c.routing)).toEqual(['task', 'end']);
+		// `shipIt` stays a task of its own — a case jumps at it, it is not owned by the case.
+		expect(root.nodes.map((n) => n.data?.label)).toEqual(['Start', 'route', 'shipIt', 'End']);
+		expect(cases[0].targetNodeId).toBe(root.nodes.find((n) => n.data?.label === 'shipIt')!.id);
+		// the task name is kept too, so a jump at something off-canvas still re-saves as written
+		expect(cases[0].taskName).toBe('shipIt');
 	});
+
 	it('preserves a bare `for` fork branch instead of silently discarding its for/while wrapper', () => {
 		const doc: ZigflowDocument = {
 			document: header(),
@@ -303,9 +308,10 @@ describe('graphToAst', () => {
 		};
 		const { graph, header: hdr } = astToGraph(original);
 		const rebuilt = graphToAst(graph, hdr);
-		// Task names are re-slugged from the node label (lowercased) on save — "getUser" -> "getuser".
+		// An identifier-shaped label is emitted verbatim, so a hand-written camelCase task name
+		// survives a canvas round-trip.
 		expect(rebuilt.do[0]).toMatchObject({
-			getuser: {
+			getUser: {
 				call: 'grpc',
 				with: {
 					proto: { endpoint: 'https://example.com/user.proto' },
@@ -320,7 +326,7 @@ describe('graphToAst', () => {
 		expect(result.ok).toBe(true);
 		if (!result.ok) return;
 		const [name, task] = Object.entries(result.document.do[0])[0];
-		expect(name).toBe('getuser');
+		expect(name).toBe('getUser');
 		expect(task).toMatchObject(Object.values(original.do[0])[0]);
 	});
 
@@ -534,7 +540,7 @@ describe('graphToAst', () => {
 		expect(rebuilt.do[2]).toEqual(doc.do[2]);
 	});
 
-	it('falls back an unresolvable switch `then` to `continue` instead of emitting a raw node id', () => {
+	it('falls back an unresolvable case jump to `continue` instead of emitting a dangling task name', () => {
 		const graph: WorkflowGraph = {
 			scopes: {
 				[ROOT_SCOPE_ID]: {
@@ -545,8 +551,15 @@ describe('graphToAst', () => {
 							position: { x: 0, y: 0 },
 							data: {
 								label: 'route',
-								switchMode: 'jump',
-								cases: [{ name: 'case1', condition: '', then: 'node-outside-this-scope' }]
+								cases: [
+									{
+										id: 'c1',
+										name: 'case1',
+										condition: '',
+										routing: 'task',
+										targetNodeId: 'node-that-was-deleted'
+									}
+								] satisfies CaseEntry[]
 							}
 						}
 					],
@@ -565,9 +578,13 @@ describe('graphToAst', () => {
 	});
 });
 
-describe('switch — branch mode', () => {
-	/** The shape the builder writes: cases route through sibling tasks that all converge. */
-	function branchDoc(): ZigflowDocument {
+describe('switch', () => {
+	/**
+	 * The shape `example/switch.yaml` has: a switch whose cases jump at named workflows declared
+	 * alongside the primary flow. Each of those is its own Temporal workflow (`zigflow graph` draws
+	 * it as its own subgraph with its own Start/End), so nothing converges back.
+	 */
+	function jumpDoc(): ZigflowDocument {
 		return {
 			document: header(),
 			do: [
@@ -580,161 +597,203 @@ describe('switch — branch mode', () => {
 						]
 					}
 				},
+				{ notify: { set: { done: 'true' } } },
 				{
 					electronic: {
 						do: [
 							{ ship: { call: 'http', with: { method: 'get', endpoint: 'https://e.test' } } },
 							{ invoice: { call: 'http', with: { method: 'get', endpoint: 'https://i.test' } } }
-						],
-						then: 'notify'
+						]
 					}
 				},
 				{
 					physical: {
-						do: [{ pack: { call: 'http', with: { method: 'get', endpoint: 'https://p.test' } } }],
-						then: 'notify'
+						do: [{ pack: { call: 'http', with: { method: 'get', endpoint: 'https://p.test' } } }]
 					}
-				},
-				{ notify: { set: { done: 'true' } } }
+				}
 			]
 		};
 	}
 
-	it('loads the branch tasks as lanes, not as nodes of their own', () => {
-		const { graph } = astToGraph(branchDoc());
+	it('loads a root `do:` task as a named workflow, kept out of the primary chain', () => {
+		const { graph } = astToGraph(jumpDoc());
 		const root = graph.scopes[ROOT_SCOPE_ID];
-		expect(root.nodes.map((n) => n.data?.label)).toEqual(['Start', 'route', 'notify', 'End']);
-
-		const sw = root.nodes.find((n) => n.type === 'switch')!;
-		expect(sw.data?.switchMode).toBe('branches');
-		const cases = sw.data?.cases as { id: string; name: string; condition: string }[];
-		expect(cases.map((c) => [c.name, c.condition])).toEqual([
-			['electronic', '${ .t == "e" }'],
-			['physical', '${ .t == "p" }'],
-			['otherwise', '']
+		expect(root.nodes.map((n) => [n.data?.label, n.type])).toEqual([
+			['Start', 'start'],
+			['route', 'switch'],
+			['notify', 'set'],
+			['electronic', 'workflow'],
+			['physical', 'workflow'],
+			['End', 'end']
 		]);
 
-		const laneOf = (i: number) =>
-			graph.scopes[switchCaseScopeKey(ROOT_SCOPE_ID, sw.id, cases[i].id)];
-		expect(laneOf(0).nodes.map((n) => n.data?.label)).toEqual(['ship', 'invoice']);
-		expect(laneOf(1).nodes.map((n) => n.data?.label)).toEqual(['pack']);
-		// the "otherwise" case pointed straight at the converge target, so its lane is empty
-		expect(laneOf(2).nodes).toEqual([]);
+		const label = (id: string) => root.nodes.find((n) => n.id === id)?.data?.label;
+		expect(root.edges.map((e) => `${label(e.source)}->${label(e.target)}`)).toEqual([
+			'Start->route',
+			'route->notify',
+			'notify->End'
+		]);
+
+		const electronic = root.nodes.find((n) => n.data?.label === 'electronic')!;
+		expect(graph.scopes[workflowScopeKey(electronic.id)].nodes.map((n) => n.data?.label)).toEqual([
+			'ship',
+			'invoice'
+		]);
+	});
+
+	it('resolves every case to what it jumps at, siblings and workflows alike', () => {
+		const { graph } = astToGraph(jumpDoc());
+		const root = graph.scopes[ROOT_SCOPE_ID];
+		const sw = root.nodes.find((n) => n.type === 'switch')!;
+		const cases = sw.data?.cases as CaseEntry[];
+		const byLabel = (l: string) => root.nodes.find((n) => n.data?.label === l)!.id;
+
+		expect(cases.map((c) => [c.name, c.condition, c.routing, c.taskName])).toEqual([
+			['electronic', '${ .t == "e" }', 'task', 'electronic'],
+			['physical', '${ .t == "p" }', 'task', 'physical'],
+			['otherwise', '', 'task', 'notify']
+		]);
+		expect(cases.map((c) => c.targetNodeId)).toEqual([
+			byLabel('electronic'),
+			byLabel('physical'),
+			byLabel('notify')
+		]);
 	});
 
 	it('round-trips back to the same DSL', () => {
-		const doc = branchDoc();
-		const { graph, header: hdr } = astToGraph(doc);
-		expect(graphToAst(graph, hdr).do).toEqual(doc.do);
-	});
-
-	it('re-derives each branch `then:` from where the switch sits, not from stored data', () => {
-		const doc = branchDoc();
-		const { graph, header: hdr } = astToGraph(doc);
-		const root = graph.scopes[ROOT_SCOPE_ID];
-
-		// drop the task the branches used to converge onto
-		const notify = root.nodes.find((n) => n.data?.label === 'notify')!;
-		const sw = root.nodes.find((n) => n.type === 'switch')!;
-		root.nodes = root.nodes.filter((n) => n.id !== notify.id);
-		root.edges = [
-			{ id: 'e-start-sw', source: 'start', target: sw.id },
-			{ id: 'e-sw-end', source: sw.id, target: 'end' }
-		];
-
-		const rebuilt = graphToAst(graph, hdr);
-		const branch = rebuilt.do[1].electronic as { then: string };
-		expect(branch.then).toBe('exit');
-		const cases = (rebuilt.do[0].route as { switch: Record<string, { then: string }>[] }).switch;
-		expect(Object.values(cases[2])[0].then).toBe('exit');
-	});
-
-	it('emits a bare branch task when its lane holds a single task already named after it', () => {
-		const doc: ZigflowDocument = {
-			document: header(),
-			do: [
-				{ route: { switch: [{ quick: { then: 'quick' } }] } },
-				{ quick: { set: { fast: 'true' }, then: 'after' } },
-				{ after: { set: { done: 'true' } } }
-			]
-		};
-		const { graph, header: hdr } = astToGraph(doc);
-		expect(graphToAst(graph, hdr).do).toEqual(doc.do);
-	});
-});
-
-describe('switch — jump mode (DSL the builder did not write)', () => {
-	/** `example/switch.yaml` in miniature: handlers with no `then:`, falling through into each other. */
-	function jumpDoc(): ZigflowDocument {
-		return {
-			document: header(),
-			do: [
-				{
-					route: {
-						switch: [
-							{ electronic: { when: '${ .t == "e" }', then: 'handleelectronic' } },
-							{ otherwise: { then: 'handleother' } }
-						]
-					}
-				},
-				{ handleelectronic: { set: { kind: 'e' } } },
-				{ handleother: { set: { kind: 'o' } } }
-			]
-		};
-	}
-
-	it('keeps the handlers as ordinary sibling nodes and marks the switch jump mode', () => {
-		const { graph } = astToGraph(jumpDoc());
-		const root = graph.scopes[ROOT_SCOPE_ID];
-		expect(root.nodes.map((n) => n.data?.label)).toEqual([
-			'Start',
-			'route',
-			'handleelectronic',
-			'handleother',
-			'End'
-		]);
-		expect(root.nodes.find((n) => n.type === 'switch')!.data?.switchMode).toBe('jump');
-	});
-
-	it('round-trips without restructuring anything the author wrote', () => {
 		const doc = jumpDoc();
 		const { graph, header: hdr } = astToGraph(doc);
 		expect(graphToAst(graph, hdr).do).toEqual(doc.do);
 	});
 
-	it('stays in jump mode when only some branch tasks carry a converging `then:`', () => {
+	it('emits named workflows after the primary flow, whatever order they were written in', () => {
+		const doc: ZigflowDocument = {
+			document: header(),
+			do: [
+				{ handler: { do: [{ ship: { set: { shipped: 'true' } } }] } },
+				{ route: { switch: [{ a: { then: 'handler' } }] } },
+				{ after: { set: { done: 'true' } } }
+			]
+		};
+		const { graph, header: hdr } = astToGraph(doc);
+		expect(graphToAst(graph, hdr).do).toEqual([doc.do[1], doc.do[2], doc.do[0]]);
+	});
+
+	it('re-resolves a jump through the target node, so renaming the target keeps the case', () => {
+		const { graph, header: hdr } = astToGraph(jumpDoc());
+		const root = graph.scopes[ROOT_SCOPE_ID];
+		const electronic = root.nodes.find((n) => n.data?.label === 'electronic')!;
+		electronic.data = { ...electronic.data, label: 'processElectronicOrder' };
+
+		const rebuilt = graphToAst(graph, hdr);
+		const cases = (rebuilt.do[0].route as { switch: Record<string, { then: string }>[] }).switch;
+		expect(Object.values(cases[0])[0].then).toBe('processElectronicOrder');
+		expect(Object.keys(rebuilt.do[2])[0]).toBe('processElectronicOrder');
+	});
+
+	it('carries a named workflow Start variables as a leading `init: set:` in its own body', () => {
+		const { graph, header: hdr } = astToGraph(jumpDoc());
+		const root = graph.scopes[ROOT_SCOPE_ID];
+		const electronic = root.nodes.find((n) => n.data?.label === 'electronic')!;
+		electronic.data = {
+			...electronic.data,
+			variables: [{ key: 'carrier', value: '${ $input.carrier }' }]
+		};
+
+		const rebuilt = graphToAst(graph, hdr);
+		const body = (rebuilt.do[2].electronic as { do: Record<string, unknown>[] }).do;
+		expect(body[0]).toEqual({ init: { set: { carrier: '${ $input.carrier }' } } });
+		expect(Object.keys(body[1])[0]).toBe('ship');
+	});
+
+	it('leaves a backwards jump exactly as written', () => {
+		const doc: ZigflowDocument = {
+			document: header(),
+			do: [
+				{ retryPoint: { set: { k: 'a' } } },
+				{ route: { switch: [{ again: { when: '${ .retry }', then: 'retryPoint' } }] } }
+			]
+		};
+		const { graph, header: hdr } = astToGraph(doc);
+		const sw = graph.scopes[ROOT_SCOPE_ID].nodes.find((n) => n.type === 'switch')!;
+		expect((sw.data?.cases as CaseEntry[])[0].routing).toBe('task');
+		expect(graph.scopes[ROOT_SCOPE_ID].nodes.map((n) => n.data?.label)).toEqual([
+			'Start',
+			'retryPoint',
+			'route',
+			'End'
+		]);
+		expect(graphToAst(graph, hdr).do).toEqual(doc.do);
+	});
+
+	it('leaves a task two cases both point at exactly where it is', () => {
 		const doc: ZigflowDocument = {
 			document: header(),
 			do: [
 				{
 					route: {
-						switch: [{ a: { when: '${ .x }', then: 'handlea' } }, { b: { then: 'handleb' } }]
+						switch: [
+							{ a: { when: '${ .x }', then: 'shared' } },
+							{ b: { when: '${ .y }', then: 'shared' } }
+						]
 					}
 				},
-				{ handlea: { set: { k: 'a' }, then: 'after' } },
-				{ handleb: { set: { k: 'b' } } },
+				{ shared: { set: { k: 'v' } } },
 				{ after: { set: { done: 'true' } } }
 			]
 		};
-		const { graph } = astToGraph(doc);
-		expect(
-			graph.scopes[ROOT_SCOPE_ID].nodes.find((n) => n.type === 'switch')!.data?.switchMode
-		).toBe('jump');
+		const { graph, header: hdr } = astToGraph(doc);
+		const root = graph.scopes[ROOT_SCOPE_ID];
+		expect(root.nodes.map((n) => n.data?.label)).toEqual([
+			'Start',
+			'route',
+			'shared',
+			'after',
+			'End'
+		]);
+		const sw = root.nodes.find((n) => n.type === 'switch')!;
+		expect((sw.data?.cases as CaseEntry[]).map((c) => c.routing)).toEqual(['task', 'task']);
+		expect(graphToAst(graph, hdr).do).toEqual(doc.do);
 	});
 
-	it('stays in jump mode when the branch tasks are not contiguous after the switch', () => {
+	it('keeps flow directives exactly as written', () => {
 		const doc: ZigflowDocument = {
 			document: header(),
 			do: [
-				{ route: { switch: [{ a: { then: 'handlea' } }] } },
-				{ unrelated: { set: { x: '1' } } },
-				{ handlea: { set: { k: 'a' }, then: 'after' } },
+				{
+					flowSwitcher: {
+						switch: [
+							{ continue: { when: '${ .f == "continue" }', then: 'continue' } },
+							{ exit: { when: '${ .f == "exit" }', then: 'exit' } },
+							{ end: { when: '${ .f == "end" }', then: 'end' } },
+							{ default: { then: 'continue' } }
+						]
+					}
+				},
 				{ after: { set: { done: 'true' } } }
 			]
 		};
-		const { graph } = astToGraph(doc);
-		expect(
-			graph.scopes[ROOT_SCOPE_ID].nodes.find((n) => n.type === 'switch')!.data?.switchMode
-		).toBe('jump');
+		const { graph, header: hdr } = astToGraph(doc);
+		const sw = graph.scopes[ROOT_SCOPE_ID].nodes.find((n) => n.type === 'switch')!;
+		expect((sw.data?.cases as CaseEntry[]).map((c) => c.routing)).toEqual([
+			'continue',
+			'exit',
+			'end',
+			'continue'
+		]);
+		expect(graphToAst(graph, hdr).do).toEqual(doc.do);
+	});
+
+	it('keeps a named workflow that also carries shared task fields', () => {
+		const doc: ZigflowDocument = {
+			document: header(),
+			do: [
+				{ route: { switch: [{ a: { then: 'guarded' } }] } },
+				{ after: { set: { done: 'true' } } },
+				{ guarded: { if: '${ .ok }', do: [{ ship: { set: { s: '1' } } }] } }
+			]
+		};
+		const { graph, header: hdr } = astToGraph(doc);
+		expect(graphToAst(graph, hdr).do).toEqual(doc.do);
 	});
 });

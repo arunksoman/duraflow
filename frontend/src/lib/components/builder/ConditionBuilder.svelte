@@ -1,5 +1,5 @@
 <script lang="ts">
-	import type { AvailVar } from './ExpressionInput.svelte';
+	import type { AvailVar } from './availableVars';
 	import ExpressionInput from './ExpressionInput.svelte';
 	import { untrack } from 'svelte';
 

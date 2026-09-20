@@ -23,13 +23,13 @@ import type {
 import type {
 	VarEntry,
 	CaseEntry,
+	CaseRouting,
 	EventEntry,
-	BranchEntry,
-	SwitchMode
+	BranchEntry
 } from '../components/builder/builderConfig';
 import type { WorkflowNodeType, InputField } from '../types';
 import { applyWorkflowSchedule, readWorkflowSchedule, type WorkflowSchedule } from './schedule';
-import { toSlug, uniqueSlug } from './slug';
+import { toSlug, toTaskName, uniqueTaskName } from './slug';
 import { orderNodesInScope, layoutScope } from './layout';
 import {
 	ROOT_SCOPE_ID,
@@ -37,8 +37,9 @@ import {
 	tryScopeKey,
 	catchScopeKey,
 	forkBranchScopeKey,
-	switchCaseScopeKey
+	workflowScopeKey
 } from './scopeKey';
+import { switchCasesOf } from './switchCases';
 
 export interface ScopeGraph {
 	nodes: Node[];
@@ -189,29 +190,24 @@ function scopeToTaskList(graph: WorkflowGraph, scopeId: string): TaskList {
 	const scope = graph.scopes[scopeId];
 	if (!scope) return [];
 
-	const ordered = orderNodesInScope(scope.nodes, scope.edges).filter(
+	const all = orderNodesInScope(scope.nodes, scope.edges).filter(
 		(n) => n.type !== 'start' && n.type !== 'end'
 	);
 
+	// A named workflow is not a step of the flow it is drawn beside — it is a separate Temporal
+	// workflow declared in the same document, so it never joins the chain and is emitted after it.
+	// (Only the root list can hold these; nested scopes never produce `workflow` nodes.)
+	const ordered = all.filter((n) => n.type !== 'workflow');
+	const workflows = all.filter((n) => n.type === 'workflow');
+
 	// Assign every sibling's task name up front so `switch` cases can resolve `then` targets
-	// (forward or backward references) before task bodies are built.
+	// (forward or backward references) before task bodies are built. Named workflows are in the
+	// same namespace — a case jumping at one names it exactly like it names a plain task.
 	const usedNames = new Set<string>();
 	const idToName = new Map<string, string>();
-	for (const node of ordered) {
-		const name = uniqueSlug((node.data?.label as string) ?? node.type ?? 'task', usedNames);
+	for (const node of [...ordered, ...workflows]) {
+		const name = uniqueTaskName((node.data?.label as string) ?? node.type ?? 'task', usedNames);
 		idToName.set(node.id, name);
-	}
-
-	// A branch-mode switch's cases don't reference siblings that already exist — each one *becomes*
-	// a sibling task holding that branch's body. Those names are allocated here, after every real
-	// node's, so a branch can never steal a name a task already has.
-	const branchNames = new Map<string, string[]>();
-	for (const node of ordered) {
-		if (!isBranchModeSwitch(node)) continue;
-		branchNames.set(
-			node.id,
-			switchCasesOf(node).map((c) => uniqueSlug(c.name || 'case', usedNames))
-		);
 	}
 
 	const list: TaskList = [];
@@ -219,135 +215,104 @@ function scopeToTaskList(graph: WorkflowGraph, scopeId: string): TaskList {
 	// Start node variables (root scope only) become a synthetic leading `init` set task — there
 	// is no real "start" task in the DSL, this is purely a canvas convenience.
 	if (scopeId === ROOT_SCOPE_ID) {
-		const startNode = scope.nodes.find((n) => n.type === 'start');
-		const vars = ((startNode?.data?.variables as VarEntry[]) ?? []).filter((v) => v.key);
-		if (vars.length > 0) list.push({ init: { set: recordFromEntries(vars) } });
+		list.push(...initTaskFor(scope.nodes.find((n) => n.type === 'start')));
 	}
 
 	for (const node of ordered) {
 		const name = idToName.get(node.id)!;
 
-		// A branch-mode switch is the one node whose task can't be built from the node alone: its
-		// cases point at sibling tasks this function is itself allocating, so it needs the branch
-		// names and the scope ordering that only exist here.
-		if (isBranchModeSwitch(node)) {
-			const names = branchNames.get(node.id)!;
+		// A switch is the one node whose task can't be built from the node alone: its cases name
+		// siblings, which only this function knows the allocated names of.
+		if (node.type === 'switch') {
 			list.push({
 				[name]: {
 					...taskBaseFromData((node.data ?? {}) as Record<string, unknown>),
-					switch: branchCasesToAst(node, graph, scopeId, names, ordered, idToName)
+					switch: switchCasesToAst(node, graph, idToName)
 				}
 			});
-			// Emitted immediately after their switch, and before whatever it converges onto, so each
-			// branch's `then:` is a forward reference to a task really later in the list.
-			list.push(...switchBranchTasks(node, graph, scopeId, names, ordered, idToName));
 			continue;
 		}
 
-		list.push({ [name]: nodeToTask(node, graph, scopeId, idToName) });
+		list.push({ [name]: nodeToTask(node, graph, scopeId) });
 	}
+
+	for (const node of workflows) {
+		list.push({ [idToName.get(node.id)!]: workflowTask(node, graph) });
+	}
+
 	return list;
 }
 
-function switchModeOf(node: Node): SwitchMode {
-	// Anything without an explicit mode is a switch the builder itself made (or one loaded before
-	// this field existed); `branches` is what those round-trip to.
-	return (
-		((node.data as Record<string, unknown> | undefined)?.switchMode as SwitchMode) ?? 'branches'
-	);
-}
-
-function switchCasesOf(node: Node): CaseEntry[] {
-	const cases = (node.data as Record<string, unknown> | undefined)?.cases;
-	return Array.isArray(cases) ? (cases as CaseEntry[]) : [];
-}
-
-function isBranchModeSwitch(node: Node): boolean {
-	return node.type === 'switch' && switchModeOf(node) === 'branches';
+/**
+ * The leading `init: set: {...}` a Start node's variables become, or nothing when it has none.
+ * Shared by the primary workflow's Start node and every named workflow's, which is the whole point
+ * of a named workflow having a Start of its own: it seeds `$data` for its own run.
+ */
+function initTaskFor(startNode: Node | undefined): TaskList {
+	const vars = ((startNode?.data?.variables as VarEntry[]) ?? []).filter((v) => v.key);
+	return vars.length > 0 ? [{ init: { set: recordFromEntries(vars) } }] : [];
 }
 
 /**
- * Where a branch-mode switch's branches go once they finish: the task that follows the switch in
- * its own scope, or `exit` when nothing does (the switch is last, so leaving the scope *is* what
- * comes next — at the root that ends the workflow, inside a `for`/`try`/fork branch it ends that
- * body's iteration).
- *
- * Every branch gets this same target, which is what makes the DSL a diamond rather than a chain:
- * without it, `electronic`'s body would finish and fall straight through into `physical`'s.
+ * A named workflow: `<name>: { do: [...] }`. Its Start node *is* the node this is built from, so
+ * its variables lead the body — the same `init: set:` convention the primary workflow's Start uses.
  */
-function switchConvergeTarget(
-	node: Node,
-	ordered: Node[],
+function workflowTask(node: Node, graph: WorkflowGraph): TaskNode {
+	const data = (node.data ?? {}) as Record<string, unknown>;
+	return {
+		...taskBaseFromData(data),
+		do: [...initTaskFor(node), ...scopeToTaskList(graph, workflowScopeKey(node.id))]
+	} as TaskNode;
+}
+
+/**
+ * Where one case sends the run, as the `then:` the DSL wants: a flow directive as written, or the
+ * name of the task it jumps at. The jump is re-resolved through the target *node* so it survives
+ * that task being renamed, falling back to the name the document had.
+ *
+ * A target outside the switch's own scope — a named workflow, which lives at the root while the
+ * switch may not — is resolved by name from the root scope instead, since only same-scope siblings
+ * are in `idToName`.
+ */
+function caseTargetToAst(
+	c: CaseEntry,
+	graph: WorkflowGraph,
 	idToName: Map<string, string>
 ): FlowDirective {
-	const next = ordered[ordered.indexOf(node) + 1];
-	return next ? (idToName.get(next.id) ?? 'exit') : 'exit';
+	if (c.routing !== 'task') return c.routing;
+	if (c.targetNodeId) {
+		const sibling = idToName.get(c.targetNodeId);
+		if (sibling) return sibling;
+		const workflow = workflowNameById(graph, c.targetNodeId);
+		if (workflow) return workflow;
+	}
+	// A `targetNodeId` that no longer resolves means the task it named has been deleted — a
+	// dangling `then:` is DSL no worker can run, so the case falls back to carrying on instead.
+	return c.taskName ?? 'continue';
 }
 
-/**
- * The sibling tasks a branch-mode switch's cases point at — one per case, each holding that
- * branch's lane and each carrying the converge `then:`. A lane holding exactly one task already
- * named after the branch emits bare rather than `do:`-wrapped — the same round-trip convention
- * fork branches use, see `nodeToTask`'s fork case. An empty lane emits nothing at all and its
- * case points straight at the converge target, so an untouched "otherwise" costs no task.
- */
-function switchBranchTasks(
-	node: Node,
-	graph: WorkflowGraph,
-	scopeId: string,
-	names: string[],
-	ordered: Node[],
-	idToName: Map<string, string>
-): TaskList {
-	const converge = switchConvergeTarget(node, ordered, idToName);
-	const tasks: TaskList = [];
-
-	switchCasesOf(node).forEach((c, i) => {
-		const body = scopeToTaskList(graph, switchCaseScopeKey(scopeId, node.id, c.id ?? String(i)));
-		if (body.length === 0) return;
-		const name = names[i];
-		if (body.length === 1) {
-			const [onlyName, only] = Object.entries(body[0])[0];
-			if (onlyName === name) {
-				tasks.push({ [name]: { ...only, then: converge } });
-				return;
-			}
-		}
-		tasks.push({ [name]: { do: body, then: converge } });
-	});
-
-	return tasks;
+/** The task name a root-level named workflow node is emitted under, by node id. */
+function workflowNameById(graph: WorkflowGraph, nodeId: string): string | undefined {
+	const node = graph.scopes[ROOT_SCOPE_ID]?.nodes.find(
+		(n) => n.id === nodeId && n.type === 'workflow'
+	);
+	return node ? toTaskName((node.data?.label as string) ?? '') : undefined;
 }
 
-/**
- * A branch-mode case's `then:` — the sibling task holding its branch, or the converge target
- * directly when the branch is empty (there is no task to route through).
- */
-function branchCasesToAst(
+function switchCasesToAst(
 	node: Node,
 	graph: WorkflowGraph,
-	scopeId: string,
-	names: string[],
-	ordered: Node[],
 	idToName: Map<string, string>
 ): SwitchCase[] {
-	const converge = switchConvergeTarget(node, ordered, idToName);
-	return switchCasesOf(node).map((c, i) => {
-		const empty =
-			scopeToTaskList(graph, switchCaseScopeKey(scopeId, node.id, c.id ?? String(i))).length === 0;
+	return switchCasesOf(node).map((c) => {
 		const when = c.condition?.trim();
-		const body: SwitchCaseBody = { then: empty ? converge : names[i] };
+		const body: SwitchCaseBody = { then: caseTargetToAst(c, graph, idToName) };
 		if (when) body.when = when;
-		return { [toSlug(c.name) || 'case']: body };
+		return { [toTaskName(c.name) || 'case']: body };
 	});
 }
 
-function nodeToTask(
-	node: Node,
-	graph: WorkflowGraph,
-	scopeId: string,
-	idToName: Map<string, string>
-): TaskNode {
+function nodeToTask(node: Node, graph: WorkflowGraph, scopeId: string): TaskNode {
 	const data = (node.data ?? {}) as Record<string, unknown>;
 	const type = (node.type ?? 'set') as WorkflowNodeType;
 	const base = taskBaseFromData(data);
@@ -359,8 +324,6 @@ function nodeToTask(
 			return { ...base, call: 'grpc', with: grpcWithFromData(data) };
 		case 'set':
 			return { ...base, set: setMapFromData(data) };
-		case 'switch':
-			return { ...base, switch: switchCasesFromData(data, idToName) };
 		case 'wait':
 			return { ...base, wait: waitFromData(data) };
 		case 'listen':
@@ -448,6 +411,8 @@ function nodeToTask(
 			const childScope = forScopeKey(scopeId, node.id);
 			return { ...base, do: scopeToTaskList(graph, childScope) };
 		}
+		// `switch` never reaches here: `scopeToTaskList` builds it itself, because its branch cases
+		// need the sibling names that function is in the middle of allocating.
 		default:
 			throw new Error(`Cannot convert node type "${type}" (${node.id}) to a Zigflow task`);
 	}
@@ -536,39 +501,18 @@ function setMapFromData(data: Record<string, unknown>): Record<string, unknown> 
 	return vars.length > 0 ? recordFromEntries(vars) : { result: '${ . }' };
 }
 
-function resolveThenToAst(thenVal: string, idToName: Map<string, string>): FlowDirective {
-	if (thenVal === 'continue' || thenVal === 'exit' || thenVal === 'end') return thenVal;
-	const resolved = idToName.get(thenVal);
-	if (resolved) return resolved;
-	// `thenVal` is an internal canvas node-id, not a real task name — either it was never a valid
-	// node-id reference, or (schema requires `then` targets stay within the same scope/depth) it
-	// points at a node outside this switch's own scope. Emitting the raw id would produce invalid
-	// DSL a Temporal worker can't resolve; falling back to `continue` keeps the workflow valid.
-	return 'continue';
-}
-
-function switchCasesFromData(
-	data: Record<string, unknown>,
-	idToName: Map<string, string>
-): SwitchCase[] {
-	const cases = (data.cases as CaseEntry[]) ?? [];
-	return cases.map((c) => {
-		const when = c.condition?.trim();
-		const body: SwitchCaseBody = { then: resolveThenToAst(c.then, idToName) };
-		if (when) body.when = when;
-		return { [toSlug(c.name) || 'case']: body };
-	});
-}
-
 function waitFromData(data: Record<string, unknown>) {
 	if ((data.waitMode as string) === 'until') {
 		return { until: (data.until as string) || '' };
 	}
+	// Zero components are dropped: the duration editor always holds all four fields, so keeping
+	// them would turn a hand-written `wait: { seconds: 2 }` into a four-line block of mostly zeroes
+	// the first time its workflow was re-saved.
 	const d = definedEntries({
-		days: data.days as number,
-		hours: data.hours as number,
-		minutes: data.minutes as number,
-		seconds: data.seconds as number
+		days: (data.days as number) || undefined,
+		hours: (data.hours as number) || undefined,
+		minutes: (data.minutes as number) || undefined,
+		seconds: (data.seconds as number) || undefined
 	});
 	return Object.keys(d).length > 0 ? d : { seconds: 30 };
 }
@@ -686,24 +630,15 @@ function buildScope(list: TaskList, scopeId: string, scopesOut: Record<string, S
 	const nodes: Node[] = [];
 	const nameToId = new Map<string, string>();
 
-	// A switch whose cases route through dedicated sibling tasks that all converge on the same
-	// target is the shape this engine writes, and it loads back as branch lanes rather than as
-	// those siblings — so those tasks get no node of their own. Anything else stays flat.
-	const branchGroups = detectSwitchBranchGroups(list);
-	const consumed = new Set(
-		[...branchGroups.values()].flatMap((g) => g.branches.map((b) => b.taskName))
-	);
-	const visible = list.filter((entry) => !consumed.has(Object.keys(entry)[0]));
-
 	// Pass 1: allocate a node id + type per task so forward/backward `switch.then` references
 	// and nested-scope keys are available while building task bodies in pass 2.
-	for (const entry of visible) {
+	for (const entry of list) {
 		const [name, task] = Object.entries(entry)[0];
 		const id = newNodeId();
 		nameToId.set(name, id);
 		nodes.push({
 			id,
-			type: taskKindToNodeType(task),
+			type: taskKindToNodeType(task, scopeId),
 			position: { x: 0, y: 0 },
 			data: { label: name }
 		});
@@ -711,25 +646,29 @@ function buildScope(list: TaskList, scopeId: string, scopesOut: Record<string, S
 
 	// Pass 2: fill each node's data, recursing into nested scopes as needed.
 	nodes.forEach((node, idx) => {
-		const [taskName, task] = Object.entries(visible[idx])[0];
+		const [, task] = Object.entries(list[idx])[0];
 		node.data = {
 			type: node.type,
 			...node.data,
-			...dataFromTask(task, node.id, scopeId, nameToId, scopesOut, branchGroups.get(taskName))
+			...dataFromTask(task, node.id, scopeId, nameToId, scopesOut)
 		};
 	});
 
+	// Named workflows are declared beside the flow, not sequenced into it: each runs on its own, so
+	// it is left out of the chain entirely rather than wired between its neighbours.
+	const chain = nodes.filter((n) => n.type !== 'workflow');
+
 	const edges: Edge[] = [];
-	for (let i = 0; i < nodes.length - 1; i++) {
+	for (let i = 0; i < chain.length - 1; i++) {
 		edges.push({
-			id: `e-${nodes[i].id}-${nodes[i + 1].id}`,
-			source: nodes[i].id,
-			target: nodes[i + 1].id
+			id: `e-${chain[i].id}-${chain[i + 1].id}`,
+			source: chain[i].id,
+			target: chain[i + 1].id
 		});
 	}
 
 	if (scopeId === ROOT_SCOPE_ID) {
-		const lastRealNode = nodes[nodes.length - 1];
+		const lastRealNode = chain[chain.length - 1];
 
 		const startNode: Node = {
 			id: 'start',
@@ -739,8 +678,8 @@ function buildScope(list: TaskList, scopeId: string, scopesOut: Record<string, S
 			deletable: false
 		};
 		nodes.unshift(startNode);
-		if (nodes.length > 1) {
-			edges.unshift({ id: `e-start-${nodes[1].id}`, source: 'start', target: nodes[1].id });
+		if (chain.length > 0) {
+			edges.unshift({ id: `e-start-${chain[0].id}`, source: 'start', target: chain[0].id });
 		}
 
 		// Every workflow gets an explicit `End` node too, same as `Start` — otherwise the last real
@@ -767,140 +706,41 @@ function buildScope(list: TaskList, scopeId: string, scopesOut: Record<string, S
 	scopesOut[scopeId] = { nodes, edges };
 }
 
-/** One case of a branch-mode switch, paired with the sibling task that holds its body. */
-interface SwitchBranch {
+/** One case of a loaded `switch`, resolved to how the canvas should model it. */
+interface SwitchCasePlan {
 	caseName: string;
 	when?: string;
-	/** Name of the sibling task carrying this branch, or undefined when the branch is empty. */
+	routing: CaseRouting;
+	/** `task` routings only — the name the document's `then:` jumped at. */
 	taskName?: string;
-	body: TaskList;
-	/** True when `body` came from a bare task rather than a `do:` wrapper — see `switchBranchTasks`. */
-	bare: boolean;
-}
-
-interface SwitchBranchGroup {
-	branches: SwitchBranch[];
-	/** Every branch task's shared `then:`. Not used to build the canvas — it's re-derived on save
-	 * from wherever the switch sits — but matching it is what proves this is the branch shape. */
-	converge: FlowDirective;
 }
 
 /**
- * Finds the switches in one task list that are really branch-mode — the shape `switchBranchTasks`
- * writes — and pairs each case with the sibling task holding its body.
- *
- * The shape has to be recognised exactly, because getting it wrong in either direction is bad: a
- * false positive swallows sibling tasks the author wrote as ordinary steps, and a false negative
- * turns a diagram the user built out of lanes back into a flat chain the next time they open it.
- * So all of the following must hold, and any switch failing them falls back to `jump` mode with
- * nothing rewritten:
- *
- *  - every case's `then` is either a sibling task name or the one shared converge directive;
- *  - the branch tasks sit immediately after the switch, contiguous, in case order;
- *  - each is referenced by exactly one case;
- *  - every branch task carries a `then:`, all of them the same, and that target is the task right
- *    after the last branch, or `exit`/`end` when nothing follows.
- *
- * That last rule is the load-bearing one: it's what distinguishes "these siblings are this
- * switch's branches" from "these siblings are ordinary tasks a case happens to jump into", which
- * is exactly the `example/switch.yaml` case — its handlers have no `then:` and fall through into
- * each other, so it stays flat.
+ * What each of a `switch`'s cases becomes on the canvas. There is nothing to restructure: a case's
+ * `then:` is either one of the three flow directives or the name of a task, and both are kept
+ * exactly as written. The name is resolved to a node later (`dataFromTask`), so a jump survives its
+ * target being renamed; an unresolvable name stays as `taskName` so the document round-trips
+ * unchanged rather than losing the jump.
  */
-function detectSwitchBranchGroups(list: TaskList): Map<string, SwitchBranchGroup> {
-	const groups = new Map<string, SwitchBranchGroup>();
-	const names = list.map((entry) => Object.keys(entry)[0]);
-
-	list.forEach((entry, index) => {
-		const [switchName, task] = Object.entries(entry)[0];
-		if (!('switch' in task)) return;
-
-		const cases = (task as SwitchTask).switch.map((c) => Object.entries(c)[0]);
-		if (cases.length === 0) return;
-
-		// Walk the tasks right after the switch, consuming one per case whose `then` names it — a
-		// case whose branch was empty emitted no task and is simply skipped here. A candidate only
-		// counts if it carries a `then:` and that `then:` agrees with the ones already consumed,
-		// which is what stops the converge target itself (a task that may well have a `then:` of its
-		// own) from being mistaken for the last branch.
-		const branchTaskNames: string[] = [];
-		let converge: FlowDirective | undefined;
-		let cursor = index + 1;
-
-		for (const [, body] of cases) {
-			if (names[cursor] !== body.then) continue;
-			const candidate = Object.values(list[cursor])[0] as TaskNode;
-			if (candidate.then === undefined) continue;
-			if (converge === undefined) converge = candidate.then;
-			else if (candidate.then !== converge) continue;
-			branchTaskNames.push(body.then);
-			cursor++;
+function planSwitchCases(task: SwitchTask): SwitchCasePlan[] {
+	return task.switch.map((item) => {
+		const [caseName, body] = Object.entries(item)[0];
+		const then = body.then;
+		if (then === 'continue' || then === 'exit' || then === 'end') {
+			// `FlowDirective` is the three directives *or* any task name, so the cast is what narrows
+			// the matched literal back down for `CaseRouting`.
+			return { caseName, when: body.when, routing: then as CaseRouting };
 		}
-
-		if (branchTaskNames.length === 0 || converge === undefined) return;
-
-		// The converge target has to be the task immediately after the last branch — or, when the
-		// switch group ends the list, a directive that leaves the scope.
-		const after = names[cursor];
-		const convergeIsCorrect = after
-			? converge === after
-			: converge === 'exit' || converge === 'end' || converge === 'continue';
-		if (!convergeIsCorrect) return;
-
-		// Every remaining case must point at the converge target (an empty branch). A case going
-		// anywhere else — ending the workflow, or jumping somewhere unrelated — means this isn't the
-		// shape we write, and drawing it as a branch that rejoins the chain would be a lie.
-		if (cases.some(([, body]) => body.then !== converge && !branchTaskNames.includes(body.then)))
-			return;
-
-		let taken = 0;
-		const branches: SwitchBranch[] = cases.map(([caseName, body]) => {
-			if (!branchTaskNames.includes(body.then)) {
-				return { caseName, when: body.when, body: [], bare: false };
-			}
-			const taskName = branchTaskNames[taken];
-			const branchTask = Object.values(list[index + 1 + taken])[0] as TaskNode;
-			taken++;
-			// The converge `then:` is the engine's own bookkeeping — stripped here so it never
-			// reaches the canvas, and re-derived on save from wherever the switch then sits.
-			const rest = { ...branchTask } as TaskNode & { then?: FlowDirective };
-			delete rest.then;
-			const bare = !isBareDoWrapper(branchTask);
-			return {
-				caseName,
-				when: body.when,
-				taskName,
-				body: bare ? [{ [taskName]: rest as TaskNode }] : (rest as { do: TaskList }).do,
-				bare
-			};
-		});
-
-		groups.set(switchName, { branches, converge });
+		return { caseName, when: body.when, routing: 'task' as CaseRouting, taskName: then };
 	});
-
-	return groups;
 }
 
-const TASK_DISCRIMINATOR_KEYS = [
-	'call',
-	'for',
-	'fork',
-	'listen',
-	'raise',
-	'run',
-	'set',
-	'switch',
-	'try',
-	'wait'
-] as const;
-
-/** True only for `{ do: taskList }` — a `for` task also has a `do` key (its body), so a real
- * discriminator key present alongside `do` means this is a bare typed task, not the `do:` grouping
- * convention used to author a fork/branch body directly as a list. */
-function isBareDoWrapper(task: TaskNode): task is TaskNode & { do: TaskList } {
-	return 'do' in task && !TASK_DISCRIMINATOR_KEYS.some((k) => k in task);
-}
-
-function taskKindToNodeType(task: TaskNode): WorkflowNodeType {
+/**
+ * Which node a loaded task becomes. The one context-sensitive case is `do:`: at the root of the
+ * document it declares a whole separate Temporal workflow (named by its task key, drawn with its
+ * own Start and End), while nested inside a `for`/`try`/`fork` body it is only a sequential group.
+ */
+function taskKindToNodeType(task: TaskNode, scopeId: string): WorkflowNodeType {
 	if ('call' in task) return task.call === 'grpc' ? 'grpcCall' : 'call';
 	if ('for' in task) return 'for';
 	if ('fork' in task) return 'fork';
@@ -911,7 +751,7 @@ function taskKindToNodeType(task: TaskNode): WorkflowNodeType {
 	if ('switch' in task) return 'switch';
 	if ('try' in task) return 'try';
 	if ('wait' in task) return 'wait';
-	if ('do' in task) return 'do';
+	if ('do' in task) return scopeId === ROOT_SCOPE_ID ? 'workflow' : 'do';
 	throw new Error('Unknown task shape while converting DSL to the canvas');
 }
 
@@ -920,8 +760,7 @@ function dataFromTask(
 	nodeId: string,
 	scopeId: string,
 	nameToId: Map<string, string>,
-	scopesOut: Record<string, ScopeGraph>,
-	branchGroup?: SwitchBranchGroup
+	scopesOut: Record<string, ScopeGraph>
 ): Record<string, unknown> {
 	const base = taskBaseToData(task);
 
@@ -965,10 +804,7 @@ function dataFromTask(
 		const branches: BranchEntry[] = task.fork.branches.map((entry) => {
 			const [branchName, branchTask] = Object.entries(entry)[0];
 			const id = crypto.randomUUID();
-			// A branch is the `{ do: [...] }` grouping convention only when `do` is its *sole*
-			// discriminator key — a `for` task also carries a `do` key (its body), so checking
-			// `'do' in branchTask` alone wrongly unwraps a bare-`for` branch and silently drops its
-			// `for`/`while` wrapper. Any other real task type present means this is a bare task branch.
+			// Only the `{ do: [...] }` grouping convention unwraps — see `isBareDoWrapper`.
 			const branchList = isBareDoWrapper(branchTask)
 				? branchTask.do
 				: [{ [branchName]: branchTask }];
@@ -988,21 +824,18 @@ function dataFromTask(
 	}
 	if ('set' in task) return { ...base, variables: entriesFromRecord(task.set) };
 	if ('switch' in task) {
-		if (branchGroup) {
-			const cases: CaseEntry[] = branchGroup.branches.map((b) => {
-				const id = crypto.randomUUID();
-				buildScope(b.body, switchCaseScopeKey(scopeId, nodeId, id), scopesOut);
-				// `then` is derived on save from where the switch sits, so it's parked at `continue`
-				// rather than carrying a stale task name around in the node's data.
-				return { id, name: b.caseName, condition: b.when ?? '', then: 'continue' };
-			});
-			return { ...base, switchMode: 'branches' satisfies SwitchMode, cases };
-		}
-		return {
-			...base,
-			switchMode: 'jump' satisfies SwitchMode,
-			cases: switchCasesToData(task, nameToId)
-		};
+		const cases: CaseEntry[] = planSwitchCases(task).map((p) => {
+			const targetNodeId = p.routing === 'task' ? nameToId.get(p.taskName ?? '') : undefined;
+			return {
+				id: crypto.randomUUID(),
+				name: p.caseName,
+				condition: p.when ?? '',
+				routing: p.routing,
+				...(p.taskName ? { taskName: p.taskName } : {}),
+				...(targetNodeId ? { targetNodeId } : {})
+			};
+		});
+		return { ...base, cases };
 	}
 	if ('try' in task) {
 		buildScope(task.try, tryScopeKey(scopeId, nodeId), scopesOut);
@@ -1011,10 +844,37 @@ function dataFromTask(
 	}
 	if ('wait' in task) return { ...base, ...waitDataFromTask(task) };
 	if ('do' in task) {
-		buildScope(task.do, forScopeKey(scopeId, nodeId), scopesOut);
-		return base;
+		// A root-level `do:` is a named workflow, whose body lives under its own scope key. Its Start
+		// node's `variables` behave exactly like the primary workflow's Start: emitted as a leading
+		// `init: set:` (see `initTaskFor`) and read back as an ordinary `set` node, not re-absorbed.
+		buildScope(
+			task.do,
+			scopeId === ROOT_SCOPE_ID ? workflowScopeKey(nodeId) : forScopeKey(scopeId, nodeId),
+			scopesOut
+		);
+		return scopeId === ROOT_SCOPE_ID ? { ...base, variables: [] as VarEntry[] } : base;
 	}
 	return base;
+}
+
+const TASK_DISCRIMINATOR_KEYS = [
+	'call',
+	'for',
+	'fork',
+	'listen',
+	'raise',
+	'run',
+	'set',
+	'switch',
+	'try',
+	'wait'
+] as const;
+
+/** True only for `{ do: taskList }` — a `for` task also has a `do` key (its body), so a real
+ * discriminator key present alongside `do` means this is a bare typed task, not the `do:` grouping
+ * convention used to author a fork/branch body directly as a list. */
+function isBareDoWrapper(task: TaskNode): task is TaskNode & { do: TaskList } {
+	return 'do' in task && !TASK_DISCRIMINATOR_KEYS.some((k) => k in task);
 }
 
 /** Inverse of `parseAsField` — object-form `.as` becomes its JSON text so it isn't dropped. */
@@ -1033,18 +893,6 @@ function taskBaseToData(task: TaskNode): Record<string, unknown> {
 		outputSchemaJson: stringifyJsonField(task.output?.schema),
 		exportSchemaJson: stringifyJsonField(task.export?.schema)
 	};
-}
-
-function resolveThenFromAst(then: string, nameToId: Map<string, string>): string {
-	if (then === 'continue' || then === 'exit' || then === 'end') return then;
-	return nameToId.get(then) ?? then;
-}
-
-function switchCasesToData(task: SwitchTask, nameToId: Map<string, string>): CaseEntry[] {
-	return task.switch.map((c) => {
-		const [name, body] = Object.entries(c)[0];
-		return { name, condition: body.when ?? '', then: resolveThenFromAst(body.then, nameToId) };
-	});
 }
 
 function waitDataFromTask(task: WaitTask): Record<string, unknown> {
