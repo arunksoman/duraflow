@@ -37,7 +37,10 @@ import {
 	tryScopeKey,
 	catchScopeKey,
 	forkBranchScopeKey,
-	workflowScopeKey
+	isWorkflowScopeKey,
+	workflowEndNodeId,
+	workflowScopeKey,
+	workflowStartNodeId
 } from './scopeKey';
 import { switchCasesOf } from './switchCases';
 
@@ -178,141 +181,283 @@ export function graphToAst(graph: WorkflowGraph, header: WorkflowHeaderFields): 
 		...(scheduleParts.metadata ? { metadata: scheduleParts.metadata } : {})
 	};
 	const input = stringifyInputSchema(header.inputSchema ?? []);
+	const ctx: EmitContext = { graph, workflowNames: namedWorkflowNames(graph) };
 	return {
 		document: documentHeader,
 		...(input ? { input } : {}),
 		...(scheduleParts.schedule ? { schedule: scheduleParts.schedule } : {}),
-		do: scopeToTaskList(graph, ROOT_SCOPE_ID)
+		do: scopeToTaskList(ctx, ROOT_SCOPE_ID)
 	};
 }
 
-function scopeToTaskList(graph: WorkflowGraph, scopeId: string): TaskList {
+interface EmitContext {
+	graph: WorkflowGraph;
+	/** Start node id -> the task key each named workflow is saved (and registered) under. */
+	workflowNames: Map<string, string>;
+}
+
+// =========================================================================
+// Named workflows
+// =========================================================================
+
+/**
+ * The primary workflow's start/end node ids — fixed, and never deletable. (A named workflow's
+ * Start is deletable, and takes the whole workflow with it; its End never is on its own.)
+ */
+export const PRIMARY_START_ID = 'start';
+export const PRIMARY_END_ID = 'end';
+
+/**
+ * True for the Start of a named workflow (as opposed to the primary workflow's Start). Both are
+ * plain `start` nodes: a named workflow is drawn exactly like the primary one, and differs only in
+ * carrying a name — the task key the DSL saves it under and the Temporal workflow type zigflow
+ * registers it as.
+ */
+export function isNamedWorkflowStart(node: Node | undefined): boolean {
+	return node?.type === 'start' && node.id !== PRIMARY_START_ID;
+}
+
+/** Every named workflow's scope key, in the order they were declared/added. */
+export function namedWorkflowScopes(graph: WorkflowGraph): string[] {
+	return Object.keys(graph.scopes).filter(isWorkflowScopeKey);
+}
+
+/** A named workflow's Start node, looked up from its scope. */
+export function namedWorkflowStart(graph: WorkflowGraph, scopeKey: string): Node | undefined {
+	const id = workflowStartNodeId(scopeKey);
+	return graph.scopes[scopeKey]?.nodes.find((n) => n.id === id);
+}
+
+/**
+ * The name every named workflow is saved under, by Start node id. Allocated once for the whole
+ * document rather than per task list, because zigflow registers them in one namespace: two with
+ * the same name would collide at worker start, and a switch case anywhere names one by it.
+ */
+export function namedWorkflowNames(graph: WorkflowGraph): Map<string, string> {
+	const used = new Set<string>();
+	const names = new Map<string, string>();
+	for (const key of namedWorkflowScopes(graph)) {
+		const start = namedWorkflowStart(graph, key);
+		if (!start) continue;
+		names.set(start.id, uniqueTaskName((start.data?.label as string) || 'workflow', used));
+	}
+	return names;
+}
+
+/**
+ * A brand-new named workflow's scope: its own Start (holding the name and the parameters it
+ * starts with) wired straight to its own End, exactly like the primary workflow before anything
+ * has been added to it.
+ */
+export function newNamedWorkflowScope(
+	name: string,
+	variables: VarEntry[] = [],
+	declaredIn: string = ROOT_SCOPE_ID
+): { key: string; scope: ScopeGraph } {
+	const startId = newNodeId();
+	const key = workflowScopeKey(startId);
+	const endId = workflowEndNodeId(startId);
+	const nodes: Node[] = [
+		{
+			id: startId,
+			type: 'start',
+			position: { x: 0, y: 0 },
+			data: { type: 'start', label: name, variables, declaredIn }
+		},
+		{
+			id: endId,
+			type: 'end',
+			position: { x: 0, y: 0 },
+			data: { type: 'end', label: 'End' },
+			deletable: false
+		}
+	];
+	return {
+		key,
+		scope: { nodes, edges: [{ id: `e-${startId}-${endId}`, source: startId, target: endId }] }
+	};
+}
+
+/**
+ * The named workflows a task list declares. Each Start remembers the scope its `do:` was written
+ * in (`declaredIn`) so a document round-trips in the shape it was authored; one whose declaring
+ * scope is gone — or could no longer hold it — is written at the top level instead.
+ */
+function namedWorkflowsDeclaredIn(ctx: EmitContext, scopeId: string): Node[] {
+	const out: Node[] = [];
+	for (const key of namedWorkflowScopes(ctx.graph)) {
+		const start = namedWorkflowStart(ctx.graph, key);
+		if (!start) continue;
+		const declaredIn = start.data?.declaredIn as string | undefined;
+		const home =
+			declaredIn && canDeclareWorkflows(ctx.graph, declaredIn) ? declaredIn : ROOT_SCOPE_ID;
+		if (home === scopeId) out.push(start);
+	}
+	return out;
+}
+
+/**
+ * Whether a task list can declare a named workflow. Zigflow only treats a `do:` task as a
+ * workflow of its own when a non-`do:` task comes before it in the same list — otherwise it runs
+ * it in place, as a plain group — so a nested list with no such task falls back to the top level.
+ * (The top level always qualifies: with no other task there, every `do:` is a workflow anyway.)
+ */
+function canDeclareWorkflows(graph: WorkflowGraph, scopeId: string): boolean {
+	if (scopeId === ROOT_SCOPE_ID) return true;
 	const scope = graph.scopes[scopeId];
+	if (!scope) return false;
+	return scope.nodes.some((n) => n.type !== 'start' && n.type !== 'end' && n.type !== 'do');
+}
+
+/**
+ * The DSL task name of every step in one task list, by node id — shared by `scopeToTaskList` and
+ * `runIndex.ts`, which must agree exactly on what each task was called. The names of named
+ * workflows declared in the same list are reserved first: a workflow's name is fixed document
+ * wide, so a sibling task is the one that gives way.
+ */
+export function taskNamesInScope(
+	graph: WorkflowGraph,
+	scopeId: string,
+	workflowNames: Map<string, string> = namedWorkflowNames(graph)
+): { chain: Node[]; names: Map<string, string>; declared: Node[] } {
+	const scope = graph.scopes[scopeId];
+	const chain = scope
+		? orderNodesInScope(scope.nodes, scope.edges).filter(
+				(n) => n.type !== 'start' && n.type !== 'end'
+			)
+		: [];
+	const declared = namedWorkflowsDeclaredIn({ graph, workflowNames }, scopeId);
+	const used = new Set<string>(declared.map((s) => workflowNames.get(s.id)!));
+	const names = new Map<string, string>();
+	for (const node of chain) {
+		names.set(node.id, uniqueTaskName((node.data?.label as string) ?? node.type ?? 'task', used));
+	}
+	return { chain, names, declared };
+}
+
+function scopeToTaskList(ctx: EmitContext, scopeId: string): TaskList {
+	const scope = ctx.graph.scopes[scopeId];
 	if (!scope) return [];
 
-	const all = orderNodesInScope(scope.nodes, scope.edges).filter(
-		(n) => n.type !== 'start' && n.type !== 'end'
-	);
-
-	// A named workflow is not a step of the flow it is drawn beside — it is a separate Temporal
-	// workflow declared in the same document, so it never joins the chain and is emitted after it.
-	// (Only the root list can hold these; nested scopes never produce `workflow` nodes.)
-	const ordered = all.filter((n) => n.type !== 'workflow');
-	const workflows = all.filter((n) => n.type === 'workflow');
-
-	// Assign every sibling's task name up front so `switch` cases can resolve `then` targets
-	// (forward or backward references) before task bodies are built. Named workflows are in the
-	// same namespace — a case jumping at one names it exactly like it names a plain task.
-	const usedNames = new Set<string>();
-	const idToName = new Map<string, string>();
-	for (const node of [...ordered, ...workflows]) {
-		const name = uniqueTaskName((node.data?.label as string) ?? node.type ?? 'task', usedNames);
-		idToName.set(node.id, name);
-	}
+	const {
+		chain,
+		names: idToName,
+		declared
+	} = taskNamesInScope(ctx.graph, scopeId, ctx.workflowNames);
 
 	const list: TaskList = [];
 
-	// Start node variables (root scope only) become a synthetic leading `init` set task — there
-	// is no real "start" task in the DSL, this is purely a canvas convenience.
-	if (scopeId === ROOT_SCOPE_ID) {
-		list.push(...initTaskFor(scope.nodes.find((n) => n.type === 'start')));
-	}
+	// A Start's parameters (the primary workflow's, or a named workflow's) become a synthetic
+	// leading `init` set task — there is no real "start" task in the DSL.
+	list.push(...initTaskFor(scope.nodes.find((n) => n.type === 'start')));
 
-	for (const node of ordered) {
+	for (const node of chain) {
 		const name = idToName.get(node.id)!;
 
 		// A switch is the one node whose task can't be built from the node alone: its cases name
-		// siblings, which only this function knows the allocated names of.
+		// other tasks, which only the emit context knows the allocated names of.
 		if (node.type === 'switch') {
 			list.push({
 				[name]: {
 					...taskBaseFromData((node.data ?? {}) as Record<string, unknown>),
-					switch: switchCasesToAst(node, graph, idToName)
+					switch: switchCasesToAst(node, ctx, idToName)
 				}
 			});
 			continue;
 		}
 
-		list.push({ [name]: nodeToTask(node, graph, scopeId) });
+		list.push({ [name]: nodeToTask(node, ctx, scopeId) });
 	}
 
-	for (const node of workflows) {
-		list.push({ [idToName.get(node.id)!]: workflowTask(node, graph) });
+	// Declared after the chain: zigflow only registers a `do:` as its own workflow once a non-`do:`
+	// task precedes it, and where in the list it sits changes nothing else.
+	for (const start of declared) {
+		list.push({ [ctx.workflowNames.get(start.id)!]: workflowTask(start, ctx) });
 	}
 
 	return list;
 }
 
+/** The task name a Start's parameters are saved under, and read back from. */
+const INIT_TASK_NAME = 'init';
+
 /**
- * The leading `init: set: {...}` a Start node's variables become, or nothing when it has none.
- * Shared by the primary workflow's Start node and every named workflow's, which is the whole point
- * of a named workflow having a Start of its own: it seeds `$data` for its own run.
+ * The leading `init: set: {...}` a Start node's parameters become, or nothing when it has none.
+ * Shared by the primary workflow's Start node and every named workflow's: it seeds `$data` for
+ * that workflow's own run.
  */
 function initTaskFor(startNode: Node | undefined): TaskList {
 	const vars = ((startNode?.data?.variables as VarEntry[]) ?? []).filter((v) => v.key);
-	return vars.length > 0 ? [{ init: { set: recordFromEntries(vars) } }] : [];
+	return vars.length > 0 ? [{ [INIT_TASK_NAME]: { set: recordFromEntries(vars) } }] : [];
 }
 
 /**
- * A named workflow: `<name>: { do: [...] }`. Its Start node *is* the node this is built from, so
- * its variables lead the body — the same `init: set:` convention the primary workflow's Start uses.
+ * Inverse of `initTaskFor`: a list's leading `init` task that is nothing but a `set:` is a Start's
+ * parameters, so it is lifted back onto the Start instead of loading as a step of its own.
  */
-function workflowTask(node: Node, graph: WorkflowGraph): TaskNode {
-	const data = (node.data ?? {}) as Record<string, unknown>;
+function splitInitTask(list: TaskList): { variables: VarEntry[]; rest: TaskList } {
+	const first = list[0];
+	if (!first) return { variables: [], rest: list };
+	const [name, task] = Object.entries(first)[0];
+	const keys = Object.keys(task);
+	if (name !== INIT_TASK_NAME || keys.length !== 1 || keys[0] !== 'set') {
+		return { variables: [], rest: list };
+	}
+	return {
+		variables: entriesFromRecord((task as { set: Record<string, unknown> }).set),
+		rest: list.slice(1)
+	};
+}
+
+/** A named workflow: `<name>: { do: [...] }`, built from its Start node and its own scope. */
+function workflowTask(start: Node, ctx: EmitContext): TaskNode {
+	const data = (start.data ?? {}) as Record<string, unknown>;
 	return {
 		...taskBaseFromData(data),
-		do: [...initTaskFor(node), ...scopeToTaskList(graph, workflowScopeKey(node.id))]
+		do: scopeToTaskList(ctx, workflowScopeKey(start.id))
 	} as TaskNode;
 }
 
 /**
  * Where one case sends the run, as the `then:` the DSL wants: a flow directive as written, or the
- * name of the task it jumps at. The jump is re-resolved through the target *node* so it survives
- * that task being renamed, falling back to the name the document had.
- *
- * A target outside the switch's own scope — a named workflow, which lives at the root while the
- * switch may not — is resolved by name from the root scope instead, since only same-scope siblings
- * are in `idToName`.
+ * name of a named workflow — zigflow starts a switch's named `then:` as a child workflow, whichever
+ * list declares it. The target is re-resolved through its Start node so a rename keeps the jump,
+ * falling back to the name the document had.
  */
 function caseTargetToAst(
 	c: CaseEntry,
-	graph: WorkflowGraph,
+	ctx: EmitContext,
 	idToName: Map<string, string>
 ): FlowDirective {
 	if (c.routing !== 'task') return c.routing;
 	if (c.targetNodeId) {
+		const workflow = ctx.workflowNames.get(c.targetNodeId);
+		if (workflow) return workflow;
+		// Only reachable from hand-written DSL whose `then:` names a sibling task.
 		const sibling = idToName.get(c.targetNodeId);
 		if (sibling) return sibling;
-		const workflow = workflowNameById(graph, c.targetNodeId);
-		if (workflow) return workflow;
+		return 'continue';
 	}
-	// A `targetNodeId` that no longer resolves means the task it named has been deleted — a
-	// dangling `then:` is DSL no worker can run, so the case falls back to carrying on instead.
+	// A `targetNodeId` that no longer resolves (above) means what it named has been deleted — a
+	// dangling `then:` is DSL no worker can run, so the case carries on instead. A case that never
+	// resolved keeps the name the document had, so hand-written DSL round-trips unchanged.
 	return c.taskName ?? 'continue';
-}
-
-/** The task name a root-level named workflow node is emitted under, by node id. */
-function workflowNameById(graph: WorkflowGraph, nodeId: string): string | undefined {
-	const node = graph.scopes[ROOT_SCOPE_ID]?.nodes.find(
-		(n) => n.id === nodeId && n.type === 'workflow'
-	);
-	return node ? toTaskName((node.data?.label as string) ?? '') : undefined;
 }
 
 function switchCasesToAst(
 	node: Node,
-	graph: WorkflowGraph,
+	ctx: EmitContext,
 	idToName: Map<string, string>
 ): SwitchCase[] {
 	return switchCasesOf(node).map((c) => {
 		const when = c.condition?.trim();
-		const body: SwitchCaseBody = { then: caseTargetToAst(c, graph, idToName) };
+		const body: SwitchCaseBody = { then: caseTargetToAst(c, ctx, idToName) };
 		if (when) body.when = when;
 		return { [toTaskName(c.name) || 'case']: body };
 	});
 }
 
-function nodeToTask(node: Node, graph: WorkflowGraph, scopeId: string): TaskNode {
+function nodeToTask(node: Node, ctx: EmitContext, scopeId: string): TaskNode {
 	const data = (node.data ?? {}) as Record<string, unknown>;
 	const type = (node.type ?? 'set') as WorkflowNodeType;
 	const base = taskBaseFromData(data);
@@ -368,7 +513,7 @@ function nodeToTask(node: Node, graph: WorkflowGraph, scopeId: string): TaskNode
 					at: (data.at as string) || 'index',
 					in: (data.in as string) || '${ $input.items }'
 				}) as ForTask['for'],
-				do: scopeToTaskList(graph, childScope)
+				do: scopeToTaskList(ctx, childScope)
 			};
 			const whileExpr = ((data.while as string) ?? '').trim();
 			if (whileExpr) forTask.while = whileExpr;
@@ -379,7 +524,7 @@ function nodeToTask(node: Node, graph: WorkflowGraph, scopeId: string): TaskNode
 			const branchList: TaskList = branches.map((b) => {
 				const childScope = forkBranchScopeKey(scopeId, node.id, b.id);
 				const branchName = toSlug(b.name) || 'branch';
-				const body = scopeToTaskList(graph, childScope);
+				const body = scopeToTaskList(ctx, childScope);
 				// A branch scope holding exactly one task named identically to the branch itself is how
 				// a bare (non-`do`-wrapped) branch task round-trips — e.g. a branch that's just a `for`
 				// or `run` task, not a `do:` grouping. Emitting it bare here mirrors the load-side
@@ -402,14 +547,14 @@ function nodeToTask(node: Node, graph: WorkflowGraph, scopeId: string): TaskNode
 			const catchScope = catchScopeKey(scopeId, node.id);
 			const tryTask: TryTask = {
 				...base,
-				try: scopeToTaskList(graph, tryScope),
-				catch: { as: (data.catchAs as string) || 'error', do: scopeToTaskList(graph, catchScope) }
+				try: scopeToTaskList(ctx, tryScope),
+				catch: { as: (data.catchAs as string) || 'error', do: scopeToTaskList(ctx, catchScope) }
 			};
 			return tryTask;
 		}
 		case 'do': {
 			const childScope = forScopeKey(scopeId, node.id);
-			return { ...base, do: scopeToTaskList(graph, childScope) };
+			return { ...base, do: scopeToTaskList(ctx, childScope) };
 		}
 		// `switch` never reaches here: `scopeToTaskList` builds it itself, because its branch cases
 		// need the sibling names that function is in the middle of allocating.
@@ -605,7 +750,24 @@ export function astToGraph(doc: ZigflowDocument): {
 	header: WorkflowHeaderFields;
 } {
 	const scopes: Record<string, ScopeGraph> = {};
-	buildScope(doc.do, ROOT_SCOPE_ID, scopes);
+	const { variables, rest } = splitInitTask(doc.do);
+	buildScope(rest, ROOT_SCOPE_ID, scopes, {
+		start: {
+			id: PRIMARY_START_ID,
+			type: 'start',
+			position: { x: 0, y: 0 },
+			data: { type: 'start', label: 'Start', variables },
+			deletable: false
+		},
+		end: {
+			id: PRIMARY_END_ID,
+			type: 'end',
+			position: { x: 0, y: 0 },
+			data: { type: 'end', label: 'End' },
+			deletable: false
+		}
+	});
+	resolveCaseTargets({ scopes });
 	return {
 		graph: { scopes },
 		header: {
@@ -626,19 +788,53 @@ function newNodeId(): string {
 	return `node-${crypto.randomUUID()}`;
 }
 
-function buildScope(list: TaskList, scopeId: string, scopesOut: Record<string, ScopeGraph>): void {
-	const nodes: Node[] = [];
-	const nameToId = new Map<string, string>();
+/** The Start and End a top-level flow (the primary workflow, or a named one) is drawn between. */
+interface FlowTerminals {
+	start: Node;
+	end: Node;
+}
 
-	// Pass 1: allocate a node id + type per task so forward/backward `switch.then` references
-	// and nested-scope keys are available while building task bodies in pass 2.
-	for (const entry of list) {
+/**
+ * Which entries of a task list are named workflows rather than steps, mirroring zigflow's own
+ * rule (`DoTaskBuilder.Build`): a `do:` task that follows any non-`do:` task in the same list is
+ * registered as a Temporal workflow of its own and skipped in place. At the top level of a
+ * document holding nothing but `do:` tasks, every one of them is a workflow.
+ */
+function namedWorkflowEntries(list: TaskList, scopeId: string): boolean[] {
+	const isDo = list.map((entry) => isBareDoWrapper(Object.values(entry)[0]));
+	const allDo = isDo.length > 0 && isDo.every(Boolean);
+	let seenStep = false;
+	return isDo.map((d) => {
+		const named = d && (seenStep || (allDo && scopeId === ROOT_SCOPE_ID));
+		if (!d) seenStep = true;
+		return named;
+	});
+}
+
+function buildScope(
+	list: TaskList,
+	scopeId: string,
+	scopesOut: Record<string, ScopeGraph>,
+	terminals?: FlowTerminals
+): void {
+	const nodes: Node[] = [];
+	const named = namedWorkflowEntries(list, scopeId);
+	const steps: { name: string; task: TaskNode }[] = [];
+
+	list.forEach((entry, i) => {
 		const [name, task] = Object.entries(entry)[0];
-		const id = newNodeId();
-		nameToId.set(name, id);
+		// A named workflow is not a step of this list: it is drawn as a flow of its own, remembering
+		// only that this is the list that declares it.
+		if (named[i]) buildNamedWorkflow(name, task as TaskNode & { do: TaskList }, scopeId, scopesOut);
+		else steps.push({ name, task });
+	});
+
+	// Pass 1: allocate a node id + type per task so nested-scope keys are available while building
+	// task bodies in pass 2.
+	for (const { name, task } of steps) {
 		nodes.push({
-			id,
-			type: taskKindToNodeType(task, scopeId),
+			id: newNodeId(),
+			type: taskKindToNodeType(task),
 			position: { x: 0, y: 0 },
 			data: { label: name }
 		});
@@ -646,18 +842,14 @@ function buildScope(list: TaskList, scopeId: string, scopesOut: Record<string, S
 
 	// Pass 2: fill each node's data, recursing into nested scopes as needed.
 	nodes.forEach((node, idx) => {
-		const [, task] = Object.entries(list[idx])[0];
 		node.data = {
 			type: node.type,
 			...node.data,
-			...dataFromTask(task, node.id, scopeId, nameToId, scopesOut)
+			...dataFromTask(steps[idx].task, node.id, scopeId, scopesOut)
 		};
 	});
 
-	// Named workflows are declared beside the flow, not sequenced into it: each runs on its own, so
-	// it is left out of the chain entirely rather than wired between its neighbours.
-	const chain = nodes.filter((n) => n.type !== 'workflow');
-
+	const chain = terminals ? [terminals.start, ...nodes, terminals.end] : nodes;
 	const edges: Edge[] = [];
 	for (let i = 0; i < chain.length - 1; i++) {
 		edges.push({
@@ -667,43 +859,56 @@ function buildScope(list: TaskList, scopeId: string, scopesOut: Record<string, S
 		});
 	}
 
-	if (scopeId === ROOT_SCOPE_ID) {
-		const lastRealNode = chain[chain.length - 1];
+	layoutScope(chain, edges);
+	scopesOut[scopeId] = { nodes: chain, edges };
+}
 
-		const startNode: Node = {
-			id: 'start',
-			type: 'start',
-			position: { x: 0, y: 0 },
-			data: { type: 'start', label: 'Start', variables: [] as VarEntry[] },
-			deletable: false
-		};
-		nodes.unshift(startNode);
-		if (chain.length > 0) {
-			edges.unshift({ id: `e-start-${chain[0].id}`, source: 'start', target: chain[0].id });
-		}
+/**
+ * A named workflow loads exactly like the primary one: its own Start (named after the task key,
+ * holding its leading `init: set:` as parameters), its steps, and its own End — in a scope of its
+ * own, since it runs as a separate Temporal workflow rather than as part of the list declaring it.
+ */
+function buildNamedWorkflow(
+	name: string,
+	task: TaskNode & { do: TaskList },
+	declaredIn: string,
+	scopesOut: Record<string, ScopeGraph>
+): void {
+	const { variables, rest } = splitInitTask(task.do);
+	const { key, scope } = newNamedWorkflowScope(name, variables, declaredIn);
+	const [start, end] = scope.nodes;
+	start.data = { ...start.data, ...taskBaseToData(task) };
+	// Registered before the body is built so declaration order is kept: the first `do:` in the
+	// document is the first named workflow on the canvas.
+	scopesOut[key] = scope;
+	buildScope(rest, key, scopesOut, { start, end });
+}
 
-		// Every workflow gets an explicit `End` node too, same as `Start` — otherwise the last real
-		// task's chain trails off with nothing after it, which reads as open-ended/unfinished rather
-		// than "this is where the workflow terminates". Purely a canvas convenience like `Start`:
-		// filtered out of the real task list in `scopeToTaskList` above, never touches the DSL.
-		const endNode: Node = {
-			id: 'end',
-			type: 'end',
-			position: { x: 0, y: 0 },
-			data: { type: 'end', label: 'End' },
-			deletable: false
-		};
-		const lastNodeBeforeEnd = lastRealNode ?? startNode;
-		nodes.push(endNode);
-		edges.push({
-			id: `e-${lastNodeBeforeEnd.id}-end`,
-			source: lastNodeBeforeEnd.id,
-			target: 'end'
-		});
+/**
+ * Resolves every loaded switch case's `then:` to the node it names, now that the whole document —
+ * including named workflows declared further down or deeper in — has been built. A name is looked
+ * up among named workflows first, since that is what zigflow starts for a named `then:`; a sibling
+ * task of the same name is the fallback for hand-written DSL that means one.
+ */
+function resolveCaseTargets(graph: WorkflowGraph): void {
+	const workflowIds = new Map<string, string>();
+	for (const key of namedWorkflowScopes(graph)) {
+		const start = namedWorkflowStart(graph, key);
+		if (start) workflowIds.set(start.data?.label as string, start.id);
 	}
 
-	layoutScope(nodes, edges);
-	scopesOut[scopeId] = { nodes, edges };
+	for (const scope of Object.values(graph.scopes)) {
+		const siblingIds = new Map(scope.nodes.map((n) => [n.data?.label as string, n.id]));
+		for (const node of scope.nodes) {
+			if (node.type !== 'switch') continue;
+			const cases = switchCasesOf(node).map((c) => {
+				if (c.routing !== 'task' || !c.taskName) return c;
+				const targetNodeId = workflowIds.get(c.taskName) ?? siblingIds.get(c.taskName);
+				return targetNodeId ? { ...c, targetNodeId } : c;
+			});
+			node.data = { ...node.data, cases };
+		}
+	}
 }
 
 /** One case of a loaded `switch`, resolved to how the canvas should model it. */
@@ -717,10 +922,10 @@ interface SwitchCasePlan {
 
 /**
  * What each of a `switch`'s cases becomes on the canvas. There is nothing to restructure: a case's
- * `then:` is either one of the three flow directives or the name of a task, and both are kept
- * exactly as written. The name is resolved to a node later (`dataFromTask`), so a jump survives its
- * target being renamed; an unresolvable name stays as `taskName` so the document round-trips
- * unchanged rather than losing the jump.
+ * `then:` is either one of the three flow directives or the name of a workflow to start, and both
+ * are kept exactly as written. The name is resolved to a node once the whole document is loaded
+ * (`resolveCaseTargets`), so a jump survives its target being renamed; an unresolvable name stays
+ * as `taskName` so the document round-trips unchanged rather than losing the jump.
  */
 function planSwitchCases(task: SwitchTask): SwitchCasePlan[] {
 	return task.switch.map((item) => {
@@ -736,11 +941,11 @@ function planSwitchCases(task: SwitchTask): SwitchCasePlan[] {
 }
 
 /**
- * Which node a loaded task becomes. The one context-sensitive case is `do:`: at the root of the
- * document it declares a whole separate Temporal workflow (named by its task key, drawn with its
- * own Start and End), while nested inside a `for`/`try`/`fork` body it is only a sequential group.
+ * Which node a loaded step becomes. A `do:` that reaches here is one zigflow runs in place (a
+ * plain group); the ones it runs as workflows of their own never become a node at all — see
+ * `namedWorkflowEntries`.
  */
-function taskKindToNodeType(task: TaskNode, scopeId: string): WorkflowNodeType {
+function taskKindToNodeType(task: TaskNode): WorkflowNodeType {
 	if ('call' in task) return task.call === 'grpc' ? 'grpcCall' : 'call';
 	if ('for' in task) return 'for';
 	if ('fork' in task) return 'fork';
@@ -751,7 +956,7 @@ function taskKindToNodeType(task: TaskNode, scopeId: string): WorkflowNodeType {
 	if ('switch' in task) return 'switch';
 	if ('try' in task) return 'try';
 	if ('wait' in task) return 'wait';
-	if ('do' in task) return scopeId === ROOT_SCOPE_ID ? 'workflow' : 'do';
+	if ('do' in task) return 'do';
 	throw new Error('Unknown task shape while converting DSL to the canvas');
 }
 
@@ -759,7 +964,6 @@ function dataFromTask(
 	task: TaskNode,
 	nodeId: string,
 	scopeId: string,
-	nameToId: Map<string, string>,
 	scopesOut: Record<string, ScopeGraph>
 ): Record<string, unknown> {
 	const base = taskBaseToData(task);
@@ -824,17 +1028,14 @@ function dataFromTask(
 	}
 	if ('set' in task) return { ...base, variables: entriesFromRecord(task.set) };
 	if ('switch' in task) {
-		const cases: CaseEntry[] = planSwitchCases(task).map((p) => {
-			const targetNodeId = p.routing === 'task' ? nameToId.get(p.taskName ?? '') : undefined;
-			return {
-				id: crypto.randomUUID(),
-				name: p.caseName,
-				condition: p.when ?? '',
-				routing: p.routing,
-				...(p.taskName ? { taskName: p.taskName } : {}),
-				...(targetNodeId ? { targetNodeId } : {})
-			};
-		});
+		// Targets are resolved once the whole document is built — see `resolveCaseTargets`.
+		const cases: CaseEntry[] = planSwitchCases(task).map((p) => ({
+			id: crypto.randomUUID(),
+			name: p.caseName,
+			condition: p.when ?? '',
+			routing: p.routing,
+			...(p.taskName ? { taskName: p.taskName } : {})
+		}));
 		return { ...base, cases };
 	}
 	if ('try' in task) {
@@ -844,15 +1045,9 @@ function dataFromTask(
 	}
 	if ('wait' in task) return { ...base, ...waitDataFromTask(task) };
 	if ('do' in task) {
-		// A root-level `do:` is a named workflow, whose body lives under its own scope key. Its Start
-		// node's `variables` behave exactly like the primary workflow's Start: emitted as a leading
-		// `init: set:` (see `initTaskFor`) and read back as an ordinary `set` node, not re-absorbed.
-		buildScope(
-			task.do,
-			scopeId === ROOT_SCOPE_ID ? workflowScopeKey(nodeId) : forScopeKey(scopeId, nodeId),
-			scopesOut
-		);
-		return scopeId === ROOT_SCOPE_ID ? { ...base, variables: [] as VarEntry[] } : base;
+		// A group zigflow runs in place — named workflows never reach here (`namedWorkflowEntries`).
+		buildScope(task.do, forScopeKey(scopeId, nodeId), scopesOut);
+		return base;
 	}
 	return base;
 }

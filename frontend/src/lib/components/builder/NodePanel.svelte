@@ -5,7 +5,9 @@
 	import type { WorkflowMeta, InputField, Workflow } from '$lib/types';
 	import { NODE_META } from './builderConfig';
 	import type { VarEntry, CaseEntry, EventEntry, BranchEntry } from './builderConfig';
-	import { newDirectiveCase } from '$lib/zigflow-engine/switchCases';
+	import { caseTargetOptions, newDirectiveCase } from '$lib/zigflow-engine/switchCases';
+	import { isNamedWorkflowStart } from '$lib/zigflow-engine/graph';
+	import { toTaskName } from '$lib/zigflow-engine/slug';
 	import SwitchCaseEditor from './SwitchCaseEditor.svelte';
 	import type { WorkflowNodeType } from '$lib/types';
 	import ExpressionInput from './ExpressionInput.svelte';
@@ -344,15 +346,8 @@
 
 	// ── task slug (DSL id derived from label) ─────────────────────────
 
-	const taskSlug = $derived.by(() => {
-		const lbl = (node?.data?.label as string) ?? nodeType;
-		return (
-			lbl
-				.toLowerCase()
-				.replace(/[^a-z0-9]+/g, '-')
-				.replace(/^-+|-+$/g, '') || 'task'
-		);
-	});
+	// The same naming the DSL uses, so an identifier-shaped label (`notifyCustomer`) shows as saved.
+	const taskSlug = $derived(toTaskName((node?.data?.label as string) ?? nodeType));
 
 	// ── available variables at this node ─────────────────────────────
 
@@ -360,41 +355,22 @@
 
 	// ── switch case targets ───────────────────────────────────────────
 
-	/**
-	 * Where a `switch` case's jump may land: a task at the same scope/nesting depth as the switch
-	 * (the canvas renders every scope inlined as one flat list, so without the filter the picker
-	 * would offer nodes the DSL can never reach), plus every named workflow — those are declared at
-	 * the document's top level and a `then:` may name one from anywhere.
-	 */
-	const caseTargetOptions = $derived(
-		nodes
-			.filter(
-				(n) =>
-					n.id !== node.id &&
-					n.type !== 'start' &&
-					n.type !== 'end' &&
-					(n.type === 'workflow' ||
-						(n.data as Record<string, unknown> | undefined)?.[OWNER_SCOPE_TAG] ===
-							(node.data as Record<string, unknown> | undefined)?.[OWNER_SCOPE_TAG])
-			)
-			.map((n) => ({
-				value: n.id,
-				label: n.type === 'workflow' ? `${n.data?.label} (workflow)` : `${n.data?.label ?? n.type}`
-			}))
-	);
+	const targetOptions = $derived(caseTargetOptions(node, nodes));
+
+	/** A Start dropped from the palette — its own workflow, as opposed to the primary one's Start. */
+	const isNamedStart = $derived(isNamedWorkflowStart(node));
 
 	/**
-	 * A named workflow with nothing in it serializes as `do: []`, which `zigflow validate` rejects
+	 * A named workflow with no steps serializes as `do: []`, which `zigflow validate` rejects
 	 * ("Do: is required") even though the published JSON schema allows an empty list — so it is
 	 * flagged here, where the author is already looking, rather than surfacing only at deploy time.
 	 */
 	const workflowIsEmpty = $derived(
-		nodeType === 'workflow' &&
-			!nodes.some(
-				(n) =>
-					(n.data as Record<string, unknown> | undefined)?.[OWNER_SCOPE_TAG] ===
-					workflowScopeKey(node.id)
-			)
+		isNamedStart &&
+			!nodes.some((n) => {
+				const owner = (n.data as Record<string, unknown> | undefined)?.[OWNER_SCOPE_TAG];
+				return owner === workflowScopeKey(node.id) && n.type !== 'start' && n.type !== 'end';
+			})
 	);
 
 	const noDataFlow = ['start', 'end'] as const;
@@ -435,7 +411,7 @@
 				<div class="flex flex-col gap-1">
 					<label
 						class="text-base-content/50 text-[10px] font-semibold uppercase tracking-wider"
-						for="np-label">Label</label
+						for="np-label">{isNamedStart ? 'Workflow name' : 'Label'}</label
 					>
 					<input
 						id="np-label"
@@ -718,7 +694,7 @@
 			{/if}
 
 			<!-- ── START: $input SCHEMA ────────────────────────────────── -->
-			{#if nodeType === 'start'}
+			{#if nodeType === 'start' && !isNamedStart}
 				<Accordion title="$input Schema" defaultOpen={localInputSchema.length > 0}>
 					<div class="flex flex-col gap-1.5">
 						<div class="flex items-center justify-between">
@@ -810,8 +786,11 @@
 			{/if}
 
 			<!-- ── SET ───────────────────────────────────────────────── -->
-			{#if nodeType === 'set' || nodeType === 'start' || nodeType === 'workflow'}
-				<Accordion title={nodeType === 'set' ? 'Variables' : 'Init Variables'} defaultOpen={true}>
+			{#if nodeType === 'set' || nodeType === 'start'}
+				<Accordion
+					title={nodeType === 'set' ? 'Variables' : isNamedStart ? 'Parameters' : 'Init Variables'}
+					defaultOpen={true}
+				>
 					<div class="flex flex-col gap-1.5">
 						<div class="flex items-center justify-between">
 							<p class="text-base-content/30 text-[9px]">
@@ -896,7 +875,7 @@
 								<SwitchCaseEditor
 									caseEntry={c}
 									availVars={availableVars}
-									targetOptions={caseTargetOptions}
+									{targetOptions}
 									onchange={(p) => updateCase(i, p)}
 								/>
 							</div>
@@ -1521,18 +1500,19 @@
 			{/if}
 
 			<!-- ── WORKFLOW (a named workflow's own Start) ──────────────── -->
-			{#if nodeType === 'workflow'}
+			{#if isNamedStart}
 				<p class="text-base-content/30 py-2 text-center text-xs">
-					Its own workflow, saved as <span class="font-mono">{f('label') || 'name'}: do:</span> —
-					run on its own, or reached by a switch case's
-					<span class="font-mono">then:</span>. Its steps are the framed sub-flow on the canvas.
+					A named workflow, saved as <span class="font-mono">{f('label') || 'name'}: do:</span>. A
+					switch case starts it by name as a child workflow — drag a case from a switch onto this
+					Start. Its parameters run first; it sees the caller's
+					<span class="font-mono">$input</span> and <span class="font-mono">$data</span>.
 				</p>
 				{#if workflowIsEmpty}
 					<div class="alert alert-warning mb-2 py-2 text-xs">
 						<TriangleAlert size={14} />
 						<span>
-							No steps yet. Zigflow rejects an empty <span class="font-mono">do:</span> — drag a task
-							into this workflow's frame before running or deploying it.
+							No steps yet. Zigflow rejects an empty <span class="font-mono">do:</span> — drop a task
+							next to this Start and connect it before running or deploying.
 						</span>
 					</div>
 				{/if}

@@ -1,24 +1,35 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { astToGraph, graphToAst } from './graph';
+import {
+	astToGraph,
+	graphToAst,
+	namedWorkflowScopes,
+	namedWorkflowStart,
+	type ScopeGraph
+} from './graph';
 import { deserializeZigflowDocument } from './deserialize';
 import { serializeZigflowDocument } from './serialize';
-import { ROOT_SCOPE_ID, workflowScopeKey } from './scopeKey';
+import { ROOT_SCOPE_ID } from './scopeKey';
 import type { CaseEntry } from '../components/builder/builderConfig';
 
 /**
  * `example/switch.yaml` is the hand-written document the switch model is measured against: every
  * shape a switch can take is in it (cases jumping at named workflows, and a second switch made only
  * of flow directives), and none of it was written by this engine. Its own comment says what the
- * handlers are — "These are declared as additional workflows" — and `zigflow graph` agrees: each
- * root-level `do:` task is drawn as its own subgraph with its own Start and End.
+ * handlers are — "These are declared as additional workflows" — and zigflow agrees: a `do:` that
+ * follows another task is registered as a workflow of its own, drawn by `zigflow graph` as its own
+ * subgraph with its own Start and End.
  */
 function exampleDsl(): string {
 	return readFileSync(
 		fileURLToPath(new URL('../../../../example/switch.yaml', import.meta.url)),
 		'utf8'
 	);
+}
+
+function label(scope: ScopeGraph, id: string): unknown {
+	return scope.nodes.find((n) => n.id === id)?.data?.label;
 }
 
 function loadAndSave(text: string): string {
@@ -29,36 +40,33 @@ function loadAndSave(text: string): string {
 }
 
 describe('example/switch.yaml', () => {
-	it('loads the three handlers as named workflows the switch jumps at, not as branches of it', () => {
+	it('loads the three handlers as named workflows the switch starts, not as steps of it', () => {
 		const parsed = deserializeZigflowDocument(exampleDsl());
 		if (!parsed.ok) throw new Error('fixture does not parse');
 		const { graph } = astToGraph(parsed.document);
 		const root = graph.scopes[ROOT_SCOPE_ID];
 
+		// The primary workflow holds only its own steps: every `do:` after them is a workflow of its
+		// own, which zigflow registers by name and never runs in place.
 		expect(root.nodes.map((n) => [n.data?.label, n.type])).toEqual([
 			['Start', 'start'],
 			['wait', 'wait'],
 			['switcher', 'switch'],
 			['flowSwitcher', 'switch'],
 			['wait', 'wait'],
-			['processElectronicOrder', 'workflow'],
-			['processPhysicalOrder', 'workflow'],
-			['handleUnknownOrderType', 'workflow'],
 			['End', 'end']
 		]);
-
-		// The primary workflow's chain skips the named workflows entirely — they run on their own.
-		const chain = root.edges.map((e) => {
-			const label = (id: string) => root.nodes.find((n) => n.id === id)?.data?.label;
-			return `${label(e.source)}->${label(e.target)}`;
-		});
-		expect(chain).toEqual([
+		expect(root.edges.map((e) => `${label(root, e.source)}->${label(root, e.target)}`)).toEqual([
 			'Start->wait',
 			'wait->switcher',
 			'switcher->flowSwitcher',
 			'flowSwitcher->wait',
 			'wait->End'
 		]);
+
+		expect(
+			namedWorkflowScopes(graph).map((k) => namedWorkflowStart(graph, k)?.data?.label)
+		).toEqual(['processElectronicOrder', 'processPhysicalOrder', 'handleUnknownOrderType']);
 
 		const switcher = root.nodes.find((n) => n.data?.label === 'switcher')!;
 		const cases = switcher.data?.cases as CaseEntry[];
@@ -68,30 +76,52 @@ describe('example/switch.yaml', () => {
 			['default', 'task', 'handleUnknownOrderType']
 		]);
 
-		// each case resolves to the workflow node itself, so renaming it keeps the jump
-		const byLabel = (label: string) => root.nodes.find((n) => n.data?.label === label)!.id;
-		expect(cases.map((c) => c.targetNodeId)).toEqual([
-			byLabel('processElectronicOrder'),
-			byLabel('processPhysicalOrder'),
-			byLabel('handleUnknownOrderType')
-		]);
+		// each case resolves to that workflow's Start node, so renaming it keeps the case
+		expect(cases.map((c) => c.targetNodeId)).toEqual(
+			namedWorkflowScopes(graph).map((k) => namedWorkflowStart(graph, k)!.id)
+		);
 	});
 
-	it("puts each named workflow's steps in its own scope", () => {
+	it('draws each named workflow like the primary one: its own Start, its steps, its own End', () => {
 		const parsed = deserializeZigflowDocument(exampleDsl());
 		if (!parsed.ok) throw new Error('fixture does not parse');
 		const { graph } = astToGraph(parsed.document);
-		const body = (label: string) => {
-			const node = graph.scopes[ROOT_SCOPE_ID].nodes.find((n) => n.data?.label === label)!;
-			return graph.scopes[workflowScopeKey(node.id)].nodes.map((n) => n.data?.label);
+		const flow = (name: string) => {
+			const key = namedWorkflowScopes(graph).find(
+				(k) => namedWorkflowStart(graph, k)?.data?.label === name
+			)!;
+			const scope = graph.scopes[key];
+			return {
+				nodes: scope.nodes.map((n) => `${n.type}:${n.data?.label}`),
+				edges: scope.edges.map((e) => `${label(scope, e.source)}->${label(scope, e.target)}`)
+			};
 		};
-		expect(body('processElectronicOrder')).toEqual(['validatePayment', 'fulfillOrder']);
-		expect(body('processPhysicalOrder')).toEqual([
-			'checkInventory',
-			'packItems',
-			'scheduleShipping'
+		expect(flow('processElectronicOrder')).toEqual({
+			nodes: [
+				'start:processElectronicOrder',
+				'call:validatePayment',
+				'call:fulfillOrder',
+				'end:End'
+			],
+			edges: [
+				'processElectronicOrder->validatePayment',
+				'validatePayment->fulfillOrder',
+				'fulfillOrder->End'
+			]
+		});
+		expect(flow('processPhysicalOrder').nodes).toEqual([
+			'start:processPhysicalOrder',
+			'call:checkInventory',
+			'call:packItems',
+			'call:scheduleShipping',
+			'end:End'
 		]);
-		expect(body('handleUnknownOrderType')).toEqual(['logWarning', 'notifyAdmin']);
+		expect(flow('handleUnknownOrderType').nodes).toEqual([
+			'start:handleUnknownOrderType',
+			'call:logWarning',
+			'call:notifyAdmin',
+			'end:End'
+		]);
 	});
 
 	it('keeps the flow-directive switch exactly as written', () => {

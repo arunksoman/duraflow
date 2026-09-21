@@ -35,7 +35,6 @@ export type WorkflowNodeType =
 	| 'call'
 	| 'grpcCall'
 	| 'do'
-	| 'workflow'
 	| 'for'
 	| 'fork'
 	| 'listen'

@@ -36,6 +36,20 @@ export function resolveScopePath(index: RunIndex, scopePath: string): ScopeResol
 		const children = index.childScopesByParent.get(scopeId) ?? [];
 		const token = tokens[i];
 
+		if (token === 'workflow') {
+			// A named workflow, started by a switch case as a child workflow. It is registered by
+			// name for the whole document, so it resolves the same from any scope; its name may itself
+			// contain "_", so the longest remaining run of tokens that names one wins.
+			const rest = tokens.slice(i + 1);
+			const match = matchNamedWorkflow(index, rest);
+			if (!match) {
+				return { scopeId: null, ambiguous: true, reason: `no named workflow "${rest.join('_')}"` };
+			}
+			scopeId = match.scopeId;
+			i += match.consumed;
+			continue;
+		}
+
 		if (token === 'try' || token === 'catch') {
 			const match = uniqueChildOfKind(children, token);
 			if (!match) {
@@ -62,7 +76,11 @@ export function resolveScopePath(index: RunIndex, scopePath: string): ScopeResol
 			const rest = tokens.slice(i + 1);
 			const match = matchForkBranch(children, rest);
 			if (!match) {
-				return { scopeId: null, ambiguous: true, reason: `no fork branch matching "${rest.join('_')}"` };
+				return {
+					scopeId: null,
+					ambiguous: true,
+					reason: `no fork branch matching "${rest.join('_')}"`
+				};
 			}
 			scopeId = match.child.childScopeId;
 			i += match.consumed;
@@ -88,6 +106,17 @@ function matchForkBranch(
 		const key = rest.slice(0, take).join('_');
 		const child = children.find((c) => c.kind === 'fork' && c.branchKey === key);
 		if (child) return { child, consumed: take };
+	}
+	return null;
+}
+
+function matchNamedWorkflow(
+	index: RunIndex,
+	rest: string[]
+): { scopeId: string; consumed: number } | null {
+	for (let take = rest.length; take >= 1; take--) {
+		const scopeId = index.workflowScopeByName.get(rest.slice(0, take).join('_'));
+		if (scopeId) return { scopeId, consumed: take };
 	}
 	return null;
 }
@@ -149,6 +178,11 @@ export function describeScopePath(scopePath: string): string {
 		const token = tokens[i];
 		if (token === 'for') {
 			parts.push(`for[${tokens[++i] ?? '?'}]`);
+		} else if (token === 'workflow') {
+			// Greedy like `resolveScopePath` can't be here (no index), so a named workflow followed by
+			// further scopes reads as one long name — still a correct trail, just less split up.
+			parts.push(tokens.slice(i + 1).join('_') || '?');
+			i = tokens.length;
 		} else if (token === 'fork') {
 			parts.push(`fork:${tokens.slice(i + 1).join('_') || '?'}`);
 			i = tokens.length;

@@ -40,6 +40,9 @@
 	const tone = $derived(runTone(runState));
 	const toneColor = $derived(RUN_TONE_VAR[tone]);
 
+	/** The primary workflow's Start — fixed. (A named workflow's Start is a `start` node too.) */
+	const isPrimaryStart = $derived(nodeType === 'start' && id === 'start');
+
 	let isHovered = $state(false);
 
 	const { deleteElements } = useSvelteFlow();
@@ -50,7 +53,9 @@
 	}
 </script>
 
-{#if nodeType !== 'start'}
+<!-- The primary Start has nothing before it. A named workflow's Start does: the switch cases that
+     start it arrive here. -->
+{#if !isPrimaryStart}
 	<Handle type="target" position={Position.Top} />
 {/if}
 
@@ -72,7 +77,8 @@
 	onmouseenter={() => (isHovered = true)}
 	onmouseleave={() => (isHovered = false)}
 >
-	{#if isHovered && nodeType !== 'start' && !data.readOnly}
+	<!-- The primary Start and every End are fixed; a named workflow's Start deletes that workflow. -->
+	{#if isHovered && !isPrimaryStart && nodeType !== 'end' && !data.readOnly}
 		<button
 			class="bg-error text-error-content absolute -right-2 -top-2 z-10 flex size-5 cursor-pointer items-center justify-center rounded-full shadow-md transition-transform hover:scale-110"
 			onclick={handleDelete}

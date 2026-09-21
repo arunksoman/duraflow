@@ -26,14 +26,14 @@ export interface VarEntry {
 /**
  * Where one `switch` case sends the run.
  *
- * - `task` — a jump at a task the switch can reach: a sibling in its own scope, or a named
- *   workflow declared alongside the primary one (`then: processElectronicOrder`). This is the only
- *   shape the DSL has for "go and do that" — a case never owns a body of its own.
+ * - `task` — starts a named workflow (`then: processElectronicOrder`). Zigflow runs a switch's
+ *   named `then:` as a Temporal *child workflow* of that name, wherever in the document it is
+ *   declared, waits for it, and then carries on with the task after the switch. (A `then:` naming
+ *   a plain sibling task only loads from hand-written DSL; zigflow would fail to start it.)
  * - `continue` / `exit` / `end` — the DSL's flow directives, taken as written.
  *
- * Note there is deliberately no "own branch" routing. A case's `then:` either names something that
- * already exists or is a directive; a branch that runs and then rejoins is not expressible, because
- * a named workflow runs to its *own* End (verified against `zigflow graph`).
+ * Note there is deliberately no "own branch" routing: a case never owns a body of its own. The
+ * steps a case runs are a named workflow, drawn as its own Start-to-End flow.
  */
 export type CaseRouting = 'task' | 'continue' | 'exit' | 'end';
 
@@ -102,35 +102,23 @@ export interface NodeMeta {
 
 export const NODE_META: Record<WorkflowNodeType, NodeMeta> = {
 	start: {
+		// Every workflow's entry point. The primary workflow's Start is materialised by the engine;
+		// dropping another one from the palette declares a *named workflow* — a `do:` task zigflow
+		// registers as a Temporal workflow of its own and a switch case's `then:` starts by name. The
+		// builder asks for its name and parameters up front (`WorkflowNameDialog`) and gives it its
+		// own End, so it reads exactly like the primary workflow.
 		label: 'Start',
-		description: 'Workflow entry point — optionally initialise $data variables',
-		icon: CirclePlay,
-		color: '#22c55e',
-		category: 'terminal',
-		showInPalette: false,
-		defaultData: { label: 'Start', variables: [] as VarEntry[] }
-	},
-	workflow: {
-		// A root-level `do:` task is a *separate Temporal workflow* named after the task key — the
-		// document's `do:` list can hold several, and `zigflow graph` draws each as its own boxed
-		// sub-flow with its own Start and End. So this is the real "add a Start" gesture: it declares
-		// another workflow beside the primary one. (The `start` node type above is the primary
-		// workflow's single entry point, materialised by the engine, never dropped by hand.)
-		label: 'Start',
-		description: 'Declare another named workflow in this document — with its own start and end',
+		description: 'Start another named workflow — reached from a switch case',
 		icon: CirclePlay,
 		color: '#22c55e',
 		category: 'terminal',
 		showInPalette: true,
-		// Dropping one asks for the workflow's name straight away (see `WorkflowNameDialog`); this is
-		// only what the field is seeded with. `variables` works exactly as it does on the primary
-		// workflow's Start: it becomes a leading `init: set:` inside this workflow's own `do:`.
-		defaultData: { label: 'Workflow', variables: [] as VarEntry[], ...EMPTY_FLOW }
+		defaultData: { label: 'Start', variables: [] as VarEntry[] }
 	},
 	do: {
-		// Only ever a *nested* grouping task now: at the root a `do:` task is a whole workflow (see
-		// `workflow` above), so nothing drops one of these — they come from hand-written DSL that
-		// groups steps inside a `for`/`try`/`fork` body.
+		// A group of steps zigflow runs in place. Nothing drops one of these: a `do:` placed after
+		// another task is a named workflow (see `start` above), so they only come from hand-written
+		// DSL that groups steps at the head of a list.
 		label: 'Group',
 		description: 'A named group of steps run in sequence (`do:`)',
 		icon: CheckSquare,
@@ -145,7 +133,9 @@ export const NODE_META: Record<WorkflowNodeType, NodeMeta> = {
 		icon: OctagonX,
 		color: '#94a3b8',
 		category: 'terminal',
-		showInPalette: true,
+		// Every workflow — the primary one, and each named one a dropped Start creates — comes with
+		// its own End already wired; a second one dropped by hand would end nothing.
+		showInPalette: false,
 		defaultData: { label: 'End' }
 	},
 	call: {

@@ -131,20 +131,44 @@ The Svelte layer (`+page.svelte`, `NodePanel.svelte`) only ever calls the public
 
 **The canvas is fully inline — there is no drill-in navigation.** Every nested task body (`for.do`, each `fork` branch, `try.try`/`try.catch.do`, bare `do`) renders as tagged sibling nodes in its own lane on the same canvas, recursively to arbitrary depth (a fork branch containing a nested for-loop shows that loop's body inline too). The underlying data model (`scopes[...]` keyed by `scopeKey.ts`) is unchanged from an earlier drill-in design — only the rendering layer in `inlineScopeView.ts` differs. `start`/`end` nodes are always auto-present and connected; every dead-end node gets a synthetic (non-persisted, visual-only) edge to `end`.
 
-**One document can declare several workflows, and the canvas shows them all.** A root-level `do:`
-task is not a grouping — it is a whole separate Temporal workflow, named by its task key, and the
-document's `do:` list may hold any number of them beside the primary flow (the root tasks that
-_aren't_ `do:` tasks, named by `document.workflowType`). This is zigflow's own model, not an
-interpretation: `zigflow graph` draws each one as its own subgraph with its own Start and End, and
-`example/switch.yaml` says so in a comment — _"These are declared as additional workflows"_. Check
-behaviour against the CLI (`zigflow validate` / `zigflow graph`) rather than inferring it.
+**One document can declare several workflows, and the canvas shows each exactly like the primary
+one: its own Start, its steps, its own End.** This follows zigflow's runtime rule, read from its
+source (`DoTaskBuilder.Build`) and confirmed by running it: in _any_ task list, at any depth, a
+`do:` task that comes after a non-`do:` task is **not run in place** — zigflow registers it as a
+Temporal workflow of its own, named by its task key (a _named workflow_). A `do:` before every other
+task in its list runs in place as a plain group (`do` node). At the top level of a document holding
+nothing but `do:` tasks, every one is a named workflow. `graph.ts`'s `namedWorkflowEntries` is the
+one place that rule lives. Check behaviour against the CLI (`zigflow validate` / `zigflow graph` /
+`zigflow run`) rather than inferring it — `zigflow graph` does not draw nested declarations, the
+runtime does register them.
 
-`taskKindToNodeType` is therefore scope-sensitive: a `do:` task at `ROOT_SCOPE_ID` loads as a
-**`workflow`** node, nested it stays a plain `do` group. A `workflow` node _is_ that workflow's
-Start — it holds `variables` exactly like the primary Start does (emitted as a leading `init: set:`
-inside its own `do:`, see `initTaskFor`), its body lives under `workflowScopeKey(nodeId)`, and it is
-kept out of the primary chain entirely: `scopeToTaskList` emits these after the chain, `buildScope`
-wires no edges to them, and `positionChain` gives each its own column.
+There is **no dedicated node type** for a named workflow. It is a scope of its own,
+`workflowScopeKey(startId)` = `workflow/<startId>` (deliberately _not_ prefixed by the scope that
+declares it), holding a plain `start` node (id = `startId`, `data.label` = the workflow's name,
+`data.variables` = its parameters, `data.declaredIn` = the scope key of the list its `do:` is written
+in), its steps, and a plain `end` node (`workflowEndNodeId(startId)`), chained exactly like the root
+scope. `isNamedWorkflowStart` tells it apart from the primary Start (id `start`); `flowScopeOf` maps
+any scope key to the top-level flow it belongs to. Helpers live in `graph.ts`
+(`namedWorkflowScopes`/`namedWorkflowStart`/`namedWorkflowNames`/`newNamedWorkflowScope`).
+
+- **Save**: `scopeToTaskList` emits a list's named workflows _after_ its steps (order within a list
+  changes nothing at runtime), each as `<name>: { do: [init?, ...steps] }`. Names are allocated once,
+  document-wide (`namedWorkflowNames`), since zigflow registers them in one namespace; a sibling task
+  with the same name is the one renamed. A workflow whose `declaredIn` scope is gone, or no longer
+  holds a non-`do:` task (so its `do:` would run in place), is written at the top level instead.
+- **Parameters**: a Start's `variables` (the primary Start's _and_ a named one's) are emitted as a
+  leading `init: set:` in that workflow's list, and a leading `init` task that is only a `set:` is
+  lifted back onto the Start on load (`splitInitTask`). `runIndex.ts` maps the `init` task's events
+  to the Start node.
+- **Canvas**: `composeScopeForDisplay` lays out the primary flow and then every named flow as its
+  own column to the right (`layoutFlows`). No frame, no lane, no entry edge. Dead ends run to the End
+  of _their own_ flow (`computeTerminalEdges`); `computeFlowBounds` gives each named flow a
+  (non-drawn) hit area so a palette drop beside it lands in it.
+- **Adding one**: the palette's **Start** (`start` is `showInPalette: true`; `End` is not — every
+  workflow already has one) opens `WorkflowNameDialog` for the name (unique, it is the Temporal
+  workflow type) and parameters, then creates the scope via `newNamedWorkflowScope`. Deleting a
+  named Start deletes the whole flow (every scope whose `flowScopeOf` is it); its End is never
+  deletable on its own.
 
 **Every inline lane is drawn as a dotted frame** (`LaneBoxLayer.svelte`, rendered into xyflow's
 _back_ `ViewportPortal` so it sits behind the nodes and follows pan/zoom for free).
@@ -154,55 +178,56 @@ try`/`catch`, `<task> body`, or a nested `do`'s own label. Without the frame a n
 unlabeled column of cards and the canvas stops matching the document. A frame also encloses the
 lanes nested inside it — descendant scope keys are prefixed by their ancestor's, so the union needs
 no tree walk — which is why `resolveDropOwnerScope` picks the _deepest_ matching lane rather than
-the first.
+the first. Named workflows are not lanes and get no frame.
 
 Frames are **capped** with a start marker above the lane's first node and an end marker below its
 last (`LaneBox.caps`), because a nested body runs from its first task to its last and a frame
-without them gives the eye nowhere to enter or leave. A named workflow's frame is the exception on
-both counts (`LaneSpec.framesOwner`): it wraps the Start card as well as the body, draws no start
-cap and carries no title, because the card it encloses already is both. The caps are drawn by
-`LaneBoxLayer` rather than added to `nodes` — no DSL task backs them, and a synthetic entry in the
-array xyflow two-way binds would have to be filtered back out of every save, delete, drag and
-hit-test. `layout.ts`'s `LANE_CAP_GAP` reserves the room they sit in (two gaps must stay under one
-`rowHeight` — `positionChain` pays for both with a single extra reserved row), and the caps are
-excluded from the nested-lane union, since they mark where _this_ lane's own chain begins and ends.
+without them gives the eye nowhere to enter or leave. The caps are drawn by `LaneBoxLayer` rather
+than added to `nodes` — no DSL task backs them, and a synthetic entry in the array xyflow two-way
+binds would have to be filtered back out of every save, delete, drag and hit-test. `layout.ts`'s
+`LANE_CAP_GAP` reserves the room they sit in (two gaps must stay under one `rowHeight` —
+`positionChain` pays for both with a single extra reserved row), and the caps are excluded from the
+nested-lane union, since they mark where _this_ lane's own chain begins and ends. Lane entry edges
+carry an explicit `labelStyle` (xyflow's default HTML label is a white pill, invisible on dark).
 
-A **Start** node (`workflow` in `NODE_META`, `showInPalette: true`) is how an author declares
-another workflow. Dropping one opens `WorkflowNameDialog` straight away, because the name _is_ the
-DSL task key — the Temporal workflow type zigflow registers a worker for, and what a switch case
-jumps at — and cancelling removes the node rather than leaving one unnamed. The `start` node type
-proper is the primary workflow's single entry point, materialised by the engine and never dropped.
+**A `switch` is authored on the canvas.** `CaseEntry.routing` is per case:
 
-**A `switch` is authored on the canvas, and every case is a jump.** `CaseEntry.routing` is per case:
+- **`task`** — the case **starts a named workflow**. Zigflow runs every named `then:` of a switch
+  as a Temporal _child workflow_ of that name (`executeRedirect` → `ExecuteChildWorkflow`), wherever
+  the switch and the workflow are declared, waits for it, then carries on with the task after the
+  switch. Drawn as a labeled edge into that workflow's Start (`computeSwitchCaseEdges` /
+  `SwitchCaseEdge.svelte`), which is why a named Start has a target handle. Resolved through
+  `targetNodeId` on save so renaming the workflow keeps the case (`resolveCaseTargets` resolves
+  names on load, named workflows first). A `then:` naming a plain sibling task only loads from
+  hand-written DSL (zigflow would fail to start it); it is still drawn, and flagged in the picker.
+- **`continue` / `exit` / `end`** — the flow directives, drawn to the next task, or to the End of
+  the workflow the switch is in.
 
-- **`task`** — the case's `then:` names something: a task at the switch's own nesting depth, or a
-  named workflow (declared at the top level, so reachable from anywhere). Drawn as a labeled bowed
-  edge by `computeSwitchCaseEdges` (`SwitchCaseEdge.svelte`). Resolved through `targetNodeId` on
-  save so renaming the target keeps the jump, falling back to the `taskName` the document had.
-- **`continue` / `exit` / `end`** — the flow directives, drawn the same way, to the next task or the
-  `End` node.
-
-There is deliberately **no "own branch" routing, and no convergence.** A case cannot run some steps
-and then rejoin: the only thing `then:` can name is a task or a workflow, and a named workflow runs
-to its _own_ End. `zigflow graph` confirms it — a `then:` on a root-level `do:` task is ignored
-outright. (An earlier model here lifted a switch's handler tasks into per-case lanes and wrote
-`then: <the task after the switch>` into each; that invented flow the author never wrote and is gone.
-Don't reintroduce it.) `planSwitchCases` accordingly restructures nothing: it reads each case's
-`then:` and keeps it. `example/switch.yaml` round-trips with the same shape it was written in — the
-only difference is that a duplicate sibling task name is deduped, which zigflow requires anyway.
+There is deliberately **no "own branch" routing, and no convergence**: the steps a case runs are a
+named workflow, drawn as its own flow. (An earlier model lifted handler tasks into per-case lanes
+and wrote a converging `then:` into each; another drew named workflows as a special `workflow` node
+inside a frame. Both are gone — don't reintroduce either.) `planSwitchCases` restructures nothing.
+`example/switch.yaml` round-trips with the same shape it was written in.
 
 Task names are preserved verbatim: `uniqueTaskName` in `slug.ts` only slugs a label that isn't
 already identifier-shaped, so `processElectronicOrder` survives a canvas round-trip.
 
-**Cases are edited on the canvas.** Dragging a connection out of a switch onto a reachable task, a
-named workflow's Start, or the `End` node adds a case and opens `SwitchCaseDialog`; clicking a case
-edge edits it; deleting one drops the case. Case edges carry `SWITCH_NODE_TAG`/`SWITCH_CASE_TAG` in
-`edge.data`, which is what the click/delete handlers key off. `switchCases.ts` is the single reader
-of `node.data.cases`, shared by `graph.ts`, `inlineScopeView.ts` and `runIndex.ts`.
+**Cases are edited on the canvas.** Dragging a connection out of a switch onto a named workflow's
+Start adds a case that starts it; onto the End of the switch's own workflow, an `end` case. Either
+opens `SwitchCaseDialog`; clicking a case edge edits it; deleting one drops the case. Any other drag
+out of a switch is undone, and a plain edge into a named Start is refused. Case edges carry
+`SWITCH_NODE_TAG`/`SWITCH_CASE_TAG` in `edge.data`, which is what the click/delete handlers key off.
+`switchCases.ts` is the single reader of `node.data.cases` (and `caseTargetOptions` the single case
+picker list), shared by `graph.ts`, `inlineScopeView.ts`, `runIndex.ts` and the dialogs.
 
-Run correlation follows the model: a named workflow is a separate Temporal workflow, so `runIndex.ts`
-indexes it as its own root rather than as a child scope — nothing can resolve a scope path into one,
-because its tasks can never appear in the primary workflow's run.
+**Run correlation of named workflows.** A named workflow's run is a child workflow whose id
+(`<parentRunId>_N`) says nothing, so the backend resolver gives its events the scope segment
+`workflow_<name>` (from the child's workflow type); `runScope.ts` resolves that token by name from
+any scope (`RunIndex.workflowScopeByName`, longest match first). `runState.ts` records each named
+workflow's own `workflow.started`/`completed` in `RunState.namedWorkflows`, and `RunWorkspace`
+colours its Start/End from that (falling back to "one of its steps ran" for runs recorded before the
+backend tagged them). A case edge is lit only when the workflow it starts ran; directive cases are
+never lit, since they can't be told apart from a plain fall-through.
 
 There is intentionally **no dedicated "if" branching node** — every task's shared `if:` guard (`DataFlow.if`, edited via the "Run only if" `ConditionBuilder` section in `NodePanel.svelte`) is the sole conditional-execution mechanism; real two-way branching is done with a `switch` task. (This was tried twice — a compiled-to-switch "if" node, and a canvas guard-diamond visualization — and explicitly reverted both times; don't reintroduce either without asking.)
 

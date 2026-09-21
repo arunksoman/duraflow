@@ -6,7 +6,7 @@
 	interface Props {
 		caseEntry: CaseEntry;
 		availVars: AvailVar[];
-		/** What a `task` jump may land on: a sibling task, or a named workflow's Start. */
+		/** The named workflows a case can start — see `caseTargetOptions`. */
 		targetOptions: { value: string; label: string }[];
 		onchange: (patch: Partial<CaseEntry>) => void;
 	}
@@ -16,8 +16,8 @@
 	const ROUTINGS: { value: CaseRouting; label: string; hint: string }[] = [
 		{
 			value: 'task',
-			label: 'Go to…',
-			hint: 'Hands the run to a task beside the switch, or to a named workflow, which then takes over.'
+			label: 'Start workflow…',
+			hint: 'Runs a named workflow as a child workflow, waits for it to finish, then carries on with the task after the switch.'
 		},
 		{
 			value: 'continue',
@@ -27,7 +27,7 @@
 		{
 			value: 'exit',
 			label: 'exit',
-			hint: 'Leaves the current scope — a loop body, or the workflow.'
+			hint: 'Stops the task list the switch is in — a loop body, a try block, or the workflow itself.'
 		},
 		{ value: 'end', label: 'end', hint: 'Terminates the whole workflow.' }
 	];
@@ -36,7 +36,7 @@
 	const isOtherwise = $derived(!caseEntry.condition.trim());
 
 	function setRouting(value: CaseRouting) {
-		// A jump needs somewhere to land: default to the first sibling rather than leaving the case
+		// A case needs a workflow to start: default to the first one rather than leaving the case
 		// pointing nowhere, which would serialize as `continue` and silently not be the jump asked for.
 		if (value === 'task' && !caseEntry.targetNodeId) {
 			onchange({ routing: value, targetNodeId: targetOptions[0]?.value });
@@ -89,7 +89,7 @@
 
 	{#if caseEntry.routing === 'task'}
 		<label class="flex items-center gap-1.5">
-			<span class="text-base-content/40 w-12 shrink-0 text-[10px]">target</span>
+			<span class="text-base-content/40 w-12 shrink-0 text-[10px]">workflow</span>
 			<select
 				class="select select-xs min-w-0 flex-1 text-xs"
 				value={caseEntry.targetNodeId ?? ''}

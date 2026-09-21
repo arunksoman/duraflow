@@ -117,6 +117,44 @@ export function layoutScopeRecursive(
 	return laneBounds;
 }
 
+/** One top-level flow to lay out: the primary workflow, or a named one. */
+export interface FlowLayoutInput {
+	nodes: Node[];
+	edges: Edge[];
+	laneMap: LaneMap;
+}
+
+/** Extra room between one top-level flow and the next, so two workflows never read as one. */
+export const FLOW_GAP_X = 120;
+
+/**
+ * Lays out every workflow a document declares side by side: each is its own Start-to-End column
+ * (plus whatever lanes its containers need), placed to the right of the previous one's full width.
+ * The first flow is the primary workflow, so it keeps exactly the position `layoutScopeRecursive`
+ * would give it alone.
+ */
+export function layoutFlows(
+	flows: FlowLayoutInput[],
+	opts: LayoutOptions = {}
+): Map<string, LaneBounds> {
+	const { originX = 200, originY = 80, rowHeight = 120 } = opts;
+	const laneBounds = new Map<string, LaneBounds>();
+	let x = originX;
+	for (const flow of flows) {
+		const footprint = positionChain(
+			flow.nodes,
+			flow.edges,
+			flow.laneMap,
+			x,
+			originY,
+			rowHeight,
+			laneBounds
+		);
+		x += footprint.columns * INLINE_LANE_OFFSET_X + FLOW_GAP_X;
+	}
+	return laneBounds;
+}
+
 function positionChain(
 	nodes: Node[],
 	edges: Edge[],
@@ -130,15 +168,7 @@ function positionChain(
 	let row = 0;
 	let columns = 1;
 
-	// A named workflow is not a step of this chain — it is a separate workflow declared alongside
-	// it, so it gets a column of its own rather than a row (laid out after the chain, below).
-	const standalone: Node[] = [];
-
 	for (const node of ordered) {
-		if (node.type === 'workflow') {
-			standalone.push(node);
-			continue;
-		}
 		node.position = { x: originX, y: originY + row * rowHeight };
 		row++;
 
@@ -181,38 +211,6 @@ function positionChain(
 
 		columns = Math.max(columns, colOffset);
 		row += maxLaneRows;
-	}
-
-	// Each named workflow starts its own column at the top, with its body running straight down
-	// beneath its Start card — the frame around the pair is what says "this is a whole workflow".
-	for (const node of standalone) {
-		const x = originX + columns * INLINE_LANE_OFFSET_X;
-		node.position = { x, y: originY };
-
-		const lane = laneMap.get(node.id)?.[0];
-		if (!lane) {
-			columns += 1;
-			continue;
-		}
-		const laneY = originY + rowHeight + LANE_CAP_GAP;
-		const laneOrdered = orderNodesInScope(lane.nodes, lane.edges);
-		const footprint = positionChain(
-			lane.nodes,
-			lane.edges,
-			lane.laneMap,
-			x,
-			laneY,
-			rowHeight,
-			laneBoundsOut
-		);
-		laneBoundsOut.set(lane.key, {
-			x,
-			yStart: laneY,
-			yEnd: laneY + Math.max(laneOrdered.length, 1) * rowHeight + LANE_CAP_GAP,
-			width: NODE_CARD_WIDTH
-		});
-		columns += footprint.columns;
-		row = Math.max(row, footprint.rows + 2);
 	}
 
 	return { rows: Math.max(row, 1), columns };

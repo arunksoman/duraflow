@@ -1,16 +1,18 @@
 import type { Node, Edge } from '@xyflow/svelte';
 import type { ScopeGraph } from './graph';
 import {
+	ROOT_SCOPE_ID,
 	forScopeKey,
 	tryScopeKey,
 	catchScopeKey,
 	forkBranchScopeKey,
-	workflowScopeKey
+	flowScopeOf,
+	isWorkflowScopeKey
 } from './scopeKey';
 import type { BranchEntry, CaseEntry } from '../components/builder/builderConfig';
 import { isDirectiveRouting, switchCasesOf } from './switchCases';
 import {
-	layoutScopeRecursive,
+	layoutFlows,
 	orderNodesInScope,
 	NODE_CARD_WIDTH,
 	INLINE_LANE_OFFSET_X,
@@ -108,13 +110,6 @@ interface LaneSpec {
 	 */
 	title: string;
 	redirectContinuation?: boolean;
-	/**
-	 * Set on a named workflow's lane: its frame encloses the owning node as well as the lane, because
-	 * that node *is* the workflow's Start — the frame is the whole workflow, not a body hanging off
-	 * a control task. Such a lane draws no start cap (the Start card is one) and no frame title (the
-	 * card already carries the workflow's name).
-	 */
-	framesOwner?: boolean;
 }
 
 /**
@@ -150,15 +145,6 @@ function laneSpecsFor(node: Node, parentScopeId: string): LaneSpec[] {
 					title: `${nodeLabel(node)} catch`
 				}
 			];
-		case 'workflow':
-			return [
-				{
-					key: workflowScopeKey(node.id),
-					label: '',
-					title: '',
-					framesOwner: true
-				}
-			];
 		case 'fork': {
 			const branches = (node.data?.branches as BranchEntry[] | undefined) ?? [];
 			return branches.map((b) => ({
@@ -188,6 +174,9 @@ function laneEntryEdge(
 		target: targetId,
 		type: 'default',
 		label: spec.label,
+		// Without an explicit style xyflow's HTML edge label falls back to its own white pill, which
+		// reads as a blank white box on the dark theme (fork branch names were invisible).
+		labelStyle: LANE_LABEL_STYLE,
 		// `deletable`/`selectable: false` are real Edge fields xyflow itself enforces (delete-key
 		// and click-select both no-op). There's no `reconnectable` field on this version's Edge
 		// type — reconnect-drag is instead blocked by `ReconnectableEdge.svelte` checking this same
@@ -202,6 +191,9 @@ function laneEntryEdge(
 		selectable: false
 	};
 }
+
+const LANE_LABEL_STYLE =
+	'color:var(--color-base-content);font-size:10px;font-weight:500;background:var(--color-base-100);border:1px solid var(--color-base-300);border-radius:9999px;padding:1px 6px;white-space:nowrap;';
 
 /** Shared presentation for a case's jump edge, so every case of a switch reads as one family. */
 function caseEdgeStyling(): Partial<Edge> {
@@ -284,9 +276,8 @@ interface ContainerNodeAnalysis {
  * container node (any type with lane specs) in the currently-displayed `nodes`, works out each
  * lane's ordering and how the node's continuation should be drawn:
  *
- * - default (`for`/`do`/`fork`/a named workflow) — untouched. These are genuine
- *   pass-throughs/fan-outs: the real chain edge out of the node already says what happens next,
- *   and a named workflow has no chain edge at all.
+ * - default (`for`/`do`/`fork`) — untouched. These are genuine pass-throughs/fan-outs: the
+ *   real chain edge out of the node already says what happens next.
  * - `redirectContinuation` (try's first lane) — re-sourced from the end of that lane, superseding
  *   the real chain edge, which `computeHiddenRealEdgeIds` then hides.
  */
@@ -367,38 +358,54 @@ export function computeLiveSyntheticEdges(nodes: Node[], edges: Edge[]): Edge[] 
 /**
  * Every node in the composed canvas that has no outgoing edge at all — a fork branch's last task,
  * a for/do body's last task, an empty container with nothing in its lane and no continuation —
- * gets a synthetic edge pointing at the workflow's `end` node, so no path on the canvas trails off
- * looking open-ended (matching the same "always show where a path terminates" convention `start`/
- * `end` already establish for the main chain). Purely visual: tagged synthetic, never persisted.
+ * gets a synthetic edge pointing at the `end` node of the workflow it belongs to, so no path on
+ * the canvas trails off looking open-ended (matching the same "always show where a path
+ * terminates" convention `start`/`end` already establish for the main chain). Purely visual:
+ * tagged synthetic, never persisted.
  *
- * Named workflows are excluded, along with everything inside them: each runs to its *own* End (the
- * cap on its frame), so a line from its last task to the primary workflow's `End` node would draw
- * a handover that does not happen.
+ * Each workflow runs to its *own* End: a named workflow's dead ends go to its End, never to the
+ * primary workflow's, since that would draw a handover that does not happen.
  *
  * `edges` must already include every other synthetic edge (`computeLiveSyntheticEdges`'s output),
  * or a node whose only "outgoing" connection is itself synthetic (e.g. try's redirected
  * continuation source) would be wrongly treated as a dead end.
  */
 export function computeTerminalEdges(nodes: Node[], edges: Edge[]): Edge[] {
-	const endNode = nodes.find((n) => n.type === 'end');
-	if (!endNode) return [];
 	const hasOutgoing = new Set(edges.map((e) => e.source));
 	const ownerOf = buildOwnerMap(nodes);
-	const workflowScopes = nodes
-		.filter((n) => n.type === 'workflow')
-		.map((n) => workflowScopeKey(n.id));
-	const inNamedWorkflow = (n: Node): boolean => {
-		if (n.type === 'workflow') return true;
-		const owner = ownerOf.get(n.id);
-		return Boolean(owner && workflowScopes.some((k) => owner === k || owner.startsWith(`${k}/`)));
-	};
+	const endOf = flowEndNodes(nodes, ownerOf);
 
 	const terminal: Edge[] = [];
 	for (const n of nodes) {
-		if (n.id === endNode.id || hasOutgoing.has(n.id) || inNamedWorkflow(n)) continue;
-		terminal.push(terminalEdge(n.id, endNode.id));
+		if (n.type === 'end' || hasOutgoing.has(n.id)) continue;
+		const endId = endOf.get(flowOfNode(n, ownerOf));
+		if (endId) terminal.push(terminalEdge(n.id, endId));
 	}
 	return terminal;
+}
+
+/** The top-level flow a displayed node belongs to — the primary workflow when it is untagged. */
+function flowOfNode(n: Node, ownerOf: Map<string, string>): string {
+	return flowScopeOf(ownerOf.get(n.id) ?? ROOT_SCOPE_ID);
+}
+
+/** Each top-level flow's `end` node id, keyed by the flow's scope (see `flowScopeOf`). */
+function flowEndNodes(nodes: Node[], ownerOf: Map<string, string>): Map<string, string> {
+	const endOf = new Map<string, string>();
+	for (const n of nodes) {
+		if (n.type === 'end') endOf.set(flowOfNode(n, ownerOf), n.id);
+	}
+	return endOf;
+}
+
+/** Each named workflow's Start node, keyed by id — what a switch case's `then:` can start. */
+function namedStarts(nodes: Node[], ownerOf: Map<string, string>): Set<string> {
+	const ids = new Set<string>();
+	for (const n of nodes) {
+		const owner = ownerOf.get(n.id);
+		if (n.type === 'start' && owner && isWorkflowScopeKey(owner)) ids.add(n.id);
+	}
+	return ids;
 }
 
 function isSyntheticEdge(edge: Edge): boolean {
@@ -411,30 +418,32 @@ function fallThroughTargetOf(nodeId: string, edges: Edge[]): string | undefined 
 }
 
 /**
- * Where a case that owns no lane sends the run, as a node id on the composed canvas:
+ * Where a case sends the run, as a node id on the composed canvas:
  *
- * - `continue` — the switch's own fall-through target (the next sibling task), which is also where
- *   its branch lanes converge, so a `continue` case visibly rejoins the same place they do.
+ * - `continue` — the switch's own fall-through target (the next sibling task).
  * - `exit` / `end` — both stop the path being drawn. They differ in the DSL (leave the current
- *   scope vs. terminate the workflow) but the canvas has exactly one `end` node, so both point
- *   there rather than inventing a second terminator per nesting level.
- * - `task` — a jump at a sibling, valid only when that node is in the switch's *own* scope (the
- *   Zigflow spec forbids cross-scope `then`), so a stale target draws nothing rather than a wrong
- *   arrow.
+ *   task list vs. terminate the workflow) but each workflow has exactly one `end` node, so both
+ *   point at the End of the workflow the switch is in rather than inventing a terminator per
+ *   nesting level.
+ * - `task` — the named workflow the case starts as a child workflow (zigflow runs every named
+ *   `then:` that way, wherever the switch and the workflow are declared). A sibling task in the
+ *   switch's own list is also drawn, for hand-written DSL that names one; anything else draws
+ *   nothing rather than a wrong arrow.
  */
 function caseJumpTargetId(
 	c: CaseEntry,
 	switchScopeId: string | undefined,
 	ownerOf: Map<string, string>,
-	byId: Map<string, Node>,
+	starts: Set<string>,
 	fallThroughId: string | undefined,
 	endNodeId: string | undefined
 ): string | undefined {
 	if (c.routing === 'continue') return fallThroughId ?? endNodeId;
 	if (c.routing === 'exit' || c.routing === 'end') return endNodeId;
-	const target = c.targetNodeId ? byId.get(c.targetNodeId) : undefined;
-	if (!target || ownerOf.get(target.id) !== switchScopeId) return undefined;
-	return target.id;
+	const targetId = c.targetNodeId;
+	if (!targetId) return undefined;
+	if (starts.has(targetId)) return targetId;
+	return ownerOf.get(targetId) === switchScopeId ? targetId : undefined;
 }
 
 /**
@@ -449,18 +458,26 @@ function caseJumpTargetId(
  */
 export function computeSwitchCaseEdges(nodes: Node[], edges: Edge[]): Edge[] {
 	const ownerOf = buildOwnerMap(nodes);
-	const byId = new Map(nodes.map((n) => [n.id, n]));
-	const endNodeId = nodes.find((n) => n.type === 'end')?.id;
+	const starts = namedStarts(nodes, ownerOf);
+	const endOf = flowEndNodes(nodes, ownerOf);
 	const caseEdges: Edge[] = [];
 
 	for (const node of nodes) {
 		if (node.type !== 'switch') continue;
 		const switchScopeId = ownerOf.get(node.id);
 		const fallThroughId = fallThroughTargetOf(node.id, edges);
+		const endNodeId = endOf.get(flowOfNode(node, ownerOf));
 		let drawn = 0;
 
 		switchCasesOf(node).forEach((c, i) => {
-			const targetId = caseJumpTargetId(c, switchScopeId, ownerOf, byId, fallThroughId, endNodeId);
+			const targetId = caseJumpTargetId(
+				c,
+				switchScopeId,
+				ownerOf,
+				starts,
+				fallThroughId,
+				endNodeId
+			);
 			// A self-targeting case would render as a degenerate loop on top of the node; the case
 			// editor can't produce one, but hand-written DSL can.
 			if (!targetId || targetId === node.id) return;
@@ -524,7 +541,6 @@ export function computeHiddenRealEdgeIds(nodes: Node[], edges: Edge[]): Set<stri
  */
 export interface LaneBox extends LaneBounds {
 	key: string;
-	/** Empty for a named workflow's frame — its Start card inside already carries the name. */
 	title: string;
 	/** The node the lane belongs to, so clicking the box's title can open its config. */
 	ownerNodeId: string;
@@ -549,11 +565,6 @@ export interface LaneCaps {
 	/** Top of the lane's first node and bottom of its last — where the stubs meet the chain. */
 	chainTop: number;
 	chainBottom: number;
-	/**
-	 * False on a named workflow's frame: the owning node inside it is the workflow's Start, so a
-	 * cap above it would be a second one.
-	 */
-	showStart: boolean;
 }
 
 /**
@@ -585,7 +596,7 @@ export function computeLiveLaneBoxes(nodes: Node[]): Map<string, LaneBox> {
 			const laneNodes = nodes.filter((ln) => ownerOf.get(ln.id) === spec.key);
 			const own = laneBoundsFromNodes(
 				laneNodes,
-				n.position.x + (spec.framesOwner ? 0 : INLINE_LANE_OFFSET_X * (i + 1)),
+				n.position.x + INLINE_LANE_OFFSET_X * (i + 1),
 				n.position.y + ROW_HEIGHT + LANE_CAP_GAP
 			);
 			const caps: LaneCaps = {
@@ -593,20 +604,8 @@ export function computeLiveLaneBoxes(nodes: Node[]): Map<string, LaneBox> {
 				startY: own.yStart - LANE_CAP_GAP / 2,
 				endY: own.yEnd + LANE_CAP_GAP / 2,
 				chainTop: own.yStart,
-				chainBottom: own.yEnd,
-				showStart: !spec.framesOwner
+				chainBottom: own.yEnd
 			};
-			// A named workflow's frame is the workflow: it wraps the Start card as well as the body,
-			// so the two read as one thing rather than a card with a box next to it.
-			if (spec.framesOwner) {
-				own.width = Math.max(
-					own.width,
-					n.position.x + NODE_CARD_WIDTH - Math.min(own.x, n.position.x)
-				);
-				own.x = Math.min(own.x, n.position.x);
-				own.yStart = Math.min(own.yStart, n.position.y);
-				caps.chainTop = own.yStart;
-			}
 			boxes.set(spec.key, {
 				...own,
 				key: spec.key,
@@ -730,19 +729,28 @@ function collectInline(scopes: Record<string, ScopeGraph>, scopeId: string): Col
 	return { mainNodes, mainEdges, allNodes, allEdges, laneMap };
 }
 
+/**
+ * Composes the canvas: the primary workflow rooted at `scopeId`, and — when that is the document
+ * root — every named workflow the document declares, each as its own Start-to-End flow laid out to
+ * the right of the one before. A named workflow is drawn exactly like the primary one; nothing
+ * about it is boxed or nested, because it is not part of any other flow.
+ */
 export function composeScopeForDisplay(
 	scopes: Record<string, ScopeGraph>,
-	scopeId: string
+	scopeId: string = ROOT_SCOPE_ID
 ): ComposedScope {
-	const {
-		mainNodes,
-		mainEdges,
-		allNodes,
-		allEdges: allRealEdges,
-		laneMap
-	} = collectInline(scopes, scopeId);
+	const flowIds =
+		scopeId === ROOT_SCOPE_ID
+			? [ROOT_SCOPE_ID, ...Object.keys(scopes).filter(isWorkflowScopeKey)]
+			: [scopeId];
+	const flows = flowIds.map((id) => collectInline(scopes, id));
 
-	const laneBounds = layoutScopeRecursive(mainNodes, mainEdges, laneMap);
+	const laneBounds = layoutFlows(
+		flows.map((f) => ({ nodes: f.mainNodes, edges: f.mainEdges, laneMap: f.laneMap }))
+	);
+
+	const allNodes = flows.flatMap((f) => f.allNodes);
+	const allRealEdges = flows.flatMap((f) => f.allEdges);
 
 	const hiddenIds = computeHiddenRealEdgeIds(allNodes, allRealEdges);
 	const displayRealEdges = allRealEdges.map((e) =>
@@ -762,6 +770,30 @@ export function composeScopeForDisplay(
 		laneBounds,
 		laneBoxes: computeLiveLaneBoxes(allNodes)
 	};
+}
+
+/**
+ * The area each named workflow occupies on the canvas, from where its nodes actually are — used
+ * only to decide which workflow a palette drop lands in (nothing is drawn for it). The primary
+ * workflow needs no entry: a drop outside every named workflow belongs to it.
+ */
+export function computeFlowBounds(nodes: Node[]): Map<string, LaneBounds> {
+	const ownerOf = buildOwnerMap(nodes);
+	const members = new Map<string, Node[]>();
+	for (const n of nodes) {
+		const owner = ownerOf.get(n.id);
+		if (!owner) continue;
+		const flow = flowScopeOf(owner);
+		if (flow === ROOT_SCOPE_ID) continue;
+		const list = members.get(flow);
+		if (list) list.push(n);
+		else members.set(flow, [n]);
+	}
+	const bounds = new Map<string, LaneBounds>();
+	for (const [flow, list] of members) {
+		bounds.set(flow, laneBoundsFromNodes(list, 0, 0));
+	}
+	return bounds;
 }
 
 /**

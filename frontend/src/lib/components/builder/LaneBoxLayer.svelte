@@ -4,13 +4,13 @@
 
 	/**
 	 * The titled dotted frames drawn around every inline lane, so a nested body reads as the
-	 * self-contained group of tasks the DSL says it is — a switch branch is `processElectronicOrder`,
-	 * not an unlabeled column of cards next to the main flow.
+	 * self-contained group of tasks the DSL says it is — a fork branch is `callnurse`, not an
+	 * unlabeled column of cards next to the main flow. (Named workflows get no frame: each is drawn
+	 * with its own real Start and End nodes, exactly like the primary workflow.)
 	 *
 	 * Each frame is capped: a start marker above its first node and an end marker below its last,
 	 * because a nested body runs from its first task to its last, and a frame without them gives the
-	 * eye nowhere to enter or leave. A named workflow's frame has no start cap and no title — the
-	 * Start card it wraps is both.
+	 * eye nowhere to enter or leave.
 	 *
 	 * Rendered into xyflow's *back* viewport portal, which means these sit behind the nodes and
 	 * follow pan/zoom for free: their positions are plain flow coordinates, the same ones
@@ -42,7 +42,7 @@
 	 * caps do, so each edge takes whichever is further out.
 	 */
 	function frameTop(box: LaneBox): number {
-		const capTop = box.caps.showStart ? box.caps.startY - CAP_H / 2 - CAP_CLEAR : Infinity;
+		const capTop = box.caps.startY - CAP_H / 2 - CAP_CLEAR;
 		return Math.min(box.yStart - PAD, capTop) - (box.title ? TITLE_H : 0);
 	}
 
@@ -72,14 +72,12 @@
 			{/if}
 
 			<!-- Stubs first, so each cap pill paints over the end of its own line. -->
-			{#if box.caps.showStart}
-				<div
-					class="lane-stub"
-					style:left="{box.caps.x - left}px"
-					style:top="{box.caps.startY + CAP_H / 2 - top}px"
-					style:height="{Math.max(box.caps.chainTop - box.caps.startY - CAP_H / 2, 0)}px"
-				></div>
-			{/if}
+			<div
+				class="lane-stub"
+				style:left="{box.caps.x - left}px"
+				style:top="{box.caps.startY + CAP_H / 2 - top}px"
+				style:height="{Math.max(box.caps.chainTop - box.caps.startY - CAP_H / 2, 0)}px"
+			></div>
 			<div
 				class="lane-stub"
 				style:left="{box.caps.x - left}px"
@@ -87,15 +85,13 @@
 				style:height="{Math.max(box.caps.endY - CAP_H / 2 - box.caps.chainBottom, 0)}px"
 			></div>
 
-			{#if box.caps.showStart}
-				<div
-					class="lane-cap lane-cap-start"
-					style:left="{box.caps.x - left}px"
-					style:top="{box.caps.startY - top}px"
-				>
-					start
-				</div>
-			{/if}
+			<div
+				class="lane-cap lane-cap-start"
+				style:left="{box.caps.x - left}px"
+				style:top="{box.caps.startY - top}px"
+			>
+				start
+			</div>
 			<div
 				class="lane-cap lane-cap-end"
 				style:left="{box.caps.x - left}px"

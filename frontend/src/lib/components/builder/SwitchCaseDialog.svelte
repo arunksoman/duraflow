@@ -4,7 +4,7 @@
 	import type { WorkflowMeta } from '$lib/types';
 	import type { CaseEntry } from './builderConfig';
 	import { availableVarsAt } from './availableVars';
-	import { OWNER_SCOPE_TAG } from '$lib/zigflow-engine/inlineScopeView';
+	import { caseTargetOptions } from '$lib/zigflow-engine/switchCases';
 	import SwitchCaseEditor from './SwitchCaseEditor.svelte';
 
 	interface Props {
@@ -35,28 +35,7 @@
 
 	const availVars = $derived(availableVarsAt(switchNode, nodes, edges, workflowMeta));
 
-	/**
-	 * A `then:` may only name a task at the switch's own nesting depth (Zigflow spec), and the
-	 * canvas shows every scope inlined as one flat list — so the picker is filtered to the switch's
-	 * own scope, or it would offer targets the DSL can never reach. Named workflows are the
-	 * exception: they are declared at the document's top level and reachable from anywhere.
-	 */
-	const targetOptions = $derived(
-		nodes
-			.filter(
-				(n) =>
-					n.id !== switchNode.id &&
-					n.type !== 'start' &&
-					n.type !== 'end' &&
-					(n.type === 'workflow' ||
-						(n.data as Record<string, unknown> | undefined)?.[OWNER_SCOPE_TAG] ===
-							(switchNode.data as Record<string, unknown> | undefined)?.[OWNER_SCOPE_TAG])
-			)
-			.map((n) => ({
-				value: n.id,
-				label: n.type === 'workflow' ? `${n.data?.label} (workflow)` : `${n.data?.label ?? n.type}`
-			}))
-	);
+	const targetOptions = $derived(caseTargetOptions(switchNode, nodes));
 </script>
 
 <div class="modal modal-open z-50">

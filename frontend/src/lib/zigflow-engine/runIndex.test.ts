@@ -1,9 +1,9 @@
 import { describe, it, expect } from 'vitest';
-import { astToGraph } from './graph';
+import { astToGraph, namedWorkflowScopes } from './graph';
 import type { ZigflowDocument } from './ast';
 import { buildRunIndex, scopeNameKey } from './runIndex';
 import { resolveNode, resolveScopePath, describeScopePath } from './runScope';
-import { ROOT_SCOPE_ID, forScopeKey, tryScopeKey, workflowScopeKey } from './scopeKey';
+import { ROOT_SCOPE_ID, forScopeKey, tryScopeKey } from './scopeKey';
 
 function header() {
 	return { dsl: '1.0.0', taskQueue: 'zigflow', workflowType: 'example', version: '0.1.0' };
@@ -66,20 +66,42 @@ describe('buildRunIndex', () => {
 		expect(inner.find((c) => c.kind === 'do')?.inline).toBe(true);
 	});
 
-	it('indexes a named workflow as its own root, never as a child scope of the primary one', () => {
+	it('indexes a named workflow as its own root, reached by name from any scope path', () => {
 		const { index, graph } = indexFor({
 			document: header(),
-			do: [{ fetch: httpTask() }, { handler: { do: [{ inner: httpTask() }] } }]
+			do: [
+				{ fetch: httpTask() },
+				{
+					handler: {
+						do: [
+							{ inner: httpTask() },
+							{ loop: { for: { each: 'i', in: '${ [1] }' }, do: [{ step: httpTask() }] } }
+						]
+					}
+				}
+			]
 		});
 
-		// nothing can resolve a scope path into it — it is a separate Temporal workflow
+		// it is not a child scope of the primary workflow — a switch starts it by name
 		expect(index.childScopesByParent.get(ROOT_SCOPE_ID)).toBeUndefined();
 
-		const handler = graph.scopes[ROOT_SCOPE_ID].nodes.find((n) => n.type === 'workflow')!;
-		const innerId = index.byScopeAndName.get(scopeNameKey(workflowScopeKey(handler.id), 'inner'));
+		const key = namedWorkflowScopes(graph)[0];
+		expect(index.workflowScopeByName.get('handler')).toBe(key);
+		const innerId = index.byScopeAndName.get(scopeNameKey(key, 'inner'));
 		expect(innerId).toBeTruthy();
-	});
 
+		// the backend reports its events under `workflow_<name>`, from wherever it was started
+		expect(resolveNode(index, 'workflow_handler', 'inner')).toMatchObject({
+			nodeId: innerId,
+			confidence: 'exact'
+		});
+		// ...and further scopes nest under it as usual
+		const loop = graph.scopes[key].nodes.find((n) => n.type === 'for')!;
+		expect(resolveScopePath(index, 'workflow_handler_for_0').scopeId).toBe(
+			forScopeKey(key, loop.id)
+		);
+		expect(describeScopePath('workflow_handler')).toBe('root → handler');
+	});
 	it('flags a scope whose two `for` tasks zigflow cannot tell apart', () => {
 		const { index } = indexFor({
 			document: header(),

@@ -95,7 +95,11 @@ export function availableVarsAt(
 		}
 	}
 
-	const startNode = nodes.find((n) => n.type === 'start');
+	// The Start of the workflow this node is in: a named workflow's own, reached through the edges
+	// above, else the primary workflow's.
+	const startNode =
+		nodes.find((n) => n.type === 'start' && ancestors.includes(n.id)) ??
+		nodes.find((n) => n.type === 'start');
 	if (startNode) {
 		for (const v of (startNode.data?.variables as VarEntry[]) ?? []) {
 			if (v.key)

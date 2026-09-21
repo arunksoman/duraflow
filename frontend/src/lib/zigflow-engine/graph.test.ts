@@ -1,5 +1,12 @@
 import { describe, it, expect } from 'vitest';
-import { astToGraph, graphToAst } from './graph';
+import {
+	astToGraph,
+	graphToAst,
+	isNamedWorkflowStart,
+	namedWorkflowScopes,
+	namedWorkflowStart,
+	newNamedWorkflowScope
+} from './graph';
 import type { WorkflowGraph } from './graph';
 import { serializeZigflowDocument } from './serialize';
 import { deserializeZigflowDocument } from './deserialize';
@@ -8,6 +15,7 @@ import {
 	forkBranchScopeKey,
 	tryScopeKey,
 	catchScopeKey,
+	workflowEndNodeId,
 	workflowScopeKey,
 	ROOT_SCOPE_ID
 } from './scopeKey';
@@ -615,15 +623,21 @@ describe('switch', () => {
 		};
 	}
 
-	it('loads a root `do:` task as a named workflow, kept out of the primary chain', () => {
+	/** The named workflow saved under `name`: its scope, and its Start node. */
+	function namedFlow(graph: WorkflowGraph, name: string) {
+		const key = namedWorkflowScopes(graph).find(
+			(k) => namedWorkflowStart(graph, k)?.data?.label === name
+		)!;
+		return { key, scope: graph.scopes[key], start: namedWorkflowStart(graph, key)! };
+	}
+
+	it('loads a `do:` after another task as a named workflow, out of the primary chain', () => {
 		const { graph } = astToGraph(jumpDoc());
 		const root = graph.scopes[ROOT_SCOPE_ID];
 		expect(root.nodes.map((n) => [n.data?.label, n.type])).toEqual([
 			['Start', 'start'],
 			['route', 'switch'],
 			['notify', 'set'],
-			['electronic', 'workflow'],
-			['physical', 'workflow'],
 			['End', 'end']
 		]);
 
@@ -634,19 +648,25 @@ describe('switch', () => {
 			'notify->End'
 		]);
 
-		const electronic = root.nodes.find((n) => n.data?.label === 'electronic')!;
-		expect(graph.scopes[workflowScopeKey(electronic.id)].nodes.map((n) => n.data?.label)).toEqual([
-			'ship',
-			'invoice'
+		// drawn like the primary workflow: its own Start (named after it), its steps, its own End
+		const { key, scope, start } = namedFlow(graph, 'electronic');
+		expect(key).toBe(workflowScopeKey(start.id));
+		expect(scope.nodes.map((n) => `${n.type}:${n.data?.label}`)).toEqual([
+			'start:electronic',
+			'call:ship',
+			'call:invoice',
+			'end:End'
 		]);
+		expect(scope.nodes.at(-1)!.id).toBe(workflowEndNodeId(start.id));
+		expect(isNamedWorkflowStart(start)).toBe(true);
+		expect(start.data?.declaredIn).toBe(ROOT_SCOPE_ID);
 	});
 
-	it('resolves every case to what it jumps at, siblings and workflows alike', () => {
+	it('resolves every case to the named workflow it starts, falling back to a sibling', () => {
 		const { graph } = astToGraph(jumpDoc());
 		const root = graph.scopes[ROOT_SCOPE_ID];
 		const sw = root.nodes.find((n) => n.type === 'switch')!;
 		const cases = sw.data?.cases as CaseEntry[];
-		const byLabel = (l: string) => root.nodes.find((n) => n.data?.label === l)!.id;
 
 		expect(cases.map((c) => [c.name, c.condition, c.routing, c.taskName])).toEqual([
 			['electronic', '${ .t == "e" }', 'task', 'electronic'],
@@ -654,9 +674,9 @@ describe('switch', () => {
 			['otherwise', '', 'task', 'notify']
 		]);
 		expect(cases.map((c) => c.targetNodeId)).toEqual([
-			byLabel('electronic'),
-			byLabel('physical'),
-			byLabel('notify')
+			namedFlow(graph, 'electronic').start.id,
+			namedFlow(graph, 'physical').start.id,
+			root.nodes.find((n) => n.data?.label === 'notify')!.id
 		]);
 	});
 
@@ -666,24 +686,114 @@ describe('switch', () => {
 		expect(graphToAst(graph, hdr).do).toEqual(doc.do);
 	});
 
-	it('emits named workflows after the primary flow, whatever order they were written in', () => {
+	it('runs a `do:` that comes before every other task in place, as a group — as zigflow does', () => {
 		const doc: ZigflowDocument = {
 			document: header(),
 			do: [
-				{ handler: { do: [{ ship: { set: { shipped: 'true' } } }] } },
-				{ route: { switch: [{ a: { then: 'handler' } }] } },
+				{ prepare: { do: [{ ship: { set: { shipped: 'true' } } }] } },
+				{ route: { switch: [{ a: { then: 'continue' } }] } },
 				{ after: { set: { done: 'true' } } }
 			]
 		};
 		const { graph, header: hdr } = astToGraph(doc);
-		expect(graphToAst(graph, hdr).do).toEqual([doc.do[1], doc.do[2], doc.do[0]]);
+		expect(graph.scopes[ROOT_SCOPE_ID].nodes.map((n) => n.type)).toEqual([
+			'start',
+			'do',
+			'switch',
+			'set',
+			'end'
+		]);
+		expect(namedWorkflowScopes(graph)).toEqual([]);
+		expect(graphToAst(graph, hdr).do).toEqual(doc.do);
 	});
 
-	it('re-resolves a jump through the target node, so renaming the target keeps the case', () => {
+	it('treats every `do:` as a named workflow in a document of nothing but', () => {
+		const doc: ZigflowDocument = {
+			document: header(),
+			do: [
+				{ first: { do: [{ a: { set: { k: '1' } } }] } },
+				{ second: { do: [{ b: { set: { k: '2' } } }] } }
+			]
+		};
+		const { graph, header: hdr } = astToGraph(doc);
+		expect(graph.scopes[ROOT_SCOPE_ID].nodes.map((n) => n.type)).toEqual(['start', 'end']);
+		expect(
+			namedWorkflowScopes(graph).map((k) => namedWorkflowStart(graph, k)?.data?.label)
+		).toEqual(['first', 'second']);
+		expect(graphToAst(graph, hdr).do).toEqual(doc.do);
+	});
+
+	it('loads a named workflow declared inside a nested body, and saves it back where it was', () => {
+		// zigflow registers a `do:` after another task as a workflow at any depth — verified by
+		// running exactly this shape: the switch inside the try starts `innerWf` as a child workflow.
+		const doc: ZigflowDocument = {
+			document: header(),
+			do: [
+				{ a: { set: { x: '1' } } },
+				{
+					guarded: {
+						try: [
+							{ pick: { switch: [{ one: { when: '${ true }', then: 'innerWf' } }] } },
+							{ innerWf: { do: [{ hello: { set: { y: '2' } } }] } }
+						],
+						catch: { as: 'error', do: [{ oops: { set: { z: '3' } } }] }
+					}
+				},
+				{ b: { set: { x: '2' } } }
+			]
+		};
+		const { graph, header: hdr } = astToGraph(doc);
+		const guarded = graph.scopes[ROOT_SCOPE_ID].nodes.find((n) => n.data?.label === 'guarded')!;
+		const tryKey = tryScopeKey(ROOT_SCOPE_ID, guarded.id);
+		expect(graph.scopes[tryKey].nodes.map((n) => n.data?.label)).toEqual(['pick']);
+
+		const { scope, start } = namedFlow(graph, 'innerWf');
+		expect(start.data?.declaredIn).toBe(tryKey);
+		expect(scope.nodes.map((n) => n.type)).toEqual(['start', 'set', 'end']);
+
+		const pick = graph.scopes[tryKey].nodes[0];
+		expect((pick.data?.cases as CaseEntry[])[0].targetNodeId).toBe(start.id);
+
+		expect(graphToAst(graph, hdr).do).toEqual(doc.do);
+	});
+
+	it('writes a named workflow at the top level once its declaring list could only run it in place', () => {
+		const { graph, header: hdr } = astToGraph({
+			document: header(),
+			do: [
+				{ a: { set: { x: '1' } } },
+				{ loop: { for: { each: 'i', in: '${ .items }' }, do: [{ step: { set: { k: 'v' } } }] } }
+			]
+		});
+		const loop = graph.scopes[ROOT_SCOPE_ID].nodes.find((n) => n.type === 'for')!;
+		const body = forScopeKey(ROOT_SCOPE_ID, loop.id);
+		const { key, scope } = newNamedWorkflowScope('handler', [], body);
+		graph.scopes[key] = scope;
+		// Emptied: a `do:` alone in a list would be run in place, not registered as a workflow.
+		graph.scopes[body] = { nodes: [], edges: [] };
+
+		const out = graphToAst(graph, hdr).do;
+		expect(out.map((t) => Object.keys(t)[0])).toEqual(['a', 'loop', 'handler']);
+		expect((out[1].loop as { do: unknown[] }).do).toEqual([]);
+	});
+
+	it('emits named workflows after the steps of the list that declares them', () => {
+		const doc: ZigflowDocument = {
+			document: header(),
+			do: [
+				{ route: { switch: [{ a: { then: 'handler' } }] } },
+				{ handler: { do: [{ ship: { set: { shipped: 'true' } } }] } },
+				{ after: { set: { done: 'true' } } }
+			]
+		};
+		const { graph, header: hdr } = astToGraph(doc);
+		expect(graphToAst(graph, hdr).do).toEqual([doc.do[0], doc.do[2], doc.do[1]]);
+	});
+
+	it('re-resolves a case through the Start node, so renaming the workflow keeps the case', () => {
 		const { graph, header: hdr } = astToGraph(jumpDoc());
-		const root = graph.scopes[ROOT_SCOPE_ID];
-		const electronic = root.nodes.find((n) => n.data?.label === 'electronic')!;
-		electronic.data = { ...electronic.data, label: 'processElectronicOrder' };
+		const { start } = namedFlow(graph, 'electronic');
+		start.data = { ...start.data, label: 'processElectronicOrder' };
 
 		const rebuilt = graphToAst(graph, hdr);
 		const cases = (rebuilt.do[0].route as { switch: Record<string, { then: string }>[] }).switch;
@@ -691,21 +801,37 @@ describe('switch', () => {
 		expect(Object.keys(rebuilt.do[2])[0]).toBe('processElectronicOrder');
 	});
 
-	it('carries a named workflow Start variables as a leading `init: set:` in its own body', () => {
+	it("saves a named workflow's parameters as a leading `init: set:`, and loads them back onto its Start", () => {
 		const { graph, header: hdr } = astToGraph(jumpDoc());
-		const root = graph.scopes[ROOT_SCOPE_ID];
-		const electronic = root.nodes.find((n) => n.data?.label === 'electronic')!;
-		electronic.data = {
-			...electronic.data,
-			variables: [{ key: 'carrier', value: '${ $input.carrier }' }]
-		};
+		const { start } = namedFlow(graph, 'electronic');
+		start.data = { ...start.data, variables: [{ key: 'carrier', value: '${ $data.carrier }' }] };
 
 		const rebuilt = graphToAst(graph, hdr);
 		const body = (rebuilt.do[2].electronic as { do: Record<string, unknown>[] }).do;
-		expect(body[0]).toEqual({ init: { set: { carrier: '${ $input.carrier }' } } });
+		expect(body[0]).toEqual({ init: { set: { carrier: '${ $data.carrier }' } } });
 		expect(Object.keys(body[1])[0]).toBe('ship');
+
+		const again = namedFlow(astToGraph(rebuilt).graph, 'electronic');
+		expect(again.start.data?.variables).toEqual([{ key: 'carrier', value: '${ $data.carrier }' }]);
+		expect(again.scope.nodes.map((n) => n.data?.label)).toEqual([
+			'electronic',
+			'ship',
+			'invoice',
+			'End'
+		]);
 	});
 
+	it('never lets a sibling task take a named workflow name — the task gives way', () => {
+		const { graph, header: hdr } = astToGraph({
+			document: header(),
+			do: [{ electronic: { set: { k: 'v' } } }]
+		});
+		const { key, scope } = newNamedWorkflowScope('electronic');
+		graph.scopes[key] = scope;
+
+		const names = graphToAst(graph, hdr).do.map((t) => Object.keys(t)[0]);
+		expect(names).toEqual(['electronic-2', 'electronic']);
+	});
 	it('leaves a backwards jump exactly as written', () => {
 		const doc: ZigflowDocument = {
 			document: header(),

@@ -43,26 +43,42 @@ Real Zigflow tasks (`for`, `fork`, `try`) contain their own nested task lists (`
 - Click **"Edit loop body"** on a `For` node, **"Edit body"** on a `Fork` branch row, or **"Edit try body"/"Edit catch body"** on a `Try` node to open that nested scope as its own canvas view.
 - A breadcrumb bar (shown once you're drilled in) lets you navigate back up.
 - Each scope is keyed by a deterministic id built from `src/lib/zigflow-engine/scopeKey.ts` (`forScopeKey`, `tryScopeKey`, `catchScopeKey`, `forkBranchScopeKey`) — e.g. `root/<forNodeId>/do`.
-- A root-level `do:` task is a whole separate Temporal workflow, not a group — it loads as a `workflow` node whose body is the scope `workflowScopeKey(nodeId)`. A `switch` owns no nested scope at all: every case is a jump. See the `switch` and `workflow` sections below.
+- A `do:` task after a non-`do:` task (in any list) is a whole separate Temporal workflow, not a group — it loads as a _named workflow_: a scope of its own, `workflowScopeKey(startId)`, holding a `start` node, its steps and an `end` node, drawn beside the primary workflow rather than as a lane. A `switch` owns no nested scope at all. See the `start` and `switch` sections below.
 - Every one of these lanes is drawn as a titled dotted frame (`LaneBoxLayer.svelte` + `computeLiveLaneBoxes`), named after the task the DSL saves that group as, with a start cap above its first node and an end cap below its last (`LaneBox.caps`; the room for them comes from `layout.ts`'s `LANE_CAP_GAP`). A frame encloses any lanes nested inside it, so a drop resolves to the **deepest** frame under the cursor — the caps, though, stay on the lane's own chain.
-- A `switch` case's `then` can only name a task within the **same scope** (per the DSL spec), plus any named workflow, which is declared at the document's top level — the case editor's target picker offers exactly those.
+- A `switch` case's named `then:` starts a named workflow as a child workflow, wherever either is declared — the case editor's picker offers every named workflow.
 - Editing the DSL text directly and letting it sync back to the canvas rebuilds every scope from scratch and returns you to the root view, since node identity can't be preserved across a full text-driven rebuild. This is an intentional simplification, not a bug.
 
 ---
 
 ## Nodes
 
-### `start` — terminal
+### `start` — terminal · shown in the palette
 
 ```ts
 node.data = {
-  label:     string
-  variables: VarEntry[]   // { key: string, value: string }
+  label:       string       // a named workflow's name — its DSL task key and Temporal workflow type
+  variables:   VarEntry[]   // { key: string, value: string } — "Init Variables" / "Parameters"
+  declaredIn?: string       // named workflows only: the scope key of the list its `do:` is written in
 }
 ```
 
-- `variables` initialises `$data` keys before the first task runs — emitted as a synthetic leading `init: { set: {...} } }` task in the DSL (there is no real "start" task).
-- No `DataFlow` fields. `showInPalette: false` — auto-created, one per workflow, only at the root scope.
+Every workflow's entry point. There are two kinds, both plain `start` nodes:
+
+- **The primary workflow's Start** — id `start` (`PRIMARY_START_ID`), in the root scope, created by
+  the engine, not deletable. It also owns the document's `$input` schema editor.
+- **A named workflow's Start** — dropped from the palette. Zigflow registers every `do:` task that
+  follows a non-`do:` task (in any list, at any depth) as a Temporal workflow of its own, named by
+  its task key, and a switch case's `then:` starts it as a child workflow. Dropping a Start asks for
+  that name and its parameters (`WorkflowNameDialog`) and creates a scope of its own,
+  `workflowScopeKey(startId)`, holding this Start, its steps and its own `end` node — drawn exactly
+  like the primary workflow, in its own column. Deleting it deletes the whole workflow. Emitted as
+  `<label>: { do: [...] }` after the steps of the list that declares it (`declaredIn`, root for a
+  new one), with its shared `if`/`output`/`export`/`metadata` round-tripped opaquely.
+
+`variables` initialise `$data` before the first step — emitted as a synthetic leading
+`init: { set: {...} }` task in that workflow's own list, and lifted back onto the Start on load. For
+a named workflow they are its parameters: it starts with the caller's `$input` and state, so a value
+like `${ $data.orderId }` reads what the caller had. No `DataFlow` fields in the panel.
 
 ---
 
@@ -72,7 +88,10 @@ node.data = {
 node.data = { label: string };
 ```
 
-No config. Not a real DSL task either — reaching it (or a `switch`/`then: end`) simply terminates the workflow.
+No config, not in the palette, never deletable. Every workflow has exactly one — the primary one's
+is id `end`, a named one's is `workflowEndNodeId(startId)`. Not a real DSL task: reaching it (or a
+`switch` case's `end`) terminates that workflow. Dead ends inside a workflow draw a synthetic edge
+to its own End, never another workflow's.
 
 ---
 
@@ -125,7 +144,7 @@ interface CaseEntry {
   condition:     string        // ConditionBuilder — blank = otherwise/default
   routing:       CaseRouting   // 'task' | 'continue' | 'exit' | 'end'
   taskName?:     string        // task: the name the document's `then:` had, as a fallback
-  targetNodeId?: string        // task: the node jumped at — a sibling, or a named workflow
+  targetNodeId?: string        // task: the named workflow's Start node
 }
 ```
 
@@ -133,24 +152,26 @@ This is the **real** conditional-branching construct in Zigflow (not a dedicated
 are evaluated top-to-bottom, first truthy match wins, and their array order is the DSL order — the
 node panel can reorder them.
 
-Every case is a jump, and one switch can mix the kinds:
+Each case either starts a named workflow or is a flow directive, and one switch can mix the kinds:
 
-- **`task`** — the case's `then:` names something: a task at the switch's own nesting depth, or a
-  named workflow (top-level, so reachable from anywhere). Drawn as a labeled bowed edge
+- **`task`** — the case **starts a named workflow**: zigflow runs a switch's named `then:` as a
+  Temporal child workflow of that name (from anywhere in the document), waits for it, then carries
+  on with the task after the switch. Drawn as a labeled edge into that workflow's Start
   (`computeSwitchCaseEdges` + `SwitchCaseEdge.svelte`). Re-resolved through `targetNodeId` on save so
-  renaming the target keeps the jump, falling back to `taskName`.
+  renaming the workflow keeps the case, falling back to `taskName`. A `then:` naming a plain sibling
+  task only comes from hand-written DSL (zigflow would fail to start it); it is drawn and kept.
 - **`continue` / `exit` / `end`** — the flow directives, taken as written and drawn as a labeled
-  edge to the next task / the `End` node.
+  edge to the next task / the End of the workflow the switch is in.
 
-There is no "own branch" routing and nothing converges. A case cannot run steps of its own and then
-rejoin: `then:` names a task or a workflow, and a named workflow runs to its _own_ End (`zigflow
-graph` ignores a `then:` on a root-level `do:` task outright). `planSwitchCases` in `graph.ts`
-therefore restructures nothing — it reads each `then:` and keeps it.
+There is no "own branch" routing and nothing converges: the steps a case runs are a named workflow,
+drawn as its own Start-to-End flow. `planSwitchCases` in `graph.ts` restructures nothing — it reads
+each `then:` and keeps it; `resolveCaseTargets` resolves the names once the whole document is loaded.
 
-Authoring is on the canvas: drag from the switch onto a reachable task, a named workflow's Start, or
-the `End` node to add a case (the condition editor opens), click a case edge to edit its
-condition/routing, delete a case edge to drop the case. The node panel's Cases list does the same in
-list form. Both go through `switchCases.ts`, the one place `node.data.cases` is read.
+Authoring is on the canvas: drag from the switch onto a named workflow's Start (a case that starts
+it) or the End of its own workflow (an `end` case) — the condition editor opens — click a case edge
+to edit it, delete a case edge to drop the case. The node panel's Cases list does the same in list
+form. Both go through `switchCases.ts`, the one place `node.data.cases` is read (`caseTargetOptions`
+is the shared picker list).
 
 ---
 
@@ -295,42 +316,16 @@ Invokes another registered workflow (`run: { workflow: {...} }` in the DSL). Not
 
 ---
 
-### `workflow` — terminal · has a nested scope, shown in the palette as "Start"
-
-```ts
-node.data = { label: string, variables: VarEntry[], ...DataFlow };
-```
-
-A whole separate Temporal workflow declared in the same document, emitted as a root-level
-`<label>: do: [...]`. This is zigflow's own model, verifiable with the CLI: `zigflow graph` draws
-each root-level `do:` task as its own subgraph with its own Start and End, and the primary workflow
-(the root tasks that aren't `do:` tasks) as another, named by `document.workflowType`.
-
-The node **is** that workflow's Start, which is why the palette calls it Start and why it carries
-`variables` exactly like the primary `start` node does — emitted as a leading `init: set:` inside
-its own `do:`, and read back as an ordinary `set` node, same as the primary workflow's. The label is
-its whole identity (the DSL task key, the Temporal workflow type, and what a switch case's `then:`
-names), so dropping one from the palette asks for it immediately (`WorkflowNameDialog`) and
-cancelling removes the node.
-
-It never joins the primary chain: no edges are wired to it, `scopeToTaskList` emits these after the
-chain, and `positionChain` gives each its own column with its body running straight down beneath it.
-The frame around the pair carries no title and no start cap — the Start card is both.
-
-Only the **root** produces these; a `do:` task nested in a `for`/`try`/`fork` body is a plain group
-(`do` node, below).
-
----
-
 ### `do` — structure · has a nested scope (`do`)
 
 ```ts
 node.data = { label: string, ...DataFlow };
 ```
 
-A named group of steps run in sequence, emitted as `<label>: do: [...]`. Not in the palette: at the
-root a `do:` task is a whole workflow (above), so these only arrive from hand-written DSL that groups
-steps inside a `for`/`try`/`fork` body. Its body is the lane keyed by `forScopeKey`, framed and
+A group of steps zigflow runs **in place**, emitted as `<label>: do: [...]`. Only a `do:` that
+comes before every other task in its list is one of these — one after a non-`do:` task is a named
+workflow (see `start` above), which zigflow registers and never runs in place. Not in the palette, so
+these only arrive from hand-written DSL. Its body is the lane keyed by `forScopeKey`, framed and
 capped like every other lane.
 
 ---

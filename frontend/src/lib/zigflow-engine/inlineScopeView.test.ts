@@ -15,13 +15,15 @@ import {
 	SWITCH_CASE_EDGE_TYPE,
 	SWITCH_CASE_TAG,
 	SWITCH_NODE_TAG,
-	computeLiveLaneBoxes
+	computeLiveLaneBoxes,
+	computeFlowBounds
 } from './inlineScopeView';
 import {
 	forScopeKey,
 	tryScopeKey,
 	catchScopeKey,
 	forkBranchScopeKey,
+	workflowEndNodeId,
 	workflowScopeKey,
 	ROOT_SCOPE_ID
 } from './scopeKey';
@@ -825,7 +827,10 @@ describe('computeSwitchCaseEdges', () => {
 	});
 });
 
-/** Two named workflows declared beside the primary flow, which a switch jumps into. */
+/**
+ * Two named workflows a switch starts. Each is its own scope holding its own Start, its steps and
+ * its own End — exactly the shape the primary workflow has.
+ */
 function workflowScopesFixture(): Record<string, ScopeGraph> {
 	const cases = [
 		{
@@ -842,7 +847,8 @@ function workflowScopesFixture(): Record<string, ScopeGraph> {
 			routing: 'task',
 			targetNodeId: 'wfP'
 		},
-		{ id: 'c3', name: 'otherwise', condition: '', routing: 'continue' }
+		{ id: 'c3', name: 'otherwise', condition: '', routing: 'continue' },
+		{ id: 'c4', name: 'stop', condition: '${ .stop }', routing: 'end' }
 	];
 	return {
 		[ROOT_SCOPE_ID]: {
@@ -850,109 +856,136 @@ function workflowScopesFixture(): Record<string, ScopeGraph> {
 				node('start', 'start'),
 				node('switcher', 'switch', { cases }),
 				node('after', 'set'),
-				node('wfE', 'workflow', { label: 'processElectronicOrder' }),
-				node('wfP', 'workflow', { label: 'processPhysicalOrder' }),
 				node('end', 'end')
 			],
 			edges: chain(['start', 'switcher', 'after', 'end'])
 		},
 		[workflowScopeKey('wfE')]: {
-			nodes: [node('ship'), node('invoice')],
-			edges: chain(['ship', 'invoice'])
+			nodes: [
+				node('wfE', 'start', { label: 'processElectronicOrder' }),
+				node('ship'),
+				node('invoice'),
+				node(workflowEndNodeId('wfE'), 'end')
+			],
+			edges: chain(['wfE', 'ship', 'invoice', workflowEndNodeId('wfE')])
 		},
-		[workflowScopeKey('wfP')]: { nodes: [node('pack')], edges: [] }
+		[workflowScopeKey('wfP')]: {
+			nodes: [
+				node('wfP', 'start', { label: 'processPhysicalOrder' }),
+				node('pack', 'fork', { branches: [{ id: 'b1', name: 'box' }] }),
+				node(workflowEndNodeId('wfP'), 'end')
+			],
+			edges: chain(['wfP', 'pack', workflowEndNodeId('wfP')])
+		},
+		[forkBranchScopeKey(workflowScopeKey('wfP'), 'pack', 'b1')]: {
+			nodes: [node('tape')],
+			edges: []
+		}
 	};
 }
 
 describe('composeScopeForDisplay — named workflows', () => {
-	it("inlines each workflow's body as its own lane, entered from its Start node", () => {
-		const result = composeScopeForDisplay(workflowScopesFixture(), ROOT_SCOPE_ID);
+	it('draws every named workflow as a flow of its own, beside the primary one', () => {
+		const result = composeScopeForDisplay(workflowScopesFixture());
+		const x = (id: string) => result.nodes.find((n) => n.id === id)!.position.x;
+		// each flow is a column of its own, in declaration order, none overlapping the one before
+		expect(x('wfE')).toBeGreaterThan(x('start'));
+		expect(x('wfP')).toBeGreaterThan(x('wfE'));
+		expect(x('ship')).toBe(x('wfE'));
+		expect(x(workflowEndNodeId('wfE'))).toBe(x('wfE'));
+		// ...and each starts at the top, like the primary workflow does
+		const y = (id: string) => result.nodes.find((n) => n.id === id)!.position.y;
+		expect(y('wfE')).toBe(y('start'));
+		expect(y('wfP')).toBe(y('start'));
+	});
+
+	it('wires each named workflow with its own real edges — no lane, no entry edge', () => {
+		const result = composeScopeForDisplay(workflowScopesFixture());
+		const real = result.edges.filter(
+			(e) => !(e.data as Record<string, unknown>)?.syntheticScopeEdge
+		);
+		expect(real.filter((e) => e.source === 'wfE' || e.target === workflowEndNodeId('wfE'))).toEqual(
+			[
+				expect.objectContaining({ source: 'wfE', target: 'ship' }),
+				expect.objectContaining({ source: 'invoice', target: workflowEndNodeId('wfE') })
+			]
+		);
 		const entries = result.edges.filter(
 			(e) => (e.data as Record<string, unknown>)?.kind === 'entry'
 		);
-		expect(entries.map((e) => [e.source, e.target])).toEqual([
-			['wfE', 'ship'],
-			['wfP', 'pack']
-		]);
+		expect(entries.map((e) => e.source)).toEqual(['pack']);
 	});
 
-	it('draws a case that jumps into a workflow as an edge at that workflow, and a directive at its target', () => {
-		const result = composeScopeForDisplay(workflowScopesFixture(), ROOT_SCOPE_ID);
+	it('draws a case that starts a workflow at its Start, and a directive at its target', () => {
+		const result = composeScopeForDisplay(workflowScopesFixture());
 		const caseEdges = result.edges.filter((e) => e.type === SWITCH_CASE_EDGE_TYPE);
 		expect(caseEdges.map((e) => [e.source, e.target])).toEqual([
 			['switcher', 'wfE'],
 			['switcher', 'wfP'],
 			// `continue` falls through to whatever the switch already flows into
-			['switcher', 'after']
+			['switcher', 'after'],
+			// `end` ends the workflow the switch is in — the primary one here
+			['switcher', 'end']
 		]);
 	});
 
-	it('never converges a named workflow back into the primary flow', () => {
-		const result = composeScopeForDisplay(workflowScopesFixture(), ROOT_SCOPE_ID);
-		expect(
-			result.edges.filter((e) => (e.data as Record<string, unknown>)?.kind === 'converge')
-		).toEqual([]);
-		// the switch's own chain edge stays visible — a case that falls through really does run `after`
-		const chainEdge = result.edges.find((e) => e.source === 'switcher' && e.target === 'after');
-		expect(chainEdge?.hidden).toBeFalsy();
-	});
-
-	it('gives a workflow with an empty body a lane bounding box, so it is still a drop target', () => {
-		const scopes = workflowScopesFixture();
-		scopes[workflowScopeKey('wfP')] = { nodes: [], edges: [] };
-		const result = composeScopeForDisplay(scopes, ROOT_SCOPE_ID);
-		expect(result.laneBounds.has(workflowScopeKey('wfP'))).toBe(true);
-	});
-
-	it("prunes a workflow's body when its Start node is deleted", () => {
-		const wf = node('wfE', 'workflow', { label: 'processElectronicOrder' });
-		expect(collectDescendantScopeKeysForNode(wf, ROOT_SCOPE_ID, [wf])).toEqual([
-			workflowScopeKey('wfE')
-		]);
-	});
-
-	it("never runs a terminal edge from a named workflow's last task to the primary End", () => {
-		const result = composeScopeForDisplay(workflowScopesFixture(), ROOT_SCOPE_ID);
+	it('ends each workflow at its own End: dead ends never cross into another flow', () => {
+		const result = composeScopeForDisplay(workflowScopesFixture());
 		const terminal = result.edges.filter(
 			(e) => (e.data as Record<string, unknown>)?.kind === 'terminal'
 		);
-		// each named workflow ends at its own frame cap, not at the primary workflow's End node
-		expect(terminal.map((e) => e.source)).not.toContain('invoice');
-		expect(terminal.map((e) => e.source)).not.toContain('pack');
-		expect(terminal.map((e) => e.source)).not.toContain('wfE');
+		// the fork branch's last task inside `processPhysicalOrder` runs to *that* workflow's End
+		expect(terminal.map((e) => [e.source, e.target])).toEqual([['tape', workflowEndNodeId('wfP')]]);
 	});
 
-	it('owns no lanes at all for a switch — every case is a jump', () => {
-		const result = composeScopeForDisplay(workflowScopesFixture(), ROOT_SCOPE_ID);
+	it("ends a switch's `end` case at the End of the named workflow it is in", () => {
+		const scopes = workflowScopesFixture();
+		const wf = scopes[workflowScopeKey('wfE')];
+		wf.nodes.splice(
+			1,
+			0,
+			node('inner', 'switch', { cases: [{ id: 'x', name: 'stop', condition: '', routing: 'end' }] })
+		);
+		wf.edges = chain(['wfE', 'inner', 'ship', 'invoice', workflowEndNodeId('wfE')]);
+		const caseEdges = composeScopeForDisplay(scopes).edges.filter(
+			(e) => e.type === SWITCH_CASE_EDGE_TYPE && e.source === 'inner'
+		);
+		expect(caseEdges.map((e) => e.target)).toEqual([workflowEndNodeId('wfE')]);
+	});
+
+	it('frames only real nested bodies — never a named workflow', () => {
+		const result = composeScopeForDisplay(workflowScopesFixture());
 		expect([...result.laneBoxes.keys()]).toEqual([
-			workflowScopeKey('wfE'),
-			workflowScopeKey('wfP')
+			forkBranchScopeKey(workflowScopeKey('wfP'), 'pack', 'b1')
 		]);
+	});
+
+	it('round-trips every flow through decomposeDisplayedScope', () => {
+		const scopes = workflowScopesFixture();
+		const result = composeScopeForDisplay(scopes);
+		const back = decomposeDisplayedScope(result.nodes, result.edges);
+		expect(Object.keys(back).sort()).toEqual(Object.keys(scopes).sort());
+		expect(back[workflowScopeKey('wfE')].nodes.map((n) => n.id)).toEqual([
+			'wfE',
+			'ship',
+			'invoice',
+			workflowEndNodeId('wfE')
+		]);
+	});
+
+	it('bounds each named workflow for drop targeting, and not the primary one', () => {
+		const result = composeScopeForDisplay(workflowScopesFixture());
+		const bounds = computeFlowBounds(result.nodes);
+		expect([...bounds.keys()]).toEqual([workflowScopeKey('wfE'), workflowScopeKey('wfP')]);
+		const e = bounds.get(workflowScopeKey('wfE'))!;
+		const ship = result.nodes.find((n) => n.id === 'ship')!.position;
+		expect(ship.x).toBeGreaterThanOrEqual(e.x);
+		expect(ship.y).toBeGreaterThanOrEqual(e.yStart);
+		expect(ship.y).toBeLessThanOrEqual(e.yEnd);
 	});
 });
 
 describe('computeLiveLaneBoxes', () => {
-	it("leaves a named workflow's frame untitled and uncapped at the top — its Start card is both", () => {
-		const lane = workflowScopeKey('wfE');
-		const nodes = [
-			{
-				...node('wfE', 'workflow', {
-					[OWNER_SCOPE_TAG]: ROOT_SCOPE_ID,
-					label: 'processElectronicOrder'
-				}),
-				position: { x: 400, y: 80 }
-			},
-			{ ...node('ship', 'call', { [OWNER_SCOPE_TAG]: lane }), position: { x: 400, y: 256 } }
-		];
-		const box = computeLiveLaneBoxes(nodes).get(lane)!;
-		expect(box.title).toBe('');
-		expect(box.caps.showStart).toBe(false);
-		expect(box.ownerNodeId).toBe('wfE');
-		// the frame wraps the Start card as well as the body
-		expect(box.yStart).toBe(80);
-		expect(box.caps.endY).toBeGreaterThan(256);
-	});
-
 	it('names a bare `do` frame after the process itself, and a `for` frame after its body', () => {
 		const doLane = forScopeKey(ROOT_SCOPE_ID, 'group');
 		const forLane = forScopeKey(ROOT_SCOPE_ID, 'loop');
@@ -1021,6 +1054,6 @@ describe('computeLiveLaneBoxes', () => {
 
 	it('is carried on composeScopeForDisplay, one frame per lane', () => {
 		const result = composeScopeForDisplay(workflowScopesFixture(), ROOT_SCOPE_ID);
-		expect([...result.laneBoxes.values()].map((b) => b.ownerNodeId)).toEqual(['wfE', 'wfP']);
+		expect([...result.laneBoxes.values()].map((b) => b.ownerNodeId)).toEqual(['pack']);
 	});
 });
