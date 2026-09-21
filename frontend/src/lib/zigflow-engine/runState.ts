@@ -1,6 +1,7 @@
 import type { ExecutionEvent, ExecutionStatus } from '../types';
 import type { RunIndex } from './runIndex';
-import { describeScopePath, resolveNode, type MatchConfidence } from './runScope';
+import { describeScopePath, resolveNode, resolveScopePath, type MatchConfidence } from './runScope';
+import { isWorkflowScopeKey } from './scopeKey';
 
 /**
  * Folds a run's event stream into per-node state and a readable log. Pure and UI-free, so the
@@ -81,6 +82,12 @@ export interface RunState {
 	workflowOutput?: unknown;
 	/** The root workflow reported its own completion — the run reached its end. */
 	workflowCompleted: boolean;
+	/**
+	 * Named workflows this run started (as child workflows, from a switch case), by scope id — and
+	 * whether each reported its own completion. They emit no task events for their Start and End,
+	 * so this is what those two nodes are coloured from.
+	 */
+	namedWorkflows: Record<string, 'running' | 'completed'>;
 	lastSeq: number;
 	finalized: boolean;
 }
@@ -95,6 +102,7 @@ export function initialRunState(index: RunIndex): RunState {
 		log: [],
 		unmatched: [],
 		workflowCompleted: false,
+		namedWorkflows: {},
 		lastSeq: 0,
 		finalized: false
 	};
@@ -116,6 +124,7 @@ export function reduceRunStateAll(
 	const log = [...state.log];
 	const unmatched = [...state.unmatched];
 	let { workflowInput, workflowOutput, workflowCompleted, lastSeq } = state;
+	let namedWorkflows = state.namedWorkflows ?? {};
 
 	for (const event of events) {
 		if (event.seq <= lastSeq) continue;
@@ -124,15 +133,22 @@ export function reduceRunStateAll(
 		const data = event.data ?? {};
 
 		// Every `for` iteration, `fork` branch and `try` block is its own child workflow and reports
-		// its own start/finish; only the root scope's describe the run as a whole.
-		if (event.eventType === 'workflow.started') {
-			if (!event.scopePath) workflowInput = data.input;
-			continue;
-		}
-		if (event.eventType === 'workflow.completed') {
+		// its own start/finish; only the root scope's describe the run as a whole. A named workflow's
+		// own start/finish is what says it ran — its Start and End have no task events.
+		if (event.eventType === 'workflow.started' || event.eventType === 'workflow.completed') {
+			const completed = event.eventType === 'workflow.completed';
 			if (!event.scopePath) {
-				workflowOutput = data.output;
-				workflowCompleted = true;
+				if (completed) {
+					workflowOutput = data.output;
+					workflowCompleted = true;
+				} else {
+					workflowInput = data.input;
+				}
+				continue;
+			}
+			const scope = resolveScopePath(index, event.scopePath).scopeId;
+			if (scope && isWorkflowScopeKey(scope)) {
+				namedWorkflows = { ...namedWorkflows, [scope]: completed ? 'completed' : 'running' };
 			}
 			continue;
 		}
@@ -173,6 +189,7 @@ export function reduceRunStateAll(
 		workflowInput,
 		workflowOutput,
 		workflowCompleted,
+		namedWorkflows,
 		lastSeq
 	};
 }

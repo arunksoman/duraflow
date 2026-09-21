@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { userEvent } from 'vitest/browser';
 import { render } from 'vitest-browser-svelte';
-import ExpressionInput, { type AvailVar } from './ExpressionInput.svelte';
+import ExpressionInput from './ExpressionInput.svelte';
+import type { AvailVar } from './availableVars';
 
 const availVars: AvailVar[] = [
 	{

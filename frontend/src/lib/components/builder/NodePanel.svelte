@@ -1,16 +1,22 @@
 <script lang="ts">
 	import { untrack } from 'svelte';
 	import type { Node, Edge } from '@xyflow/svelte';
-	import { Plus, Trash2, X } from '@lucide/svelte';
+	import { ChevronDown, ChevronUp, Plus, Trash2, TriangleAlert, X } from '@lucide/svelte';
 	import type { WorkflowMeta, InputField, Workflow } from '$lib/types';
 	import { NODE_META } from './builderConfig';
 	import type { VarEntry, CaseEntry, EventEntry, BranchEntry } from './builderConfig';
+	import { caseTargetOptions, newDirectiveCase } from '$lib/zigflow-engine/switchCases';
+	import { isNamedWorkflowStart } from '$lib/zigflow-engine/graph';
+	import { toTaskName } from '$lib/zigflow-engine/slug';
+	import SwitchCaseEditor from './SwitchCaseEditor.svelte';
 	import type { WorkflowNodeType } from '$lib/types';
-	import ExpressionInput, { type AvailVar } from './ExpressionInput.svelte';
+	import ExpressionInput from './ExpressionInput.svelte';
+	import { availableVarsAt } from './availableVars';
 	import ConditionBuilder from './ConditionBuilder.svelte';
 	import CodeMirrorEditor from '$lib/components/editor/CodeMirrorEditor.svelte';
 	import Accordion from './Accordion.svelte';
 	import { OWNER_SCOPE_TAG } from '$lib/zigflow-engine/inlineScopeView';
+	import { workflowScopeKey } from '$lib/zigflow-engine/scopeKey';
 	import { parseDocumentHeader } from '$lib/zigflow-engine/header';
 
 	interface Props {
@@ -55,7 +61,6 @@
 	);
 	const meta = $derived(NODE_META[nodeType]);
 	const Icon = $derived(meta.icon);
-
 	// Panel is destroyed/recreated per node by {#key configNode.id} in parent — untrack is safe
 	let localVars = $state<VarEntry[]>(
 		untrack(() =>
@@ -68,7 +73,7 @@
 		untrack(() =>
 			Array.isArray(node?.data?.cases)
 				? (node.data.cases as CaseEntry[]).map((c) => ({ ...c }))
-				: [{ name: 'default', condition: '', then: 'end' }]
+				: [newDirectiveCase('otherwise', 'continue')]
 		)
 	);
 	let localHeaders = $state<VarEntry[]>(
@@ -204,18 +209,24 @@
 		);
 	}
 	function addCase() {
-		localCases = [
-			...localCases,
-			{ name: `case${localCases.length + 1}`, condition: '', then: 'continue' }
-		];
+		localCases = [...localCases, newDirectiveCase(`case${localCases.length + 1}`, 'continue')];
 		saveCases();
 	}
 	function removeCase(i: number) {
 		localCases = localCases.filter((_, j) => j !== i);
 		saveCases();
 	}
-	function updateCase(i: number, k: keyof CaseEntry, v: string) {
-		localCases = localCases.map((c, j) => (j === i ? { ...c, [k]: v } : c));
+	function updateCase(i: number, p: Partial<CaseEntry>) {
+		localCases = localCases.map((c, j) => (j === i ? { ...c, ...p } : c));
+		saveCases();
+	}
+	/** Cases are evaluated in order, so their order is editable — first match wins. */
+	function moveCase(i: number, delta: number) {
+		const j = i + delta;
+		if (j < 0 || j >= localCases.length) return;
+		const next = [...localCases];
+		[next[i], next[j]] = [next[j], next[i]];
+		localCases = next;
 		saveCases();
 	}
 
@@ -335,162 +346,32 @@
 
 	// ── task slug (DSL id derived from label) ─────────────────────────
 
-	const taskSlug = $derived.by(() => {
-		const lbl = (node?.data?.label as string) ?? nodeType;
-		return (
-			lbl
-				.toLowerCase()
-				.replace(/[^a-z0-9]+/g, '-')
-				.replace(/^-+|-+$/g, '') || 'task'
-		);
-	});
+	// The same naming the DSL uses, so an identifier-shaped label (`notifyCustomer`) shows as saved.
+	const taskSlug = $derived(toTaskName((node?.data?.label as string) ?? nodeType));
 
 	// ── available variables at this node ─────────────────────────────
 
-	const availableVars = $derived.by<AvailVar[]>(() => {
-		const vars: AvailVar[] = [];
+	const availableVars = $derived(availableVarsAt(node, nodes, edges, workflowMeta));
 
-		// $input fields
-		for (const field of workflowMeta.inputSchema ?? []) {
-			vars.push({
-				expr: '${ $input.' + field.name + ' }',
-				hint: field.example ? 'e.g. ' + field.example : (field.type ?? 'string'),
-				category: 'input',
-				source: '$input',
-				field: field.name,
-				rawRef: '$input.' + field.name
-			});
-		}
-		if ((workflowMeta.inputSchema ?? []).length === 0) {
-			vars.push({
-				expr: '${ $input }',
-				hint: 'full trigger payload',
-				category: 'input',
-				source: '$input',
-				field: '',
-				rawRef: '$input'
-			});
-		}
+	// ── switch case targets ───────────────────────────────────────────
 
-		// $env vars
-		for (const e of workflowMeta.envVars ?? []) {
-			vars.push({
-				expr: '${ $env.' + e.name + ' }',
-				hint: e.example ? 'e.g. ' + e.example : (e.description ?? ''),
-				category: 'env',
-				source: '$env',
-				field: e.name,
-				rawRef: '$env.' + e.name
-			});
-		}
+	const targetOptions = $derived(caseTargetOptions(node, nodes));
 
-		// $output (always)
-		vars.push({
-			expr: '${ . }',
-			hint: 'previous task output (shorthand)',
-			category: 'output',
-			source: '.',
-			field: '',
-			rawRef: '.'
-		});
-		vars.push({
-			expr: '${ $output }',
-			hint: 'previous task full output',
-			category: 'output',
-			source: '$output',
-			field: '',
-			rawRef: '$output'
-		});
+	/** A Start dropped from the palette — its own workflow, as opposed to the primary one's Start. */
+	const isNamedStart = $derived(isNamedWorkflowStart(node));
 
-		// $data keys from upstream Set nodes (and start node vars)
-		const ancestors: string[] = [];
-		const queue = [node.id];
-		while (queue.length > 0) {
-			const curr = queue.shift()!;
-			for (const edge of edges) {
-				if (edge.target === curr && !ancestors.includes(edge.source)) {
-					ancestors.push(edge.source);
-					queue.push(edge.source);
-				}
-			}
-		}
-
-		const startNode = nodes.find((n) => n.type === 'start');
-		if (startNode) {
-			for (const v of (startNode.data?.variables as VarEntry[]) ?? []) {
-				if (v.key)
-					vars.push({
-						expr: '${ $data.' + v.key + ' }',
-						hint: 'from Start init',
-						category: 'data',
-						source: '$data',
-						field: v.key,
-						rawRef: '$data.' + v.key
-					});
-			}
-		}
-
-		for (const n of nodes) {
-			if (ancestors.includes(n.id) && n.type === 'set') {
-				for (const v of (n.data?.variables as VarEntry[]) ?? []) {
-					if (v.key)
-						vars.push({
-							expr: '${ $data.' + v.key + ' }',
-							hint: 'from Set: ' + (n.data?.label ?? 'Set'),
-							category: 'data',
-							source: '$data',
-							field: v.key,
-							rawRef: '$data.' + v.key
-						});
-				}
-			}
-		}
-
-		// $context hint (when upstream nodes have export.as)
-		const hasExports = ancestors.some((aid) => {
-			const an = nodes.find((n) => n.id === aid);
-			return an && (an.data?.exportAs as string);
-		});
-		if (hasExports) {
-			vars.push({
-				expr: '${ $context }',
-				hint: 'accumulated via export.as',
-				category: 'context',
-				source: '$context',
-				field: '',
-				rawRef: '$context'
-			});
-		}
-
-		return vars;
-	});
-
-	// ── switch then options ───────────────────────────────────────────
-
-	const thenOptions = $derived.by(() => {
-		const directives = [
-			{ value: 'continue', label: 'continue — proceed to next task' },
-			{ value: 'end', label: 'end — terminate workflow' },
-			{ value: 'exit', label: 'exit — leave current scope' }
-		];
-		// A `switch` case's `then` can only target a task in the same scope/nesting depth as the
-		// switch itself (Zigflow spec) — the canvas renders every scope inlined as one flat node
-		// list, so without this filter the dropdown would offer nodes the DSL can never actually
-		// reach, silently producing an invalid `then` reference on save.
-		const ownScope = (node.data as Record<string, unknown> | undefined)?.[OWNER_SCOPE_TAG];
-		const nodeOptions = nodes
-			.filter(
-				(n) =>
-					n.id !== node.id &&
-					n.type !== 'start' &&
-					(n.data as Record<string, unknown> | undefined)?.[OWNER_SCOPE_TAG] === ownScope
-			)
-			.map((n) => ({
-				value: n.id,
-				label: `${n.data?.label ?? n.type} (${n.type})`
-			}));
-		return [...directives, ...nodeOptions];
-	});
+	/**
+	 * A named workflow with no steps serializes as `do: []`, which `zigflow validate` rejects
+	 * ("Do: is required") even though the published JSON schema allows an empty list — so it is
+	 * flagged here, where the author is already looking, rather than surfacing only at deploy time.
+	 */
+	const workflowIsEmpty = $derived(
+		isNamedStart &&
+			!nodes.some((n) => {
+				const owner = (n.data as Record<string, unknown> | undefined)?.[OWNER_SCOPE_TAG];
+				return owner === workflowScopeKey(node.id) && n.type !== 'start' && n.type !== 'end';
+			})
+	);
 
 	const noDataFlow = ['start', 'end'] as const;
 	const hasDataFlow = $derived(!noDataFlow.includes(nodeType as (typeof noDataFlow)[number]));
@@ -530,7 +411,7 @@
 				<div class="flex flex-col gap-1">
 					<label
 						class="text-base-content/50 text-[10px] font-semibold uppercase tracking-wider"
-						for="np-label">Label</label
+						for="np-label">{isNamedStart ? 'Workflow name' : 'Label'}</label
 					>
 					<input
 						id="np-label"
@@ -813,7 +694,7 @@
 			{/if}
 
 			<!-- ── START: $input SCHEMA ────────────────────────────────── -->
-			{#if nodeType === 'start'}
+			{#if nodeType === 'start' && !isNamedStart}
 				<Accordion title="$input Schema" defaultOpen={localInputSchema.length > 0}>
 					<div class="flex flex-col gap-1.5">
 						<div class="flex items-center justify-between">
@@ -906,7 +787,10 @@
 
 			<!-- ── SET ───────────────────────────────────────────────── -->
 			{#if nodeType === 'set' || nodeType === 'start'}
-				<Accordion title={nodeType === 'start' ? 'Init Variables' : 'Variables'} defaultOpen={true}>
+				<Accordion
+					title={nodeType === 'set' ? 'Variables' : isNamedStart ? 'Parameters' : 'Init Variables'}
+					defaultOpen={true}
+				>
 					<div class="flex flex-col gap-1.5">
 						<div class="flex items-center justify-between">
 							<p class="text-base-content/30 text-[9px]">
@@ -960,51 +844,46 @@
 							<span class="text-base-content/40 text-[10px]"
 								>Evaluated top-to-bottom, first match wins</span
 							>
-							<button class="btn btn-ghost btn-xs text-primary gap-1" onclick={addCase}
-								><Plus size={12} />Add case</button
-							>
+							<button class="btn btn-ghost btn-xs text-primary gap-1" onclick={addCase}>
+								<Plus size={12} />Add case
+							</button>
 						</div>
-						{#each localCases as c, i (i)}
+						{#each localCases as c, i (c.id)}
 							<div class="border-base-300 flex flex-col gap-1.5 rounded-lg border p-2">
-								<div class="flex items-center gap-1.5">
-									<span class="text-base-content/40 w-10 shrink-0 text-[10px]">name</span>
-									<input
-										class="input input-xs min-w-0 flex-1 font-mono"
-										placeholder="success"
-										value={c.name}
-										oninput={(e) => updateCase(i, 'name', (e.target as HTMLInputElement).value)}
-									/>
-									<button
-										class="btn btn-ghost btn-xs btn-circle text-error shrink-0"
-										onclick={() => removeCase(i)}
-										aria-label="Remove"><Trash2 size={13} /></button
-									>
+								<div class="flex items-center justify-between gap-1">
+									<span class="text-base-content/30 font-mono text-[10px]">#{i + 1}</span>
+									<div class="flex items-center">
+										<button
+											class="btn btn-ghost btn-xs btn-circle"
+											disabled={i === 0}
+											onclick={() => moveCase(i, -1)}
+											aria-label="Move case up"><ChevronUp size={13} /></button
+										>
+										<button
+											class="btn btn-ghost btn-xs btn-circle"
+											disabled={i === localCases.length - 1}
+											onclick={() => moveCase(i, 1)}
+											aria-label="Move case down"><ChevronDown size={13} /></button
+										>
+										<button
+											class="btn btn-ghost btn-xs btn-circle text-error"
+											onclick={() => removeCase(i)}
+											aria-label="Remove case"><Trash2 size={13} /></button
+										>
+									</div>
 								</div>
-								<div class="flex flex-col gap-0.5">
-									<span class="text-base-content/40 text-[10px]">when</span>
-									<ConditionBuilder
-										value={c.condition}
-										placeholder={'${ .status == "ok" }  (blank = default)'}
-										availVars={availableVars}
-										onchange={(val) => updateCase(i, 'condition', val)}
-									/>
-								</div>
-								<div class="flex items-center gap-1.5">
-									<span class="text-base-content/40 w-10 shrink-0 text-[10px]">then</span>
-									<select
-										class="select select-xs min-w-0 flex-1 text-xs"
-										value={c.then}
-										onchange={(e) => updateCase(i, 'then', (e.target as HTMLSelectElement).value)}
-									>
-										{#each thenOptions as opt (opt.value)}
-											<option value={opt.value}>{opt.label}</option>
-										{/each}
-									</select>
-								</div>
+								<SwitchCaseEditor
+									caseEntry={c}
+									availVars={availableVars}
+									{targetOptions}
+									onchange={(p) => updateCase(i, p)}
+								/>
 							</div>
 						{/each}
 						<p class="text-base-content/30 text-[9px]">
-							Cases evaluated top-to-bottom. First match wins. Blank "when" = default.
+							Drag from this node on the canvas onto another to add a case, or click a case edge to
+							edit it. A case set to "Own branch" runs the lane drawn beside the switch and then
+							rejoins whatever follows it.
 						</p>
 					</div>
 				</Accordion>
@@ -1618,6 +1497,25 @@
 				<p class="text-base-content/30 py-2 text-center text-xs">
 					This group's body is shown inline on the canvas, connected to this node.
 				</p>
+			{/if}
+
+			<!-- ── WORKFLOW (a named workflow's own Start) ──────────────── -->
+			{#if isNamedStart}
+				<p class="text-base-content/30 py-2 text-center text-xs">
+					A named workflow, saved as <span class="font-mono">{f('label') || 'name'}: do:</span>. A
+					switch case starts it by name as a child workflow — drag a case from a switch onto this
+					Start. Its parameters run first; it sees the caller's
+					<span class="font-mono">$input</span> and <span class="font-mono">$data</span>.
+				</p>
+				{#if workflowIsEmpty}
+					<div class="alert alert-warning mb-2 py-2 text-xs">
+						<TriangleAlert size={14} />
+						<span>
+							No steps yet. Zigflow rejects an empty <span class="font-mono">do:</span> — drop a task
+							next to this Start and connect it before running or deploying.
+						</span>
+					</div>
+				{/if}
 			{/if}
 
 			<!-- ── END ────────────────────────────────────────────────── -->

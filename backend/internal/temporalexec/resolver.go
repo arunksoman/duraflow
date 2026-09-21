@@ -26,9 +26,14 @@ import (
 //	<root>_for_0                  type workflow_for_<task>    — a scope within <root>
 //	<root>_for_0_try              type workflow_try_<task>    — a scope within a scope
 //	<parentRunId>_3               the user's own workflow type — a separate run entirely
+//	<parentRunId>_5               type <task name>            — a named workflow declared in
+//	                                                            the same document, started by
+//	                                                            a switch case's `then:`
 //
-// Only the last kind deserves its own Execution row. The others are *locations on the parent's
-// canvas*, which this resolver expresses as a ScopePath the frontend maps onto its scope tree.
+// Only a separate run deserves its own Execution row. The others are *locations on the parent's
+// canvas*, which this resolver expresses as a ScopePath the frontend maps onto its scope tree. A
+// named workflow's id says nothing about which one it is, so its segment is built from its type
+// instead: `workflow_<name>`.
 var syntheticScopeWorkflow = regexp.MustCompile(`^workflow_(for|fork|try|catch)_`)
 
 const (
@@ -274,13 +279,16 @@ func (r *Resolver) resolve(ctx context.Context, wfExecID string, depth int) (Res
 			r.remember(wfExecID, runID, res)
 			return res, nil
 		}
-		if _, seen := r.warnedOnce.LoadOrStore(workflowType, struct{}{}); !seen {
-			log.Printf(
-				"[telemetry] workflow type %q under %s matches no stored workflow — "+
-					"treating its tasks as part of the parent run",
-				workflowType, parentID,
-			)
+		// Otherwise it is a switch-`then:` redirect: a named workflow declared in the parent's own
+		// document, which zigflow registers under its task name. Its tasks are part of the parent
+		// run, located by that name.
+		res := Resolution{
+			ExecutionID:     parentRes.ExecutionID,
+			RootExecutionID: parentRes.RootExecutionID,
+			ScopePath:       joinScopePath(parentRes.ScopePath, namedWorkflowSegment(workflowType)),
 		}
+		r.remember(wfExecID, runID, res)
+		return res, nil
 	}
 
 	res := Resolution{
@@ -300,6 +308,13 @@ func scopeSegment(parentID, childID string) string {
 		return rest
 	}
 	return ""
+}
+
+// namedWorkflowSegment is the scope segment for a named workflow started by a switch case. The
+// frontend resolves it by name from any scope, since zigflow registers named workflows
+// document-wide rather than under the task list that declares them.
+func namedWorkflowSegment(workflowType string) string {
+	return "workflow_" + workflowType
 }
 
 func joinScopePath(parent, segment string) string {

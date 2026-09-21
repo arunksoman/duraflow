@@ -1,0 +1,89 @@
+document:
+  dsl: 1.0.0
+  taskQueue: zigflow
+  workflowType: switch
+  version: 0.0.1
+  title: Switching
+  summary: Perform a switch statement
+  metadata:
+    display: false
+    tags:
+      - switch
+    activityOptions:
+      startToCloseTimeout:
+        minutes: 1
+do:
+  # This is the primary workflow, called "switch" from above
+  - wait:
+      wait:
+        seconds: 2
+  - switcher:
+      switch:
+        - electronic:
+            when: ${ $input.orderType == "electronic" }
+            then: processElectronicOrder
+        - physical:
+            when: ${ $input.orderType == "physical" }
+            then: processPhysicalOrder
+        - default:
+            then: handleUnknownOrderType
+  # Flow directive examples
+  - flowSwitcher:
+      switch:
+        - continue:
+            when: ${ $input.flow == "continue" }
+            then: continue
+        - exit:
+            when: ${ $input.flow == "exit" }
+            then: exit
+        - end:
+            when: ${ $input.flow == "end" }
+            then: end
+        - default:
+            then: continue
+  # This runs when the switch continues normally
+  - wait:
+      wait:
+        seconds: 5
+  # These are declared as additional workflows
+  - processElectronicOrder:
+      do:
+        - validatePayment:
+            call: http
+            with:
+              method: get
+              endpoint: https://jsonplaceholder.typicode.com/posts
+        - fulfillOrder:
+            call: http
+            with:
+              method: get
+              endpoint: https://jsonplaceholder.typicode.com/posts
+  - processPhysicalOrder:
+      do:
+        - checkInventory:
+            call: http
+            with:
+              method: get
+              endpoint: https://jsonplaceholder.typicode.com/posts
+        - packItems:
+            call: http
+            with:
+              method: get
+              endpoint: https://jsonplaceholder.typicode.com/posts
+        - scheduleShipping:
+            call: http
+            with:
+              method: get
+              endpoint: https://jsonplaceholder.typicode.com/posts
+  - handleUnknownOrderType:
+      do:
+        - logWarning:
+            call: http
+            with:
+              method: get
+              endpoint: https://jsonplaceholder.typicode.com/posts
+        - notifyAdmin:
+            call: http
+            with:
+              method: get
+              endpoint: https://jsonplaceholder.typicode.com/posts

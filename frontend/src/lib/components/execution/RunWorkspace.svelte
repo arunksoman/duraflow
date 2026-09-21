@@ -13,6 +13,8 @@
 
 	import WorkflowNode from '$lib/components/builder/WorkflowNode.svelte';
 	import ReconnectableEdge from '$lib/components/builder/ReconnectableEdge.svelte';
+	import SwitchCaseEdge from '$lib/components/builder/SwitchCaseEdge.svelte';
+	import LaneBoxLayer from '$lib/components/builder/LaneBoxLayer.svelte';
 	import { NODE_META, NODE_TYPES } from '$lib/components/builder/builderConfig';
 	import { TriangleAlert } from '@lucide/svelte';
 	import { RUN_TONE_VAR, runTone } from '$lib/components/builder/runStatus';
@@ -21,8 +23,13 @@
 	import type { RunIndex } from '$lib/zigflow-engine/runIndex';
 	import type { ScopeGraph } from '$lib/zigflow-engine/graph';
 	import type { NodeRunDetail, NodeRunState } from '$lib/zigflow-engine/runState';
-	import { composeScopeForDisplay } from '$lib/zigflow-engine/inlineScopeView';
-	import { ROOT_SCOPE_ID } from '$lib/zigflow-engine/scopeKey';
+	import {
+		composeScopeForDisplay,
+		OWNER_SCOPE_TAG,
+		SWITCH_CASE_EDGE_TYPE,
+		type LaneBox
+	} from '$lib/zigflow-engine/inlineScopeView';
+	import { ROOT_SCOPE_ID, flowScopeOf } from '$lib/zigflow-engine/scopeKey';
 	import type { WorkflowNodeType } from '$lib/types';
 
 	/**
@@ -46,14 +53,17 @@
 	let { session, index, scopes, canvasBanner }: Props = $props();
 
 	const nodeTypes = Object.fromEntries(NODE_TYPES.map((t) => [t, WorkflowNode]));
-	const edgeTypes = { default: ReconnectableEdge };
+	const edgeTypes = {
+		default: ReconnectableEdge,
+		[SWITCH_CASE_EDGE_TYPE]: SwitchCaseEdge
+	};
 
 	let selection = $state<RunSelection | null>(null);
 
 	const composed = $derived(
 		Object.keys(scopes).length > 0
 			? composeScopeForDisplay(scopes, ROOT_SCOPE_ID)
-			: { nodes: [] as Node[], edges: [] as Edge[] }
+			: { nodes: [] as Node[], edges: [] as Edge[], laneBoxes: new Map<string, LaneBox>() }
 	);
 
 	const labelById = $derived(
@@ -70,8 +80,56 @@
 	let nodes: Node[] = $state.raw([]);
 	let edges: Edge[] = $state.raw([]);
 
+	/** Each named workflow's steps, by its scope — what its Start/End fall back to (see below). */
+	const namedFlowMembers = $derived.by(() => {
+		const members: Record<string, string[]> = {};
+		for (const n of composed.nodes) {
+			const owner = (n.data as Record<string, unknown> | undefined)?.[OWNER_SCOPE_TAG] as
+				string | undefined;
+			if (!owner || n.type === 'start' || n.type === 'end') continue;
+			const flow = flowScopeOf(owner);
+			if (flow === ROOT_SCOPE_ID) continue;
+			members[flow] = [...(members[flow] ?? []), n.id];
+		}
+		return members;
+	});
+
+	function flowOf(node: Node): string {
+		const owner = (node.data as Record<string, unknown> | undefined)?.[OWNER_SCOPE_TAG] as
+			string | undefined;
+		return owner ? flowScopeOf(owner) : ROOT_SCOPE_ID;
+	}
+
+	/**
+	 * A named workflow runs only when a switch case starts it, so its Start and End are coloured by
+	 * whether *it* ran — not by the primary workflow's progress. The backend reports its own
+	 * start/finish (`RunState.namedWorkflows`); runs recorded before it did fall back to "one of its
+	 * steps ran".
+	 */
+	function namedFlowState(
+		node: Node,
+		flow: string,
+		byNode: Record<string, NodeRunDetail>
+	): NodeRunState | undefined {
+		const reported = session.run.namedWorkflows?.[flow];
+		const started =
+			reported !== undefined ||
+			(namedFlowMembers[flow] ?? []).some((id) => RAN.has(byNode[id]?.state));
+		if (node.type === 'start') {
+			if (started) return 'success';
+			return session.run.finalized ? 'skipped' : undefined;
+		}
+		if (reported === 'completed') return 'success';
+		if (!session.run.finalized) return undefined;
+		return started && session.status === 'completed' ? 'success' : 'skipped';
+	}
+
 	/** Start/end emit no events of their own; they're "reached" when the run got that far. */
 	function stateOf(node: Node, byNode: Record<string, NodeRunDetail>): NodeRunState | undefined {
+		if (node.type === 'start' || node.type === 'end') {
+			const flow = flowOf(node);
+			if (flow !== ROOT_SCOPE_ID) return namedFlowState(node, flow, byNode);
+		}
 		if (node.type === 'start') {
 			return session.status === 'idle' || session.status === 'starting' ? undefined : 'success';
 		}
@@ -120,10 +178,18 @@
 		const stateById = new Map(
 			nodeList.map((n) => [n.id, n.data?.runState as NodeRunState | undefined])
 		);
+		const typeById = new Map(nodeList.map((n) => [n.id, n.type]));
 		let changed = false;
 		const next = current.map((edge) => {
 			const target = stateById.get(edge.target);
-			const travelled = RAN.has(stateById.get(edge.source)) && RAN.has(target);
+			let travelled = RAN.has(stateById.get(edge.source)) && RAN.has(target);
+			// A case edge is only "travelled" when it started the named workflow it points at: that
+			// workflow ran, so this case was taken. A directive case (continue/exit/end) can't be told
+			// apart from the switch simply falling through — its target running proves nothing, so it
+			// stays unlit rather than lighting every case at once.
+			if ((edge.data as Record<string, unknown> | undefined)?.kind === 'switchCase') {
+				travelled = travelled && typeById.get(edge.target) === 'start';
+			}
 			// In-progress edges are blue dashes that turn solid green (or red) once the target settles.
 			const style = travelled
 				? `stroke: ${RUN_TONE_VAR[runTone(target)]}; stroke-width: 3;`
@@ -212,6 +278,7 @@
 					onnodeclick={({ node }) => selectNode(node.id)}
 					onpaneclick={() => (selection = null)}
 				>
+					<LaneBoxLayer boxes={[...composed.laneBoxes.values()]} />
 					<Background variant={BackgroundVariant.Dots} gap={20} size={1.2} />
 					<Controls showLock={false} />
 					<MiniMap zoomable pannable />

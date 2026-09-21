@@ -23,11 +23,39 @@ export interface VarEntry {
 	value: string;
 }
 
-/** Switch case. `then` holds a flow directive OR a node.id (resolved to slug at DSL time). */
+/**
+ * Where one `switch` case sends the run.
+ *
+ * - `task` — starts a named workflow (`then: processElectronicOrder`). Zigflow runs a switch's
+ *   named `then:` as a Temporal *child workflow* of that name, wherever in the document it is
+ *   declared, waits for it, and then carries on with the task after the switch. (A `then:` naming
+ *   a plain sibling task only loads from hand-written DSL; zigflow would fail to start it.)
+ * - `continue` / `exit` / `end` — the DSL's flow directives, taken as written.
+ *
+ * Note there is deliberately no "own branch" routing: a case never owns a body of its own. The
+ * steps a case runs are a named workflow, drawn as its own Start-to-End flow.
+ */
+export type CaseRouting = 'task' | 'continue' | 'exit' | 'end';
+
+/**
+ * One `switch` case — a condition plus where it sends the run. Cases are evaluated top to bottom
+ * and the first match wins, so the array order is the DSL order.
+ */
 export interface CaseEntry {
+	/** Stable id, independent of the mutable `name` — exactly like `BranchEntry`. */
+	id: string;
+	/** The case's own name, emitted as the `switch:` entry's key. */
 	name: string;
+	/** The `when:` guard. Blank means "otherwise" — the case matches whatever reaches it. */
 	condition: string;
-	then: string;
+	routing: CaseRouting;
+	/**
+	 * `routing: 'task'` — the jumped-at task's name as the document had it, used when
+	 * `targetNodeId` no longer resolves (or never did, for a `then:` naming nothing on the canvas).
+	 */
+	taskName?: string;
+	/** `routing: 'task'` only — the node jumped at, so renaming that task keeps the jump. */
+	targetNodeId?: string;
 }
 
 /** Event filter for Listen task. */
@@ -74,13 +102,30 @@ export interface NodeMeta {
 
 export const NODE_META: Record<WorkflowNodeType, NodeMeta> = {
 	start: {
+		// Every workflow's entry point. The primary workflow's Start is materialised by the engine;
+		// dropping another one from the palette declares a *named workflow* — a `do:` task zigflow
+		// registers as a Temporal workflow of its own and a switch case's `then:` starts by name. The
+		// builder asks for its name and parameters up front (`WorkflowNameDialog`) and gives it its
+		// own End, so it reads exactly like the primary workflow.
 		label: 'Start',
-		description: 'Workflow entry point — optionally initialise $data variables',
+		description: 'Start another named workflow — reached from a switch case',
 		icon: CirclePlay,
 		color: '#22c55e',
 		category: 'terminal',
-		showInPalette: false,
+		showInPalette: true,
 		defaultData: { label: 'Start', variables: [] as VarEntry[] }
+	},
+	do: {
+		// A group of steps zigflow runs in place. Nothing drops one of these: a `do:` placed after
+		// another task is a named workflow (see `start` above), so they only come from hand-written
+		// DSL that groups steps at the head of a list.
+		label: 'Group',
+		description: 'A named group of steps run in sequence (`do:`)',
+		icon: CheckSquare,
+		color: '#64748b',
+		category: 'structure',
+		showInPalette: false,
+		defaultData: { label: 'Group', ...EMPTY_FLOW }
 	},
 	end: {
 		label: 'End',
@@ -88,7 +133,9 @@ export const NODE_META: Record<WorkflowNodeType, NodeMeta> = {
 		icon: OctagonX,
 		color: '#94a3b8',
 		category: 'terminal',
-		showInPalette: true,
+		// Every workflow — the primary one, and each named one a dropped Start creates — comes with
+		// its own End already wired; a second one dropped by hand would end nothing.
+		showInPalette: false,
 		defaultData: { label: 'End' }
 	},
 	call: {
@@ -143,14 +190,23 @@ export const NODE_META: Record<WorkflowNodeType, NodeMeta> = {
 	},
 	switch: {
 		label: 'Switch',
-		description: 'Conditional branching — cases evaluated in order, first match wins',
+		description:
+			'Conditional branching — drag from it to a node to add a case; click a case edge to edit its condition',
 		icon: GitBranch,
 		color: '#06b6d4',
 		category: 'control',
 		showInPalette: true,
 		defaultData: {
 			label: 'Switch',
-			cases: [] as CaseEntry[],
+			// A new switch starts with one guarded branch and the always-present "otherwise" (a case
+			// with no `when`), so the node is a complete, runnable decision the moment it's dropped —
+			// and so the no-match path is something the user can see and fill in rather than an
+			// invisible fall-through. `id`s are filled in at drop time (see `freshNodeData`), since
+			// `defaultData` is a shared literal and every case needs its own stable scope key.
+			cases: [
+				{ id: '', name: 'case1', condition: '${ . }', routing: 'continue' },
+				{ id: '', name: 'otherwise', condition: '', routing: 'continue' }
+			] as CaseEntry[],
 			...EMPTY_FLOW
 		}
 	},
@@ -256,15 +312,6 @@ export const NODE_META: Record<WorkflowNodeType, NodeMeta> = {
 			...EMPTY_FLOW
 		}
 	},
-	do: {
-		label: 'Do',
-		description: 'Sequential task group — shown when hand-written DSL groups tasks explicitly',
-		icon: CheckSquare,
-		color: '#64748b',
-		category: 'control',
-		showInPalette: false,
-		defaultData: { label: 'Do', ...EMPTY_FLOW }
-	},
 	childWorkflow: {
 		label: 'Child Flow',
 		description: 'Invoke a child workflow by type — runs as Temporal child workflow',
@@ -283,6 +330,29 @@ export const NODE_META: Record<WorkflowNodeType, NodeMeta> = {
 };
 
 export const NODE_TYPES = Object.keys(NODE_META) as WorkflowNodeType[];
+
+/**
+ * A node's starting `data`, safe to hand to a brand-new node. `NODE_META[...].defaultData` is one
+ * shared literal, so its arrays must be copied rather than aliased — without this, two Switch nodes
+ * would edit the same `cases` array.
+ *
+ * It also mints the stable per-case `id`s a switch's lanes are keyed by (see `switchCaseScopeKey`),
+ * which can't live in the shared literal for the same reason.
+ */
+export function freshNodeData(type: WorkflowNodeType): Record<string, unknown> {
+	const data: Record<string, unknown> = { ...NODE_META[type].defaultData };
+	for (const [key, value] of Object.entries(data)) {
+		if (Array.isArray(value)) {
+			data[key] = value.map((item) =>
+				item && typeof item === 'object' ? { ...(item as object) } : item
+			);
+		}
+	}
+	if (type === 'switch') {
+		data.cases = (data.cases as CaseEntry[]).map((c) => ({ ...c, id: crypto.randomUUID() }));
+	}
+	return data;
+}
 
 export const CATEGORY_LABELS: Record<string, string> = {
 	action: 'Actions',

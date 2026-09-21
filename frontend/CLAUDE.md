@@ -84,12 +84,12 @@ Every domain type has a real page now: `/dashboard` and `/projects/[projectId]` 
 
 After a run starts, what happened comes from the backend's stored CloudEvents stream, not from Temporal history (see `backend/CLAUDE.md` for why). The frontend side is four pieces:
 
-| File | Responsibility |
-| --- | --- |
-| `zigflow-engine/runIndex.ts` | `buildRunIndex(graph)` — walks the scope tree from `ROOT_SCOPE_ID`, mapping `(scopeId, taskName) -> nodeId`. Task names are only unique *within* a scope, which is why this is not a flat map |
-| `zigflow-engine/runScope.ts` | Turns the backend's `scopePath` (`for_0`, `try`, `fork_<branch>`, `for_0_try`) into a canvas scope id, degrading to name-only matching rather than guessing |
-| `zigflow-engine/runState.ts` | Pure reducer: events → per-node state + log. `finalizeRunState` turns everything still `pending` into `skipped`, which is what makes the path *not* taken visible |
-| `runtime/runSession.svelte.ts` | Owns the `EventSource`, reconnects from `lastSeq`, and keeps child runs current. All decisions live in `runState.ts` so they stay testable |
+| File                           | Responsibility                                                                                                                                                                                |
+| ------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `zigflow-engine/runIndex.ts`   | `buildRunIndex(graph)` — walks the scope tree from `ROOT_SCOPE_ID`, mapping `(scopeId, taskName) -> nodeId`. Task names are only unique _within_ a scope, which is why this is not a flat map |
+| `zigflow-engine/runScope.ts`   | Turns the backend's `scopePath` (`for_0`, `try`, `fork_<branch>`, `for_0_try`) into a canvas scope id, degrading to name-only matching rather than guessing                                   |
+| `zigflow-engine/runState.ts`   | Pure reducer: events → per-node state + log. `finalizeRunState` turns everything still `pending` into `skipped`, which is what makes the path _not_ taken visible                             |
+| `runtime/runSession.svelte.ts` | Owns the `EventSource`, reconnects from `lastSeq`, and keeps child runs current. All decisions live in `runState.ts` so they stay testable                                                    |
 
 `runState.ts` keeps every execution of a node as its own `NodeAttempt` in `NodeRunDetail.history` (loop iterations, retries and back-jumps each get one, with their own input, output and before/after workflow state); `buildRunSteps` flattens those into the ordered path a run took, `workflowVariables` strips zigflow's runtime `task`/`workflow` bookkeeping out of a state snapshot, and `diffValues` reports what a task added/changed/removed. Only root-scope `workflow.started`/`workflow.completed` events set the run's input/output — every `for` iteration, `fork` branch and `try` block emits its own.
 
@@ -109,27 +109,125 @@ The builder route is `/projects/[projectId]/workflows/[workflowId]/builder` (use
 
 The canonical persisted form of a workflow is Zigflow YAML text (`Workflow.dsl`), **not** the canvas — the canvas is always derived from the DSL. `src/lib/zigflow-engine/` is a plain-TypeScript, UI-independent module (no Svelte imports) that owns everything DSL-shaped:
 
-| File | Responsibility |
-| --- | --- |
-| `schema/zigflow.schema.json` | Vendored copy of the published Zigflow JSON Schema (draft 2020-12) — not fetched at runtime |
-| `ast.ts` | Discriminated-union types mirroring the schema's 11 real task types + shared `TaskBase` |
-| `validate.ts` | `ajv`-based grammar validation (`validateZigflowDocument`) |
-| `serialize.ts` | AST → plain object → YAML text (via the `yaml` package; explicit block-literal styling for multiline scripts/bodies) |
-| `deserialize.ts` | YAML text → parse → validate → AST, with structured errors mapped back to source ranges |
-| `graph.ts` | Bidirectional AST ⟷ per-scope `{nodes, edges}` conversion |
-| `layout.ts` | Custom auto-layout (no dagre/elkjs): `layoutScope` (simple chain) + `layoutScopeRecursive` (arbitrary-depth inline lanes) |
-| `inlineScopeView.ts` | Composes/decomposes the canvas's fully-inline rendering of nested scopes (see below) |
-| `scopeKey.ts` | Deterministic scope-id builders (`forScopeKey`, `tryScopeKey`, `catchScopeKey`, `forkBranchScopeKey`) shared by `graph.ts` and the Svelte layer |
-| `slug.ts` | Task-name slugging helpers |
-| `schedule.ts` | The workflow's recurring trigger as one UI object, and its lossless split across `schedule:` + `document.metadata` — see "Scheduling" below |
-| `cron.ts` | Pure 5-field cron ⟷ preset conversion (`parseCronPreset`/`buildCronPreset`), backing the visual cron editor |
-| `header.ts` | Tolerant, schema-free reads of a raw DSL string — `parseDocumentHeader` (taskQueue/workflowType) and `parseInputSchemaFromDsl`, for workflows never loaded into the canvas |
-| `inputSchema.ts` | The value side of a declared `$input` schema: skeletons, validation, form-string coercion |
-| `runIndex.ts` / `runScope.ts` / `runState.ts` | Run-to-canvas correlation — see "Run observability" above |
+| File                                          | Responsibility                                                                                                                                                             |
+| --------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `schema/zigflow.schema.json`                  | Vendored copy of the published Zigflow JSON Schema (draft 2020-12) — not fetched at runtime                                                                                |
+| `ast.ts`                                      | Discriminated-union types mirroring the schema's 11 real task types + shared `TaskBase`                                                                                    |
+| `validate.ts`                                 | `ajv`-based grammar validation (`validateZigflowDocument`)                                                                                                                 |
+| `serialize.ts`                                | AST → plain object → YAML text (via the `yaml` package; explicit block-literal styling for multiline scripts/bodies)                                                       |
+| `deserialize.ts`                              | YAML text → parse → validate → AST, with structured errors mapped back to source ranges                                                                                    |
+| `graph.ts`                                    | Bidirectional AST ⟷ per-scope `{nodes, edges}` conversion                                                                                                                  |
+| `layout.ts`                                   | Custom auto-layout (no dagre/elkjs): `layoutScope` (simple chain) + `layoutScopeRecursive` (arbitrary-depth inline lanes)                                                  |
+| `inlineScopeView.ts`                          | Composes/decomposes the canvas's fully-inline rendering of nested scopes (see below)                                                                                       |
+| `scopeKey.ts`                                 | Deterministic scope-id builders (`forScopeKey`, `tryScopeKey`, `catchScopeKey`, `forkBranchScopeKey`) shared by `graph.ts` and the Svelte layer                            |
+| `slug.ts`                                     | Task-name slugging helpers                                                                                                                                                 |
+| `schedule.ts`                                 | The workflow's recurring trigger as one UI object, and its lossless split across `schedule:` + `document.metadata` — see "Scheduling" below                                |
+| `cron.ts`                                     | Pure 5-field cron ⟷ preset conversion (`parseCronPreset`/`buildCronPreset`), backing the visual cron editor                                                                |
+| `header.ts`                                   | Tolerant, schema-free reads of a raw DSL string — `parseDocumentHeader` (taskQueue/workflowType) and `parseInputSchemaFromDsl`, for workflows never loaded into the canvas |
+| `inputSchema.ts`                              | The value side of a declared `$input` schema: skeletons, validation, form-string coercion                                                                                  |
+| `runIndex.ts` / `runScope.ts` / `runState.ts` | Run-to-canvas correlation — see "Run observability" above                                                                                                                  |
 
 The Svelte layer (`+page.svelte`, `NodePanel.svelte`) only ever calls the public functions (`serializeZigflowDocument`, `deserializeZigflowDocument`, `astToGraph`, `graphToAst`) — it never hand-builds YAML strings or task objects. Every engine file has a co-located `*.test.ts` under the vitest `server` project.
 
 **The canvas is fully inline — there is no drill-in navigation.** Every nested task body (`for.do`, each `fork` branch, `try.try`/`try.catch.do`, bare `do`) renders as tagged sibling nodes in its own lane on the same canvas, recursively to arbitrary depth (a fork branch containing a nested for-loop shows that loop's body inline too). The underlying data model (`scopes[...]` keyed by `scopeKey.ts`) is unchanged from an earlier drill-in design — only the rendering layer in `inlineScopeView.ts` differs. `start`/`end` nodes are always auto-present and connected; every dead-end node gets a synthetic (non-persisted, visual-only) edge to `end`.
+
+**One document can declare several workflows, and the canvas shows each exactly like the primary
+one: its own Start, its steps, its own End.** This follows zigflow's runtime rule, read from its
+source (`DoTaskBuilder.Build`) and confirmed by running it: in _any_ task list, at any depth, a
+`do:` task that comes after a non-`do:` task is **not run in place** — zigflow registers it as a
+Temporal workflow of its own, named by its task key (a _named workflow_). A `do:` before every other
+task in its list runs in place as a plain group (`do` node). At the top level of a document holding
+nothing but `do:` tasks, every one is a named workflow. `graph.ts`'s `namedWorkflowEntries` is the
+one place that rule lives. Check behaviour against the CLI (`zigflow validate` / `zigflow graph` /
+`zigflow run`) rather than inferring it — `zigflow graph` does not draw nested declarations, the
+runtime does register them.
+
+There is **no dedicated node type** for a named workflow. It is a scope of its own,
+`workflowScopeKey(startId)` = `workflow/<startId>` (deliberately _not_ prefixed by the scope that
+declares it), holding a plain `start` node (id = `startId`, `data.label` = the workflow's name,
+`data.variables` = its parameters, `data.declaredIn` = the scope key of the list its `do:` is written
+in), its steps, and a plain `end` node (`workflowEndNodeId(startId)`), chained exactly like the root
+scope. `isNamedWorkflowStart` tells it apart from the primary Start (id `start`); `flowScopeOf` maps
+any scope key to the top-level flow it belongs to. Helpers live in `graph.ts`
+(`namedWorkflowScopes`/`namedWorkflowStart`/`namedWorkflowNames`/`newNamedWorkflowScope`).
+
+- **Save**: `scopeToTaskList` emits a list's named workflows _after_ its steps (order within a list
+  changes nothing at runtime), each as `<name>: { do: [init?, ...steps] }`. Names are allocated once,
+  document-wide (`namedWorkflowNames`), since zigflow registers them in one namespace; a sibling task
+  with the same name is the one renamed. A workflow whose `declaredIn` scope is gone, or no longer
+  holds a non-`do:` task (so its `do:` would run in place), is written at the top level instead.
+- **Parameters**: a Start's `variables` (the primary Start's _and_ a named one's) are emitted as a
+  leading `init: set:` in that workflow's list, and a leading `init` task that is only a `set:` is
+  lifted back onto the Start on load (`splitInitTask`). `runIndex.ts` maps the `init` task's events
+  to the Start node.
+- **Canvas**: `composeScopeForDisplay` lays out the primary flow and then every named flow as its
+  own column to the right (`layoutFlows`). No frame, no lane, no entry edge. Dead ends run to the End
+  of _their own_ flow (`computeTerminalEdges`); `computeFlowBounds` gives each named flow a
+  (non-drawn) hit area so a palette drop beside it lands in it.
+- **Adding one**: the palette's **Start** (`start` is `showInPalette: true`; `End` is not — every
+  workflow already has one) opens `WorkflowNameDialog` for the name (unique, it is the Temporal
+  workflow type) and parameters, then creates the scope via `newNamedWorkflowScope`. Deleting a
+  named Start deletes the whole flow (every scope whose `flowScopeOf` is it); its End is never
+  deletable on its own.
+
+**Every inline lane is drawn as a dotted frame** (`LaneBoxLayer.svelte`, rendered into xyflow's
+_back_ `ViewportPortal` so it sits behind the nodes and follows pan/zoom for free).
+`computeLiveLaneBoxes` derives the frames from where the nodes actually are, every render — titled
+from `LaneSpec.title` with the name the DSL knows that group by: a fork branch's name, `<task>
+try`/`catch`, `<task> body`, or a nested `do`'s own label. Without the frame a nested body is an
+unlabeled column of cards and the canvas stops matching the document. A frame also encloses the
+lanes nested inside it — descendant scope keys are prefixed by their ancestor's, so the union needs
+no tree walk — which is why `resolveDropOwnerScope` picks the _deepest_ matching lane rather than
+the first. Named workflows are not lanes and get no frame.
+
+Frames are **capped** with a start marker above the lane's first node and an end marker below its
+last (`LaneBox.caps`), because a nested body runs from its first task to its last and a frame
+without them gives the eye nowhere to enter or leave. The caps are drawn by `LaneBoxLayer` rather
+than added to `nodes` — no DSL task backs them, and a synthetic entry in the array xyflow two-way
+binds would have to be filtered back out of every save, delete, drag and hit-test. `layout.ts`'s
+`LANE_CAP_GAP` reserves the room they sit in (two gaps must stay under one `rowHeight` —
+`positionChain` pays for both with a single extra reserved row), and the caps are excluded from the
+nested-lane union, since they mark where _this_ lane's own chain begins and ends. Lane entry edges
+carry an explicit `labelStyle` (xyflow's default HTML label is a white pill, invisible on dark).
+
+**A `switch` is authored on the canvas.** `CaseEntry.routing` is per case:
+
+- **`task`** — the case **starts a named workflow**. Zigflow runs every named `then:` of a switch
+  as a Temporal _child workflow_ of that name (`executeRedirect` → `ExecuteChildWorkflow`), wherever
+  the switch and the workflow are declared, waits for it, then carries on with the task after the
+  switch. Drawn as a labeled edge into that workflow's Start (`computeSwitchCaseEdges` /
+  `SwitchCaseEdge.svelte`), which is why a named Start has a target handle. Resolved through
+  `targetNodeId` on save so renaming the workflow keeps the case (`resolveCaseTargets` resolves
+  names on load, named workflows first). A `then:` naming a plain sibling task only loads from
+  hand-written DSL (zigflow would fail to start it); it is still drawn, and flagged in the picker.
+- **`continue` / `exit` / `end`** — the flow directives, drawn to the next task, or to the End of
+  the workflow the switch is in.
+
+There is deliberately **no "own branch" routing, and no convergence**: the steps a case runs are a
+named workflow, drawn as its own flow. (An earlier model lifted handler tasks into per-case lanes
+and wrote a converging `then:` into each; another drew named workflows as a special `workflow` node
+inside a frame. Both are gone — don't reintroduce either.) `planSwitchCases` restructures nothing.
+`example/switch.yaml` round-trips with the same shape it was written in.
+
+Task names are preserved verbatim: `uniqueTaskName` in `slug.ts` only slugs a label that isn't
+already identifier-shaped, so `processElectronicOrder` survives a canvas round-trip.
+
+**Cases are edited on the canvas.** Dragging a connection out of a switch onto a named workflow's
+Start adds a case that starts it; onto the End of the switch's own workflow, an `end` case. Either
+opens `SwitchCaseDialog`; clicking a case edge edits it; deleting one drops the case. Any other drag
+out of a switch is undone, and a plain edge into a named Start is refused. Case edges carry
+`SWITCH_NODE_TAG`/`SWITCH_CASE_TAG` in `edge.data`, which is what the click/delete handlers key off.
+`switchCases.ts` is the single reader of `node.data.cases` (and `caseTargetOptions` the single case
+picker list), shared by `graph.ts`, `inlineScopeView.ts`, `runIndex.ts` and the dialogs.
+
+**Run correlation of named workflows.** A named workflow's run is a child workflow whose id
+(`<parentRunId>_N`) says nothing, so the backend resolver gives its events the scope segment
+`workflow_<name>` (from the child's workflow type); `runScope.ts` resolves that token by name from
+any scope (`RunIndex.workflowScopeByName`, longest match first). `runState.ts` records each named
+workflow's own `workflow.started`/`completed` in `RunState.namedWorkflows`, and `RunWorkspace`
+colours its Start/End from that (falling back to "one of its steps ran" for runs recorded before the
+backend tagged them). A case edge is lit only when the workflow it starts ran; directive cases are
+never lit, since they can't be told apart from a plain fall-through.
 
 There is intentionally **no dedicated "if" branching node** — every task's shared `if:` guard (`DataFlow.if`, edited via the "Run only if" `ConditionBuilder` section in `NodePanel.svelte`) is the sole conditional-execution mechanism; real two-way branching is done with a `switch` task. (This was tried twice — a compiled-to-switch "if" node, and a canvas guard-diamond visualization — and explicitly reverted both times; don't reintroduce either without asking.)
 
@@ -139,7 +237,7 @@ Node type reference (per-node `data` shape, DSL mapping, quirks) is documented i
 
 A workflow's recurring trigger is edited in the builder, from the **Schedule** button next to Run (`ScheduleModal.svelte`, with `CronBuilder.svelte` inside it), and travels with the rest of the design as `WorkflowMeta.schedule` — so it round-trips through the DSL editor like everything else: paste a DSL with a `schedule:` block and the panel shows it; change the panel and the YAML updates.
 
-Zigflow splits the concept across two places, and `zigflow-engine/schedule.ts` is the only thing that knows that: the spec itself is the top-level `schedule:` (`cron`, `every`, or both — Temporal fires on either), while `document.metadata` carries `scheduleWorkflowName` (required — zigflow errors without it), `scheduleId` (defaults to `zigflow_<workflowType>`) and `scheduleInput` (a Temporal *argument list*, so the panel's one input object is written as a single-element array).
+Zigflow splits the concept across two places, and `zigflow-engine/schedule.ts` is the only thing that knows that: the spec itself is the top-level `schedule:` (`cron`, `every`, or both — Temporal fires on either), while `document.metadata` carries `scheduleWorkflowName` (required — zigflow errors without it), `scheduleId` (defaults to `zigflow_<workflowType>`) and `scheduleInput` (a Temporal _argument list_, so the panel's one input object is written as a single-element array).
 
 **Turning a schedule off means removing `schedule:` entirely** — an `enabled: false` flag in the DSL would do nothing, because zigflow only reads presence. So that the toggle doesn't discard the user's cron, the whole configuration is parked under `document.metadata.duraflow.disabledSchedule` instead; exactly one of the two representations exists at a time, so there's never a second source of truth. A workflow that has never been scheduled writes no schedule keys at all — don't give `defaultWorkflowSchedule()` a spec flag that's on by default, or every DSL in the system grows a `duraflow` block.
 

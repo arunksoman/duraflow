@@ -53,6 +53,14 @@ export const NODE_CARD_WIDTH = 176;
 /** Horizontal pitch (in flow coordinates) between one inline lane/column and the next. */
 export const INLINE_LANE_OFFSET_X = 260;
 
+/**
+ * Vertical room left above a lane's first node and below its last, so the lane's start/end caps
+ * (drawn by `LaneBoxLayer`) have somewhere to sit inside the lane's frame. Two of these gaps must
+ * stay under one `rowHeight`: `positionChain` pays for them with a single extra reserved row, and
+ * a wider gap would push a lane's frame into the next main-chain node.
+ */
+export const LANE_CAP_GAP = 56;
+
 export interface LaneBounds {
 	x: number;
 	yStart: number;
@@ -109,6 +117,44 @@ export function layoutScopeRecursive(
 	return laneBounds;
 }
 
+/** One top-level flow to lay out: the primary workflow, or a named one. */
+export interface FlowLayoutInput {
+	nodes: Node[];
+	edges: Edge[];
+	laneMap: LaneMap;
+}
+
+/** Extra room between one top-level flow and the next, so two workflows never read as one. */
+export const FLOW_GAP_X = 120;
+
+/**
+ * Lays out every workflow a document declares side by side: each is its own Start-to-End column
+ * (plus whatever lanes its containers need), placed to the right of the previous one's full width.
+ * The first flow is the primary workflow, so it keeps exactly the position `layoutScopeRecursive`
+ * would give it alone.
+ */
+export function layoutFlows(
+	flows: FlowLayoutInput[],
+	opts: LayoutOptions = {}
+): Map<string, LaneBounds> {
+	const { originX = 200, originY = 80, rowHeight = 120 } = opts;
+	const laneBounds = new Map<string, LaneBounds>();
+	let x = originX;
+	for (const flow of flows) {
+		const footprint = positionChain(
+			flow.nodes,
+			flow.edges,
+			flow.laneMap,
+			x,
+			originY,
+			rowHeight,
+			laneBounds
+		);
+		x += footprint.columns * INLINE_LANE_OFFSET_X + FLOW_GAP_X;
+	}
+	return laneBounds;
+}
+
 function positionChain(
 	nodes: Node[],
 	edges: Edge[],
@@ -138,7 +184,7 @@ function positionChain(
 
 		for (const lane of lanes) {
 			const laneX = originX + colOffset * INLINE_LANE_OFFSET_X;
-			const laneY = originY + laneStartRow * rowHeight;
+			const laneY = originY + laneStartRow * rowHeight + LANE_CAP_GAP;
 			const laneOrdered = orderNodesInScope(lane.nodes, lane.edges);
 			const footprint = positionChain(
 				lane.nodes,
@@ -153,12 +199,14 @@ function positionChain(
 			laneBoundsOut.set(lane.key, {
 				x: laneX,
 				yStart: laneY,
-				yEnd: laneY + Math.max(laneOrdered.length, 1) * rowHeight,
+				yEnd: laneY + Math.max(laneOrdered.length, 1) * rowHeight + LANE_CAP_GAP,
 				width: NODE_CARD_WIDTH
 			});
 
 			colOffset += footprint.columns;
-			maxLaneRows = Math.max(maxLaneRows, footprint.rows);
+			// One row beyond the lane's own chain, which is what pays for the two cap gaps the lane
+			// now spans — without it the next main-chain node would land inside the lane's frame.
+			maxLaneRows = Math.max(maxLaneRows, footprint.rows + 1);
 		}
 
 		columns = Math.max(columns, colOffset);

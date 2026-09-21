@@ -28,14 +28,25 @@
 
 	import WorkflowNode from '$lib/components/builder/WorkflowNode.svelte';
 	import ReconnectableEdge from '$lib/components/builder/ReconnectableEdge.svelte';
+	import SwitchCaseEdge from '$lib/components/builder/SwitchCaseEdge.svelte';
 	import NodePalette from '$lib/components/builder/NodePalette.svelte';
 	import FlowInterop from '$lib/components/builder/FlowInterop.svelte';
 	import NodePanel from '$lib/components/builder/NodePanel.svelte';
+	import SwitchCaseDialog from '$lib/components/builder/SwitchCaseDialog.svelte';
+	import LaneBoxLayer from '$lib/components/builder/LaneBoxLayer.svelte';
+	import WorkflowNameDialog from '$lib/components/builder/WorkflowNameDialog.svelte';
 	import WorkflowVariablesModal from '$lib/components/builder/WorkflowVariablesModal.svelte';
 	import ScheduleModal from '$lib/components/builder/ScheduleModal.svelte';
 	import CodeMirrorEditor from '$lib/components/editor/CodeMirrorEditor.svelte';
-	import { NODE_META, NODE_TYPES } from '$lib/components/builder/builderConfig';
-	import { astToGraph, graphToAst, type ScopeGraph } from '$lib/zigflow-engine/graph';
+	import { NODE_META, NODE_TYPES, freshNodeData } from '$lib/components/builder/builderConfig';
+	import {
+		astToGraph,
+		graphToAst,
+		isNamedWorkflowStart,
+		namedWorkflowNames,
+		newNamedWorkflowScope,
+		type ScopeGraph
+	} from '$lib/zigflow-engine/graph';
 	import { buildRunIndex, type RunIndex } from '$lib/zigflow-engine/runIndex';
 	import { buildInputSkeleton, coerceInput, validateInput } from '$lib/zigflow-engine/inputSchema';
 	import { RunSession } from '$lib/runtime/runSession.svelte';
@@ -50,19 +61,32 @@
 		isScheduleActive,
 		type WorkflowSchedule
 	} from '$lib/zigflow-engine/schedule';
-	import { ROOT_SCOPE_ID, forkBranchScopeKey } from '$lib/zigflow-engine/scopeKey';
+	import {
+		ROOT_SCOPE_ID,
+		flowScopeOf,
+		forkBranchScopeKey,
+		workflowScopeKey,
+		workflowStartNodeId
+	} from '$lib/zigflow-engine/scopeKey';
 	import { toSlug } from '$lib/zigflow-engine/slug';
 	import {
 		composeScopeForDisplay,
 		decomposeDisplayedScope,
-		computeLiveLaneBounds,
+		computeFlowBounds,
+		computeLiveLaneBoxes,
 		computeLiveSyntheticEdges,
+		computeSwitchCaseEdges,
 		computeHiddenRealEdgeIds,
 		computeTerminalEdges,
 		collectDescendantScopeKeysForNode,
 		collectDescendantScopeKeysForLaneKey,
-		OWNER_SCOPE_TAG
+		OWNER_SCOPE_TAG,
+		SWITCH_CASE_EDGE_TYPE,
+		SWITCH_CASE_TAG,
+		SWITCH_NODE_TAG
 	} from '$lib/zigflow-engine/inlineScopeView';
+	import { newDirectiveCase, newJumpCase, switchCasesOf } from '$lib/zigflow-engine/switchCases';
+	import type { CaseEntry, VarEntry } from '$lib/components/builder/builderConfig';
 	import type { Diagnostic } from '@codemirror/lint';
 	import type { WorkflowNodeType, WorkflowMeta, InputField } from '$lib/types';
 	import type { PageProps } from './$types';
@@ -75,7 +99,10 @@
 	const workflowName = $derived(data.workflow.name);
 
 	const nodeTypes = Object.fromEntries(NODE_TYPES.map((t) => [t, WorkflowNode]));
-	const edgeTypes = { default: ReconnectableEdge };
+	const edgeTypes = {
+		default: ReconnectableEdge,
+		[SWITCH_CASE_EDGE_TYPE]: SwitchCaseEdge
+	};
 
 	// ── Workflow metadata & variables ────────────────────────────────
 
@@ -165,11 +192,14 @@
 	);
 
 	/**
-	 * Inline-lane bounding boxes (one per lane, at any nesting depth), used to target
-	 * drag-and-drop — derived live from `nodes`' actual current positions (not the one-off layout
-	 * pass at initial load), so it never goes stale after a node is added or dragged.
+	 * Inline-lane frames (one per lane, at any nesting depth): drawn on the canvas by
+	 * `LaneBoxLayer`, and used to target drag-and-drop. Derived live from `nodes`' actual current
+	 * positions (not the one-off layout pass at initial load), so they never go stale after a node
+	 * is added or dragged.
 	 */
-	const currentLaneBounds = $derived(computeLiveLaneBounds(nodes));
+	const currentLaneBoxes = $derived(computeLiveLaneBoxes(nodes));
+	/** Where each named workflow sits, so a drop beside one of them lands in it. */
+	const currentFlowBounds = $derived(computeFlowBounds(nodes));
 
 	// Keep the active scope's graph mirrored into `scopes` as the canvas is edited, so the DSL
 	// preview (which reads the full `scopes` map) and scope-switching always see current data.
@@ -191,12 +221,13 @@
 	$effect(() => {
 		const currentEdges = untrack(() => edges);
 		const synthetic = computeLiveSyntheticEdges(nodes, currentEdges);
+		const switchCases = computeSwitchCaseEdges(nodes, currentEdges);
 		const hiddenIds = computeHiddenRealEdgeIds(nodes, currentEdges);
 		const real = currentEdges
 			.filter((e) => !(e.data as Record<string, unknown> | undefined)?.syntheticScopeEdge)
 			.map((e) => ({ ...e, hidden: hiddenIds.has(e.id) }));
-		const terminal = computeTerminalEdges(nodes, [...real, ...synthetic]);
-		edges = [...real, ...synthetic, ...terminal];
+		const terminal = computeTerminalEdges(nodes, [...real, ...synthetic, ...switchCases]);
+		edges = [...real, ...synthetic, ...switchCases, ...terminal];
 	});
 
 	/** Recompose `nodes`/`edges` from `scopes` — only needed after `applyDslToCanvas` replaces `scopes` wholesale. */
@@ -371,14 +402,7 @@
 	// ── Node operations ──────────────────────────────────────────────
 
 	function addNode(type: WorkflowNodeType) {
-		const meta = NODE_META[type];
-		const newNode: Node = {
-			id: `node-${crypto.randomUUID()}`,
-			type,
-			position: { x: 120 + Math.random() * 200, y: 120 + Math.random() * 200 },
-			data: { type, ...meta.defaultData, [OWNER_SCOPE_TAG]: ROOT_SCOPE_ID }
-		};
-		nodes = [...nodes, newNode];
+		addNodeAt(type, { x: 120 + Math.random() * 200, y: 120 + Math.random() * 200 });
 	}
 
 	/**
@@ -388,13 +412,35 @@
 	 */
 	function resolveDropOwnerScope(position: { x: number; y: number }): string {
 		const PADDING = 40;
-		for (const [laneKey, bounds] of currentLaneBounds) {
+		let best: string | undefined;
+		let bestDepth = -1;
+		for (const [laneKey, bounds] of currentLaneBoxes) {
+			if (
+				position.x < bounds.x - PADDING ||
+				position.x > bounds.x + bounds.width + PADDING ||
+				position.y < bounds.yStart - PADDING
+			) {
+				continue;
+			}
+			// A lane's frame now encloses the lanes nested inside it, so several can match one drop.
+			// The deepest one is the one actually under the cursor — taking the first match would
+			// drop into the outer lane instead of the nested body being aimed at.
+			const depth = laneKey.split('/').length;
+			if (depth > bestDepth) {
+				best = laneKey;
+				bestDepth = depth;
+			}
+		}
+		if (best) return best;
+		// Outside every lane: the named workflow it lands beside, else the primary workflow.
+		for (const [flow, bounds] of currentFlowBounds) {
 			if (
 				position.x >= bounds.x - PADDING &&
 				position.x <= bounds.x + bounds.width + PADDING &&
-				position.y >= bounds.yStart - PADDING
+				position.y >= bounds.yStart - PADDING &&
+				position.y <= bounds.yEnd + PADDING
 			) {
-				return laneKey;
+				return flow;
 			}
 		}
 		return ROOT_SCOPE_ID;
@@ -404,17 +450,44 @@
 		e.preventDefault();
 		const type = e.dataTransfer?.getData('application/workflow-node-type') as WorkflowNodeType;
 		if (!type || !(type in NODE_META)) return;
-		const meta = NODE_META[type];
 		const position = screenToFlowPosition
 			? screenToFlowPosition({ x: e.clientX, y: e.clientY })
 			: { x: 200, y: 200 };
+		addNodeAt(type, position);
+	}
+
+	/**
+	 * Dropping another Start declares a named workflow. Its name is what the DSL calls it
+	 * (`<name>: do: [...]`, also the Temporal workflow type zigflow registers) and its parameters
+	 * are what it starts with, so both are asked for before anything lands on the canvas; it then
+	 * appears as its own Start wired to its own End, beside the workflows already there.
+	 */
+	function addNodeAt(type: WorkflowNodeType, position: { x: number; y: number }) {
+		if (type === 'start') {
+			namingWorkflow = true;
+			return;
+		}
 		const newNode: Node = {
 			id: `node-${crypto.randomUUID()}`,
 			type,
 			position,
-			data: { type, ...meta.defaultData, [OWNER_SCOPE_TAG]: resolveDropOwnerScope(position) }
+			data: { type, ...freshNodeData(type), [OWNER_SCOPE_TAG]: resolveDropOwnerScope(position) }
 		};
 		nodes = [...nodes, newNode];
+	}
+
+	/** Whether the name/parameters prompt for a freshly-dropped Start is open. */
+	let namingWorkflow = $state(false);
+	const takenWorkflowNames = $derived(
+		namingWorkflow ? [...namedWorkflowNames({ scopes }).values()] : []
+	);
+
+	function confirmWorkflowName(name: string, variables: VarEntry[]) {
+		namingWorkflow = false;
+		const { key, scope } = newNamedWorkflowScope(name, variables);
+		scopes = { ...scopes, ...decomposeDisplayedScope(nodes, edges), [key]: scope };
+		reloadFromScopes();
+		configNodeId = workflowStartNodeId(key);
 	}
 
 	function updateNodeData(id: string, patch: Record<string, unknown>) {
@@ -472,7 +545,23 @@
 	 * descendant lane (a fork branch containing a nested for-loop, etc.), at any nesting depth.
 	 */
 	function handleElementsDeleted(payload: { nodes: Node[]; edges: Edge[] }) {
+		// A case edge is not a connection between two tasks — it *is* the case, so deleting one
+		// drops the case (and its lane) rather than leaving a switch routing at something no longer
+		// drawn.
+		for (const e of payload.edges) {
+			const data = e.data as Record<string, unknown> | undefined;
+			const switchNodeId = data?.[SWITCH_NODE_TAG] as string | undefined;
+			const caseId = data?.[SWITCH_CASE_TAG] as string | undefined;
+			if (switchNodeId && caseId) removeCase(switchNodeId, caseId);
+		}
+
 		const orphanScopeKeys = payload.nodes.flatMap((n) => {
+			// A named workflow's Start *is* the workflow: deleting it takes the whole flow — its End,
+			// its steps and every body nested in them — since what remains could never run.
+			if (isNamedWorkflowStart(n)) {
+				const flow = workflowScopeKey(n.id);
+				return Object.keys(scopes).filter((key) => flowScopeOf(key) === flow);
+			}
 			const ownerScopeId = (n.data as Record<string, unknown> | undefined)?.[OWNER_SCOPE_TAG] as
 				string | undefined;
 			if (!ownerScopeId) return [];
@@ -481,15 +570,149 @@
 		pruneOrphanedScopes(orphanScopeKeys);
 	}
 
-	/** A `fork` branch was removed (not the whole node) — prune just that branch's scope + descendants. */
-	function handleRemoveBranch(forkNodeId: string, branchId: string) {
-		const forkNode = nodes.find((n) => n.id === forkNodeId);
-		const ownerScopeId = (forkNode?.data as Record<string, unknown> | undefined)?.[
+	/**
+	 * A single `fork` branch was removed rather than the whole node. Prunes just that branch's scope
+	 * and its descendants, leaving its sibling branches alone.
+	 */
+	function handleRemoveBranch(ownerNodeId: string, laneId: string) {
+		const ownerNode = nodes.find((n) => n.id === ownerNodeId);
+		const ownerScopeId = (ownerNode?.data as Record<string, unknown> | undefined)?.[
 			OWNER_SCOPE_TAG
 		] as string | undefined;
 		if (!ownerScopeId) return;
-		const laneKey = forkBranchScopeKey(ownerScopeId, forkNodeId, branchId);
+		const laneKey = forkBranchScopeKey(ownerScopeId, ownerNodeId, laneId);
 		pruneOrphanedScopes(collectDescendantScopeKeysForLaneKey(laneKey, nodes));
+	}
+
+	// ── Switch cases — authored on the canvas ────────────────────
+
+	/**
+	 * The case currently open in the editor dialog. `undo` is set only for a case just created by
+	 * dragging an edge: discarding one has to put back the node that was moved into its lane and the
+	 * chain edge it was spliced out of, which is what the snapshot taken at connect time restores.
+	 */
+	let caseEditor = $state.raw<{
+		switchNodeId: string;
+		caseId: string;
+		isNew: boolean;
+		undo?: () => void;
+	} | null>(null);
+
+	const editingSwitch = $derived(
+		caseEditor ? (nodes.find((n) => n.id === caseEditor!.switchNodeId) ?? null) : null
+	);
+	const editingCase = $derived(
+		editingSwitch && caseEditor
+			? (switchCasesOf(editingSwitch).find((c) => c.id === caseEditor!.caseId) ?? null)
+			: null
+	);
+
+	function ownerScopeOf(n: Node | undefined): string | undefined {
+		return (n?.data as Record<string, unknown> | undefined)?.[OWNER_SCOPE_TAG] as
+			string | undefined;
+	}
+
+	/**
+	 * Dragging an edge out of a switch is how a case is added. The connection xyflow just made is
+	 * not a chain edge — it *is* the case — so it is taken straight back out and recorded on the
+	 * switch instead, with the condition editor opened on the new case.
+	 *
+	 * Dropping on a named workflow's Start makes a case that starts it (zigflow runs a named `then:`
+	 * as a child workflow, from anywhere in the document); dropping on the End of the switch's own
+	 * workflow makes a case that ends it. Nothing else is a case the DSL can express — a plain task
+	 * is not something `then:` can start — so any other drag is simply undone.
+	 */
+	function handleConnect(connection: Connection) {
+		const source = nodes.find((n) => n.id === connection.source);
+		// xyflow has already pushed a plain chain edge for the drag, under an id it derives from the
+		// connection. Take exactly that one back out — matching on source/target instead would also
+		// catch the real chain edge when a switch is wired to the sibling it already flows into.
+		const addedId = `xy-edge__${connection.source}${connection.sourceHandle ?? ''}-${connection.target}${connection.targetHandle ?? ''}`;
+
+		if (source?.type !== 'switch') {
+			// Only a switch case can start a named workflow; a plain edge into one would make it a
+			// step of another flow, which the DSL has no way to say.
+			const target = nodes.find((n) => n.id === connection.target);
+			if (isNamedWorkflowStart(target)) edges = edges.filter((e) => e.id !== addedId);
+			return;
+		}
+
+		const before = { nodes, edges: edges.filter((e) => e.id !== addedId), scopes };
+		edges = before.edges;
+
+		const target = nodes.find((n) => n.id === connection.target);
+		const scopeId = ownerScopeOf(source);
+		if (!target || !scopeId) return;
+		const targetOwner = ownerScopeOf(target);
+		const endsOwnWorkflow =
+			target.type === 'end' && !!targetOwner && flowScopeOf(targetOwner) === flowScopeOf(scopeId);
+		if (!isNamedWorkflowStart(target) && !endsOwnWorkflow) return;
+
+		const cases = switchCasesOf(source);
+		const name = `case${cases.length + 1}`;
+		const entry = endsOwnWorkflow ? newDirectiveCase(name, 'end') : newJumpCase(name, target.id);
+
+		updateNodeData(source.id, { cases: [...cases, entry] });
+		relayout();
+		caseEditor = {
+			switchNodeId: source.id,
+			caseId: entry.id,
+			isNew: true,
+			undo: () => {
+				nodes = before.nodes;
+				edges = before.edges;
+				scopes = before.scopes;
+			}
+		};
+	}
+
+	/**
+	 * Re-runs the layout after a structural change (a case added, dropped, or routed elsewhere).
+	 * `scopes` is normally mirrored from the canvas by an effect, which has not run yet at this
+	 * point, so it is brought up to date here first — otherwise the pass would lay out the graph as
+	 * it was before the change. Node positions are derived, never persisted, so nothing is lost.
+	 */
+	function relayout() {
+		scopes = { ...scopes, ...decomposeDisplayedScope(nodes, edges) };
+		reloadFromScopes();
+	}
+
+	/** Clicking a case's jump edge edits that case. */
+	function handleEdgeClick(event: { edge: Edge }) {
+		const data = event.edge.data as Record<string, unknown> | undefined;
+		const switchNodeId = data?.[SWITCH_NODE_TAG] as string | undefined;
+		const caseId = data?.[SWITCH_CASE_TAG] as string | undefined;
+		if (switchNodeId && caseId) caseEditor = { switchNodeId, caseId, isNew: false };
+	}
+
+	function updateCase(switchNodeId: string, caseId: string, patch: Partial<CaseEntry>) {
+		const sw = nodes.find((n) => n.id === switchNodeId);
+		if (!sw) return;
+		const cases = switchCasesOf(sw);
+		updateNodeData(switchNodeId, {
+			cases: cases.map((c) => (c.id === caseId ? { ...c, ...patch } : c))
+		});
+		if (patch.routing) relayout();
+	}
+
+	/** Drops a case — same as removing it from the node panel. */
+	function removeCase(switchNodeId: string, caseId: string) {
+		const sw = nodes.find((n) => n.id === switchNodeId);
+		if (!sw) return;
+		updateNodeData(switchNodeId, {
+			cases: switchCasesOf(sw).filter((c) => c.id !== caseId)
+		});
+		if (caseEditor?.caseId === caseId) caseEditor = null;
+		relayout();
+	}
+
+	/** Dialog's delete: a brand-new case rolls the whole drag back, an existing one is just dropped. */
+	function deleteEditedCase() {
+		if (!caseEditor) return;
+		const { switchNodeId, caseId, undo } = caseEditor;
+		caseEditor = null;
+		if (undo) undo();
+		else removeCase(switchNodeId, caseId);
 	}
 
 	let saving = $state(false);
@@ -656,10 +879,16 @@
 				style="width: 100%; height: 100%;"
 				deleteKey={['Delete', 'Backspace']}
 				onnodeclick={handleNodeClick}
+				onedgeclick={handleEdgeClick}
+				onconnect={handleConnect}
 				onreconnect={handleReconnect}
 				ondelete={handleElementsDeleted}
 			>
 				<FlowInterop onready={onFlowReady} />
+				<LaneBoxLayer
+					boxes={[...currentLaneBoxes.values()]}
+					onselect={(nodeId) => (configNodeId = nodeId)}
+				/>
 				<Background variant={BackgroundVariant.Dots} gap={20} size={1.2} />
 				<Controls />
 				<MiniMap zoomable pannable />
@@ -693,6 +922,30 @@
 		{/if}
 	</div>
 </div>
+
+<!-- Names a freshly-dropped Start (and its parameters) before its workflow lands on the canvas -->
+{#if namingWorkflow}
+	<WorkflowNameDialog
+		taken={takenWorkflowNames}
+		onconfirm={confirmWorkflowName}
+		oncancel={() => (namingWorkflow = false)}
+	/>
+{/if}
+
+<!-- Switch case editor — opened by dragging a case edge out of a switch, or clicking one -->
+{#if caseEditor && editingSwitch && editingCase}
+	<SwitchCaseDialog
+		switchNode={editingSwitch}
+		caseEntry={editingCase}
+		{nodes}
+		{edges}
+		{workflowMeta}
+		isNew={caseEditor.isNew}
+		onchange={(patch) => updateCase(caseEditor!.switchNodeId, caseEditor!.caseId, patch)}
+		ondelete={deleteEditedCase}
+		onclose={() => (caseEditor = null)}
+	/>
+{/if}
 
 <!-- Run window — the run happens here; closing it keeps the run (and its results) around -->
 {#if showRunModal}

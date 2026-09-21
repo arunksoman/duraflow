@@ -24,7 +24,8 @@ const EMPTY_INDEX: RunIndex = {
 	childScopesByParent: new Map(),
 	allNodeIds: [],
 	ambiguousScopes: new Set(),
-	scopeIdByNodeId: new Map()
+	scopeIdByNodeId: new Map(),
+	workflowScopeByName: new Map()
 };
 
 const RECONNECT_DELAYS_MS = [500, 1000, 2000, 5000];
