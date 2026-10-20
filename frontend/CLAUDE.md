@@ -50,6 +50,7 @@ pnpm lint                # prettier --check . && eslint .
 pnpm format              # prettier --write .
 pnpm test                # vitest run (single run, both projects)
 pnpm test:unit           # vitest (watch mode)
+pnpm test:coverage       # vitest run --coverage (v8; text summary + coverage/index.html)
 ```
 
 Run a single test file: `pnpm vitest run src/lib/zigflow-engine/graph.test.ts`
@@ -61,6 +62,17 @@ Vitest is split into two projects (`vite.config.ts`):
 - **`client`**: real Chromium via Playwright (`@vitest/browser-playwright`), matches `src/**/*.svelte.{test,spec}.{js,ts}`, excludes `src/lib/server/**`.
 
 `expect: { requireAssertions: true }` is set globally — a test with no assertion fails.
+
+The `client` project runs with `fileParallelism: false`: all browser test files share one Chromium page, and keyboard focus can only be in one of their iframes at a time, so tests that type, blur or use CodeMirror fail at random when files run side by side. Component tests need `pnpm exec playwright install chromium` once.
+
+Test-only helpers live in `src/lib/testing/` (excluded from coverage):
+
+- `kit.ts` — call load functions, actions and request handlers directly: `kitEvent`, `fakeCookies`, `formRequest`, `expectRedirect`/`expectHttpError`/`expectFailure`.
+- `forms.ts` — a `$app/forms` double (`vi.mock('$app/forms', () => import('$lib/testing/forms'))`): `enhance` records what a form would post (`submissions`), then runs the page's own callbacks with the result `respondWith` set; await `settled()` after a submit.
+- `runFixture.ts` — a small workflow and a recorded run of it, for the run views (replay it with `RunSession.replay`).
+- `InputFormHarness.svelte` — hosts `WorkflowInputForm` so a test can observe its `bind:value`.
+
+Things that bite in these tests: Tailwind isn't loaded, so sizing classes do nothing — give SvelteFlow a sized `baseElement` and assert presence rather than visibility for decorative elements; the lane-frame layer sits over the canvas, so click nodes with `element.click()` rather than a Playwright pointer click; a CodeMirror editor is filled through its `.cm-content`; and `beforeEach(() => mock.mockReset())` *returns* the mock, which Vitest then calls as a teardown — use a block body. Reject from a mock with an async implementation, not `mockRejectedValue`, when the code under test awaits it later.
 
 There is no separate e2e test command; manual Playwright smoke-testing has been done ad hoc during builder feature work (see git history) but isn't wired into `package.json`.
 

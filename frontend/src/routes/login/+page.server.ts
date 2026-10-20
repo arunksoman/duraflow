@@ -5,6 +5,18 @@ import type { Actions, PageServerLoad } from './$types';
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
+/**
+ * Where to go after logging in. Only a path on this site is honoured — anything else
+ * (`https://…`, protocol-relative `//host`, `/\host`) would make the login page an open redirect.
+ */
+function safeRedirectTarget(url: URL): string {
+	const target = url.searchParams.get('redirectTo') ?? '';
+	if (!target.startsWith('/') || target.startsWith('//') || target.startsWith('/\\')) {
+		return '/dashboard';
+	}
+	return target;
+}
+
 export const load: PageServerLoad = ({ locals }) => {
 	if (locals.user) {
 		redirect(303, '/dashboard');
@@ -38,8 +50,7 @@ export const actions: Actions = {
 			return fail(401, { email, error: message });
 		}
 
-		const redirectTo = url.searchParams.get('redirectTo') ?? '/dashboard';
-		redirect(303, redirectTo);
+		redirect(303, safeRedirectTarget(url));
 	},
 
 	// Dev-only shortcut so the app is reachable before a real backend exists.
@@ -54,7 +65,6 @@ export const actions: Actions = {
 			secure: false
 		});
 
-		const redirectTo = url.searchParams.get('redirectTo') ?? '/dashboard';
-		redirect(303, redirectTo);
+		redirect(303, safeRedirectTarget(url));
 	}
 };

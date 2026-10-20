@@ -73,6 +73,7 @@ The database is SQLite by default, and the schema migrates automatically on star
 pnpm check   # type checking
 pnpm lint    # prettier + eslint
 pnpm test    # unit tests (Node) and component tests (headless Chromium)
+pnpm test:coverage   # the same, with a coverage report (coverage/index.html)
 ```
 
 Run `pnpm format` to fix formatting. Component tests need Playwright's Chromium: run `pnpm exec playwright install chromium` once.
@@ -82,8 +83,11 @@ Run `pnpm format` to fix formatting. Component tests need Playwright's Chromium:
 ```sh
 go build ./...
 go vet ./...
+go test ./...   # add -cover for a per-package coverage figure
 gofmt -l .   # should print nothing
 ```
+
+Backend tests need neither Temporal nor the Zigflow CLI: they use a temp-file SQLite database and an in-memory Temporal client (`internal/temporalexec/temporaltest`).
 
 ## Guidelines
 

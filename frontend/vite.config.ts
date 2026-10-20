@@ -25,11 +25,27 @@ export default defineConfig({
 	],
 	test: {
 		expect: { requireAssertions: true },
+		coverage: {
+			provider: 'v8',
+			include: ['src/**/*.{ts,svelte}'],
+			exclude: [
+				'src/**/*.{test,spec}.ts',
+				'src/lib/paraglide/**',
+				'src/lib/vitest-examples/**',
+				'src/lib/testing/**',
+				'src/**/*.d.ts'
+			],
+			reporter: ['text-summary', 'text', 'html']
+		},
 		projects: [
 			{
 				extends: './vite.config.ts',
 				test: {
 					name: 'client',
+					// Every browser test file shares one Chromium page, and keyboard focus can only be in
+					// one of their iframes at a time — tests that type or blur fail at random when files
+					// run side by side.
+					fileParallelism: false,
 					browser: {
 						enabled: true,
 						provider: playwright(),
