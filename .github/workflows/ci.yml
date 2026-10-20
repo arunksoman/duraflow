@@ -46,7 +46,7 @@ jobs:
       - name: Test
         run: |
           mkdir -p test-results
-          go run gotest.tools/gotestsum@v1.12.0 \
+          go run gotest.tools/gotestsum@v1.13.0 \
             --format testname \
             --junitfile test-results/backend-junit.xml \
             --jsonfile test-results/backend-tests.json \
@@ -96,6 +96,11 @@ jobs:
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+
+      # src/lib/paraglide is generated (and gitignored). Vite's paraglide plugin writes it during
+      # a build or test run, but the type check comes first and imports from it.
+      - name: Generate i18n messages
+        run: pnpm exec paraglide-js compile --project ./project.inlang --outdir ./src/lib/paraglide
 
       # Component tests run in real Chromium through Vitest's Playwright provider.
       - name: Install Chromium
