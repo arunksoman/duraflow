@@ -104,6 +104,10 @@ func Load() (*Config, error) {
 	v.SetDefault("temporal.address", "localhost:7233")
 	v.SetDefault("temporal.zigflowBinary", "zigflow")
 	v.SetDefault("temporal.workflowsDir", "./data/workflows")
+	// Empty, and filled in by deriveTelemetryDefaults — but declared, because viper's Unmarshal
+	// only consults DURAFLOW_* env vars for keys it already knows about.
+	v.SetDefault("telemetry.sinkURL", "")
+	v.SetDefault("telemetry.token", "")
 	v.SetDefault("telemetry.timeout", "1s")
 	v.SetDefault("telemetry.maxEventBytes", 65536)
 	v.SetDefault("telemetry.retentionPerExecution", 2000)
