@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { render } from 'vitest-browser-svelte';
 import { createRawSnippet } from 'svelte';
 import { resetForms, settled, submissions } from '$lib/testing/forms';
+import { page } from '$app/state';
 import Login from './login/+page.svelte';
 import Landing from './+page.svelte';
 import Docs from './docs/+page.svelte';
@@ -29,6 +30,23 @@ describe('login page', () => {
 			email: 'ada@example.com',
 			password: 'pw'
 		});
+	});
+
+	it('keeps redirectTo on the form actions', async () => {
+		// A bare `?/login` action would replace the query string and drop it.
+		const original = page.url;
+		(page as { url: URL }).url = new URL('http://app.test/login?redirectTo=%2Fexecutions%3Fa%3D1');
+		try {
+			const screen = render(Login, { form: null, data: {}, params: {} } as never);
+			const actionOf = (name: RegExp) =>
+				screen.getByRole('button', { name }).element().closest('form')?.getAttribute('action');
+			expect(actionOf(/^Log in$/)).toBe('?/login&redirectTo=%2Fexecutions%3Fa%3D1');
+			expect(actionOf(/Continue as demo user/)).toBe(
+				'?/devBypass&redirectTo=%2Fexecutions%3Fa%3D1'
+			);
+		} finally {
+			(page as { url: URL }).url = original;
+		}
 	});
 
 	it('shows the error and keeps the email', async () => {
