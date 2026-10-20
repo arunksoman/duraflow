@@ -42,7 +42,14 @@ If you open the frontend from any address other than `http://localhost:5173`, up
 
 ### Without Docker
 
-You need Go (see `backend/go.mod` for the version), Node 20+ with pnpm, the [Temporal CLI](https://github.com/temporalio/cli/releases) and the [Zigflow CLI](https://github.com/zigflow/zigflow) (`go install github.com/zigflow/zigflow@latest`) on your `PATH`. Then, in three terminals:
+You need Go (see `backend/go.mod` for the version), Node 20+ with pnpm, the [Temporal CLI](https://github.com/temporalio/cli/releases) and the [Zigflow CLI](https://github.com/zigflow/zigflow) on your `PATH`. Zigflow's `go.mod` has a `replace` directive, so `go install github.com/zigflow/zigflow@latest` fails; build it from a clone instead (same version as `backend/Dockerfile`):
+
+```sh
+git clone --depth 1 --branch v0.17.1 https://github.com/zigflow/zigflow.git
+cd zigflow && go install .                # installs to $(go env GOPATH)/bin
+```
+
+Then, in three terminals:
 
 ```sh
 temporal server start-dev                 # localhost:7233, web UI at :8233

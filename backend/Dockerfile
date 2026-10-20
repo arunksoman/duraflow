@@ -7,7 +7,13 @@ ENV CGO_ENABLED=0
 
 COPY go.mod go.sum ./
 RUN go mod download
-RUN mkdir -p /out && go install github.com/zigflow/zigflow@latest && cp "$(go env GOPATH)/bin/zigflow" /out/zigflow
+# Build zigflow from a clone, not `go install ...@version`: its go.mod carries a `replace`
+# directive, which `go install pkg@version` refuses. Pinned so rebuilds are reproducible.
+ARG ZIGFLOW_VERSION=v0.17.1
+RUN apk add --no-cache git \
+    && git clone --depth 1 --branch "$ZIGFLOW_VERSION" https://github.com/zigflow/zigflow.git /tmp/zigflow \
+    && cd /tmp/zigflow && mkdir -p /out && go build -o /out/zigflow . \
+    && rm -rf /tmp/zigflow
 
 COPY . .
 RUN go build -o /out/server ./cmd/server
