@@ -1,0 +1,50 @@
+---
+title: For
+description: Repeat a body of steps for each item of a collection (for).
+---
+
+Runs its **body** once for every item of a collection. The body is drawn inline, beside the For
+node, in a dotted frame titled `<name> body`. Drop steps into the frame to add them to the body.
+
+<Screenshot name="node-for" alt="A For node with its body drawn inline in a dotted frame" />
+
+## Settings
+
+| Field                    | DSL        | Notes                                                                                  |
+| ------------------------ | ---------- | -------------------------------------------------------------------------------------- |
+| each (item var)          | `for.each` | The name the current item is stored under. Default `item`: read it as `$data.item`.    |
+| at (index var)           | `for.at`   | The name of the current index. Default `index`: `$data.index`.                         |
+| in (collection expr)     | `for.in`   | The collection to iterate: an array, an object, or a number (to repeat N times).       |
+| while (continue if true) | `while`    | Optional. Checked after each iteration; the loop stops when it is false.               |
+
+Plus the [shared settings](/docs/nodes#shared-settings).
+
+## DSL
+
+```yaml
+- eachItem:
+    for:
+      each: item
+      at: index
+      in: ${ $input.items }
+    while: ${ $data.index < 100 }
+    do:
+      - priceItem:
+          set:
+            price: ${ $data.item.price }
+      - pause:
+          wait:
+            seconds: 1
+```
+
+## In a run
+
+Every iteration of a body step is kept as its own attempt in the
+[inspector](/docs/guides/running-workflows#inspecting-a-step): step through them with the arrows,
+and the label tells you which iteration you're looking at.
+
+## Notes
+
+- Zigflow runs **each iteration as a Temporal child workflow**. A loop over a very large
+  collection creates many child workflows, and Temporal's history limits apply.
+- `while` can't stop the first iteration: it is evaluated after each one.

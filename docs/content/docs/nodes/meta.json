@@ -1,0 +1,19 @@
+{
+  "pages": [
+    "index",
+    "start-and-end",
+    "rest",
+    "grpc",
+    "set",
+    "byoc",
+    "switch",
+    "for",
+    "fork",
+    "try",
+    "wait",
+    "listen",
+    "raise",
+    "child-workflow",
+    "group"
+  ]
+}

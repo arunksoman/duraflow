@@ -1,0 +1,85 @@
+---
+title: Named workflows
+description: Declaring several workflows in one document, and starting them from a switch.
+---
+
+One Zigflow document can declare more than one workflow. Besides the main one (registered under
+`document.workflowType`), every **named workflow** is registered with Temporal as a workflow type
+of its own, by the same worker.
+
+## The rule
+
+Zigflow decides by position. In **any** task list, at any depth:
+
+- a `do:` task that comes **after** a task that isn't a `do:` is a named workflow. It is **not**
+  run in place; it is registered as a workflow named after its task key;
+- a `do:` task that comes before every other task in its list runs in place, as a
+  [Group](/docs/nodes/group);
+- at the top level of a document holding nothing but `do:` tasks, every one of them is a named
+  workflow.
+
+```yaml
+do:
+  - classify:                 # a step
+      switch:
+        - electronic:
+            when: ${ $input.orderType == "electronic" }
+            then: processElectronicOrder
+        - otherwise:
+            then: end
+  - confirm:                  # a step
+      set:
+        confirmed: true
+  - processElectronicOrder:   # a do: after a step: a named workflow, never run in place
+      do:
+        - validatePayment:
+            set:
+              paymentValid: true
+        - sendLicenceKey:
+            set:
+              licenceSent: true
+```
+
+Here the main workflow runs `classify` then `confirm`. `processElectronicOrder` only runs when
+something starts it.
+
+## Starting one
+
+A [Switch](/docs/nodes/switch) case whose `then:` names a named workflow starts it as a Temporal
+**child workflow**, waits for it to finish, and then carries on with the step after the switch.
+It works wherever the switch and the workflow are declared in the document.
+
+## On the canvas
+
+A named workflow is drawn exactly like the main one: its own **Start** (titled with its name),
+its steps, and its own **End**, in a column to the right of the main flow. A switch case that
+starts it is drawn as a labelled edge into its Start.
+
+<Screenshot
+  name="builder-named-workflows"
+  alt="The main flow on the left and two named workflows to its right, reached from switch case edges"
+/>
+
+- **Create one** by dropping a **Start** from the palette. You're asked for its name (it must be
+  unique, since it's a Temporal workflow type) and its parameters.
+- **Parameters** are its Init Variables: written as a leading `init: set:` inside its `do:`. A
+  named workflow starts with its caller's `$input` and state, so a parameter like
+  `${ $data.orderId }` reads what the caller had.
+- **Delete one** by deleting its Start. Its End can't be deleted on its own.
+- A plain edge into a named workflow's Start isn't allowed: only a switch case can start it.
+
+## Where it's written
+
+Each named workflow remembers which list it was declared in, so a document keeps its shape when
+you re-save it. It's written after the steps of that list. If that list no longer exists, or no
+longer has a step before it (which would turn its `do:` into a group), it is written at the top
+level instead. A new named workflow is written at the top level.
+
+Named workflows share one namespace across the whole document. If a step has the same name as a
+named workflow, the step is the one that gets renamed.
+
+## In a run
+
+A named workflow's run is a child of the run that started it. Its events carry the scope
+`workflow_<name>`, which the run view resolves to that workflow's flow on the canvas, so its Start,
+steps and End light up like the main flow's. A workflow the run never started is shown as skipped.

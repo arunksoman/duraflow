@@ -1,0 +1,61 @@
+---
+title: Projects and workflows
+description: How Duraflow organises your work, and what saving a workflow does.
+---
+
+## Projects
+
+A project is a folder for related workflows, such as everything that handles one business
+process. The **Dashboard** lists your projects with a search box; **New project** creates one.
+
+<Screenshot name="dashboard" alt="The dashboard listing projects with a search box and a New project button" />
+
+Each project's menu opens or deletes it. Deleting a project deletes every workflow in it, with
+everything that belongs to them (see below). When the project still has workflows, you confirm by
+typing its name.
+
+## Workflows
+
+A project page lists its workflows as cards, each with its version, when it was last edited and
+how its last run ended (or **Never run**). A workflow that has no DSL saved yet shows as a
+**Draft**. Each card's menu can open the builder, show the workflow's runs, or delete it.
+
+<Screenshot name="project" alt="A project page listing three workflows with their last run status" />
+
+**New workflow** creates one and opens it in the [builder](/docs/guides/builder).
+
+### What saving does
+
+A workflow is stored as its Zigflow DSL text, and the canvas is drawn from that text. Clicking
+**Save** in the builder does three things:
+
+1. Stores the DSL.
+2. Starts (or restarts) a dedicated `zigflow run` worker process for the workflow. The worker
+   registers the workflow's `workflowType` on its `taskQueue` with Temporal, which is what makes it
+   runnable. It appears on the [Workers](/docs/guides/workers) page.
+3. Publishes, changes or removes its [schedule](/docs/guides/schedules) in Temporal, if the DSL
+   has one (or had one).
+
+The **Run** button saves too, so you always run what is on screen.
+
+### Deleting a workflow
+
+Deleting a workflow is permanent. It removes:
+
+- every run of it, including runs still in progress (they are terminated first), with their child
+  runs, recorded events and Temporal history;
+- its Temporal schedule, if it had one;
+- its worker process, its DSL file and its row on the Workers page.
+
+## Workflow identity
+
+Two fields in the DSL header identify a workflow to Temporal, and you set them in the builder's
+**Variables** dialog:
+
+| Field          | Meaning                                                                                     |
+| -------------- | ------------------------------------------------------------------------------------------- |
+| `workflowType` | The Temporal workflow type the worker registers. Other workflows start this one by this name. |
+| `taskQueue`    | The Temporal task queue the worker polls.                                                   |
+
+Both must be RFC 1123 labels: lower case letters, digits and hyphens. The workflow's display name
+in Duraflow is separate and can be anything.

@@ -1,0 +1,39 @@
+{
+  "name": "duraflow-docs",
+  "version": "0.0.0",
+  "private": true,
+  "scripts": {
+    "build": "next build && node scripts/postbuild.mjs",
+    "dev": "next dev",
+    "start": "serve out",
+    "types:check": "next typegen && tsc --noEmit",
+    "screenshots:up": "docker compose -p duraflow-docs -f ../docker-compose.yml -f scripts/compose.screenshots.yml up --build --detach --wait --wait-timeout 900",
+    "screenshots": "node scripts/capture-screenshots.mjs",
+    "screenshots:down": "docker compose -p duraflow-docs -f ../docker-compose.yml -f scripts/compose.screenshots.yml down --volumes"
+  },
+  "dependencies": {
+    "cn": "^0.5.0",
+    "fumadocs-core": "16.17.7",
+    "fumadocs-mdx": "15.4.9",
+    "fumadocs-ui": "npm:@fumadocs/base-ui@16.17.7",
+    "lucide-react": "^1.59.0",
+    "mermaid": "12.2.0",
+    "next": "16.4.2",
+    "next-themes": "0.4.6",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4.3.3",
+    "@types/mdx": "^2.0.14",
+    "@types/node": "^26.6.5",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "playwright": "1.61.1",
+    "postcss": "^8.5.31",
+    "serve": "^14.2.6",
+    "sharp": "0.35.5",
+    "tailwindcss": "^4.3.3",
+    "typescript": "^7.0.2"
+  }
+}

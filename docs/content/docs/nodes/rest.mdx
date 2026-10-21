@@ -1,0 +1,46 @@
+---
+title: REST
+description: Call an HTTP API (call http).
+---
+
+Sends an HTTP request and makes the response the step's output. The response is also stored in
+`$data` under the step's name, so later steps can read `$data.<name>`.
+
+<Screenshot name="node-rest" alt="A REST node selected, with its Configuration, Headers and Advanced Settings" />
+
+## Settings
+
+| Section           | Field          | DSL               | Notes                                                                 |
+| ----------------- | -------------- | ----------------- | --------------------------------------------------------------------- |
+| Configuration     | Method         | `with.method`     | `get`, `post`, `put`, `patch` or `delete`.                            |
+| Configuration     | Endpoint       | `with.endpoint`   | A URL, or an expression that builds one.                              |
+| Headers           | Name / value   | `with.headers`    | Values can be expressions.                                            |
+| Request Body      | Body           | `with.body`       | An expression, or raw JSON (toggle the JSON editor).                  |
+| Advanced Settings | Query Params   | `with.query`      | Values can be expressions.                                            |
+| Advanced Settings | Output         | `with.output`     | `content` (the parsed body, default), `raw` (base64 body) or `response` (status, headers and body). |
+| Advanced Settings | Follow redirects | `with.redirect` | Off by default.                                                       |
+
+Plus the [shared settings](/docs/nodes#shared-settings). Defaults are left out of the DSL, so a
+plain GET stays short.
+
+## DSL
+
+```yaml
+- getCustomer:
+    call: http
+    with:
+      method: get
+      endpoint: ${ "https://api.example.com/customers/" + $input.customerId }
+      headers:
+        Authorization: ${ "Bearer " + $env.API_TOKEN }
+      query:
+        expand: orders
+    export:
+      as: '${ $context + { customer: . } }'
+```
+
+## Notes
+
+- The request runs as a Temporal **activity**, so it is retried according to the step's (or the
+  workflow's) [activity options](/docs/nodes#activity-options).
+- Keep secrets out of the DSL: read them from the worker's environment with `$env`.

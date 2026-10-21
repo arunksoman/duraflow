@@ -1,0 +1,57 @@
+---
+title: Executions
+description: Every run across every project, with filters, run pages and deletion.
+---
+
+**Executions** in the sidebar lists every run, across all projects, newest first, 25 to a page.
+
+<Screenshot name="executions" alt="The executions list with status, type, workflow, start time and duration columns" />
+
+Each row shows the run's status, its **type** (what started it), the workflow and project, when
+it started and how long it took. Only top-level runs are listed: a child workflow's run belongs to
+its parent's timeline and is reached from there.
+
+| Type        | Started by                                                                                   |
+| ----------- | -------------------------------------------------------------------------------------------- |
+| `manual`    | Someone clicking Run, in the builder or on this page, or a call to the API.                  |
+| `scheduled` | Temporal, from the workflow's [schedule](/docs/guides/schedules).                             |
+| `backfill`  | Reserved for backfills, which aren't produced yet.                                           |
+
+## Filtering
+
+Filter by workflow, run type, status, and a start date range (in UTC). The filters are kept in
+the URL, so a filtered view can be bookmarked or shared. A workflow card's **View runs** menu item
+opens this page filtered to that workflow.
+
+## Starting a run from here
+
+**Run a workflow** opens a dialog: choose a workflow, fill in its inputs (generated from its
+input schema) and run it. This runs the workflow's saved DSL, unlike the builder's Run button,
+which saves first.
+
+## A run's own page
+
+Click a run to open it at `/executions/<id>`. It shows the same view as the builder's run window:
+the canvas coloured by what happened, and the step inspector. It is replayed from the run's stored
+events, so it looks the same whether the run finished a minute or a month ago, and it follows the
+run live if it is still going.
+
+<Screenshot
+  name="execution-detail"
+  alt="A run's own page showing the workflow canvas coloured by the run's result"
+/>
+
+A failed step shows its error in the inspector:
+
+<Screenshot name="execution-error" alt="The inspector showing the error of a failed step" />
+
+A child run's page links back to its parent run and the step that started it.
+
+## Deleting runs
+
+Delete a run from its page, or select several in the list and use **Delete selected**. Deleting is
+permanent and removes the run's child runs, its recorded events and its Temporal history.
+
+A run that is still in progress has to be terminated to be deleted; the dialog says so and the
+button becomes **Terminate and delete**. Child runs can't be deleted on their own, only with
+their root run.

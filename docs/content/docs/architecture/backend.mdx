@@ -1,0 +1,71 @@
+---
+title: Backend
+description: The Go API - data model, auth, persistence and configuration.
+---
+
+The backend is a Go service in `backend/`, built on [Huma v2](https://huma.rocks/) over
+[Echo](https://echo.labstack.com/). Huma generates an OpenAPI 3.1 spec from the Go request and
+response types, so the API documentation can't drift from the code.
+
+## Structure
+
+```
+cmd/server/main.go        wiring: config, database (+ seed admin), Temporal client,
+                          worker manager (starts every stored workflow's worker), router
+internal/
+  config/                 settings: defaults, optional YAML, DURAFLOW_* env vars
+  db/                     opens SQLite or Postgres and migrates the schema
+  models/                 User, Project, Workflow, Execution, ExecutionEvent, Worker, ...
+  auth/                   bcrypt password hashing, JWT issue and verify
+  api/                    one file per resource; each registers its operations
+  temporalexec/           Temporal client, worker manager, event resolver
+  events/                 fan-out of resolved run events to live watchers
+data/                     SQLite database and per-workflow DSL files
+```
+
+## Data model
+
+| Model | What it stores |
+| --- | --- |
+| `User` | Login accounts. |
+| `Project` | A named group of workflows. |
+| `Workflow` | Name, description and the **DSL text**, plus the `workflowType` and `taskQueue` read from its header. |
+| `Execution` | One run: status, input, output, error, trigger (`manual`, `scheduled`, `backfill`), its Temporal ids, and for a child run its parent and the task that started it. |
+| `ExecutionEvent` | One task event reported by a worker, in receive order. See [Run observability](/docs/architecture/observability). |
+| `WorkflowExecutionRef` | A cache of which run each Temporal workflow execution belongs to. |
+| `Worker` | The Workers page's record of each workflow's worker. |
+
+Every model has a UUID `id` and `createdAt`/`updatedAt`. JSON fields are camelCase and mirror the
+frontend's types in `frontend/src/lib/types/index.ts`.
+
+## Persistence
+
+SQLite is the default (a pure-Go driver, so no C toolchain is needed), in WAL mode with a busy
+timeout, since workers write events while the API reads. Postgres is supported by configuration
+alone. The schema is migrated automatically (GORM `AutoMigrate`) on every start; there are no
+migration files.
+
+## Auth
+
+`POST /api/auth/login` exchanges an email and password for a JWT. Every other API operation
+requires `Authorization: Bearer <token>`; this is enforced by middleware that reads each
+operation's declared security, so a new operation is protected unless it opts out. The one
+exception is the internal endpoint workers post run events to, which is authenticated with a
+shared token instead.
+
+When the users table is empty, an admin is created from the `seedAdmin.*` settings.
+
+## Deleting things
+
+Deletes cascade so nothing is left running or orphaned:
+
+- **A run** is deleted with its child runs, its events, its cached references and, in the
+  background, its Temporal history. A run still in progress is terminated first, if asked to
+  (`force`), or the delete is refused.
+- **A workflow** deletes its runs (terminating any in progress), its Temporal schedule, its worker
+  process, its DSL files and its Workers row.
+- **A project** deletes each of its workflows that way, then itself.
+
+## Configuration
+
+See [Configuration](/docs/getting-started/configuration) for every setting.

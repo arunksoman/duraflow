@@ -1,0 +1,21 @@
+# A throwaway copy of the stack for docs screenshots: its own ports and an empty database, so the
+# screenshots never show anything from your dev data and the dev stack can keep running.
+#
+#   docker compose -p duraflow-docs -f docker-compose.yml -f docs/scripts/compose.screenshots.yml up --build --wait
+services:
+  temporal:
+    ports: !override
+      - '17233:7233'
+  backend:
+    ports: !override
+      - '18000:8000'
+    volumes: !override
+      - docs-data:/app/data
+  frontend:
+    ports: !override
+      - '15173:5173'
+    environment:
+      ORIGIN: 'http://localhost:15173'
+
+volumes:
+  docs-data:

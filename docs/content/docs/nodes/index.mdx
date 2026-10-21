@@ -1,0 +1,94 @@
+---
+title: Nodes overview
+description: Every node on the palette, what it maps to in the DSL, and the settings all nodes share.
+---
+
+Each node on the canvas is one task in the Zigflow DSL (Start and End are the exceptions: they
+mark where a workflow begins and ends). The palette groups them like this:
+
+| Palette group | Node                                  | DSL task                          | What it does                                             |
+| ------------- | ------------------------------------- | --------------------------------- | -------------------------------------------------------- |
+| Actions       | [REST](/docs/nodes/rest)              | `call: http`                      | Call an HTTP API.                                        |
+| Actions       | [gRPC](/docs/nodes/grpc)              | `call: grpc`                      | Call a gRPC method.                                      |
+| Actions       | [Set](/docs/nodes/set)                | `set:`                            | Write variables into `$data`.                            |
+| Actions       | [BYOC](/docs/nodes/byoc)              | `run: script / shell / container` | Run your own code.                                       |
+| Control Flow  | [Switch](/docs/nodes/switch)          | `switch:`                         | Choose what happens next by condition.                   |
+| Control Flow  | [For](/docs/nodes/for)                | `for:` + `do:`                    | Repeat steps for each item of a collection.              |
+| Control Flow  | [Fork](/docs/nodes/fork)              | `fork:`                           | Run branches in parallel.                                |
+| Control Flow  | [Try](/docs/nodes/try)                | `try:` + `catch:`                 | Handle errors from a block of steps.                     |
+| Events        | [Wait](/docs/nodes/wait)              | `wait:`                           | Pause for a duration or until a time.                    |
+| Events        | [Listen](/docs/nodes/listen)          | `listen:`                         | Wait for a Temporal signal, query or update.             |
+| Events        | [Raise](/docs/nodes/raise)            | `raise:`                          | Fail with a typed error.                                 |
+| Structure     | [Child Flow](/docs/nodes/child-workflow) | `run: workflow`                | Run another workflow as a child.                         |
+| Terminal      | [Start](/docs/nodes/start-and-end)    | (a named workflow)                | Declare another workflow in the same document.           |
+| (not in palette) | [End](/docs/nodes/start-and-end)   | none                              | Where a workflow ends.                                   |
+| (not in palette) | [Group](/docs/nodes/group)         | `do:`                             | A group of steps run in place; loaded from DSL only.     |
+
+Each node page shows the node's settings, the DSL it produces and anything to watch out for.
+
+## Shared settings
+
+Every node except Start and End has three sections at the bottom of its panel.
+
+### Run only if
+
+A condition (`if:`) built with the [condition builder](/docs/guides/expressions#the-condition-builder).
+When it is false the step is skipped and the run carries on with the next one. This is how
+Duraflow does simple conditional steps: there is no separate "if" node. For a real choice between
+paths, use a [Switch](/docs/nodes/switch).
+
+A step skipped by its condition shows as skipped (dashed amber) in the run view.
+
+```yaml
+- shipExpress:
+    if: ${ $input.priority == "express" }
+    set:
+      carrier: overnight
+```
+
+### Data Flow
+
+| Field     | DSL         | What it does                                                                                       |
+| --------- | ----------- | -------------------------------------------------------------------------------------------------- |
+| Output as | `output.as` | Reshapes the step's output before it is passed on.                                                  |
+| Export as | `export.as` | Writes to `$context`. Each export replaces it; use `${ $context + { key: . } }` to add to it instead. |
+
+See [Expressions and data](/docs/guides/expressions#shaping-data-between-steps).
+
+### Activity Options
+
+Temporal settings for the activity this step runs (written to `metadata.activityOptions`). They
+matter for steps that run an activity, such as REST, gRPC and BYOC.
+
+| Field               | DSL                                       | Meaning                                                                    |
+| ------------------- | ----------------------------------------- | -------------------------------------------------------------------------- |
+| heartbeatTimeout    | `heartbeatTimeout`                        | The activity fails if it doesn't heartbeat within this many seconds.       |
+| Max attempts        | `retryPolicy.maximumAttempts`             | How many times Temporal tries the activity before failing the step.        |
+| Backoff coefficient | `retryPolicy.backoffCoefficient`          | How much the wait between retries grows each time.                         |
+| Initial interval    | `retryPolicy.initialInterval`             | The wait before the first retry, in seconds.                               |
+| Max interval        | `retryPolicy.maximumInterval`             | The longest wait between retries, in seconds.                              |
+
+```yaml
+- getUser:
+    call: http
+    with:
+      method: get
+      endpoint: https://api.example.com/users/1
+    metadata:
+      activityOptions:
+        retryPolicy:
+          maximumAttempts: 5
+          initialInterval:
+            seconds: 1
+```
+
+Defaults for the whole workflow can be set in `document.metadata.activityOptions` in the DSL
+editor.
+
+## Names
+
+A node's **Label** (the first field in its panel) becomes its task name in the DSL, and the panel
+shows the name it will be saved as. A label that is already identifier-shaped, such as
+`processElectronicOrder` or `send_email`, is kept exactly. Anything else is turned into a
+lower-case, hyphenated slug: `Send email` becomes `send-email`. Names must be unique within their
+task list, so a duplicate gets a suffix (`send-email-2`).

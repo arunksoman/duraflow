@@ -1,0 +1,36 @@
+---
+title: Set
+description: Write variables into $data (set).
+---
+
+Writes key/value pairs into the run's `$data` store. Later steps read them as `$data.<key>`.
+Each Set merges its keys in: a key that already exists is overwritten, and other keys are left
+alone.
+
+<Screenshot name="node-set" alt="A Set node selected, with its list of variables" />
+
+## Settings
+
+| Section   | Field       | DSL     | Notes                                       |
+| --------- | ----------- | ------- | ------------------------------------------- |
+| Variables | Key / value | `set.*` | Values can be literals or expressions.      |
+
+Plus the [shared settings](/docs/nodes#shared-settings).
+
+## DSL
+
+```yaml
+- prepare:
+    set:
+      orderId: ${ uuid }
+      receivedAt: ${ timestamp_iso8601 }
+      total: ${ $input.items | map(.price) | add }
+```
+
+## Notes
+
+- **Generate values here and nowhere else.** `uuid`, `timestamp` and `timestamp_iso8601` change
+  every time they are evaluated, and Temporal re-evaluates a workflow when it replays its history.
+  A Set step records its result, so the value stays fixed; anywhere else it would break the
+  replay. Generate once in a Set and read it from `$data`.
+- The Start node's **Init Variables** are a Set too: they are saved as a first task named `init`.

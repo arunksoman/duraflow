@@ -1,0 +1,36 @@
+---
+title: Group
+description: A list of steps run in place (do).
+---
+
+A **Group** is a `do:` task that Zigflow runs in place: its steps run one after another, as if
+they were written inline. It is drawn as a node with its steps in a dotted frame, like a loop
+body.
+
+<Screenshot name="node-group" alt="A Group node with two steps inside its frame" />
+
+Groups aren't on the palette. They only come from DSL, because of how Zigflow treats `do:`:
+
+- A `do:` that comes **before** every other task in its list runs in place. That's a Group.
+- A `do:` that comes **after** another task is not run in place at all: Zigflow registers it as a
+  separate workflow, named after its key. That's a [named workflow](/docs/dsl/named-workflows),
+  drawn with its own Start and End.
+
+## DSL
+
+```yaml
+do:
+  - setup:            # first in its list: a Group, run in place
+      do:
+        - loadConfig:
+            set:
+              retries: 3
+        - warmCache:
+            wait:
+              seconds: 1
+  - work:
+      set:
+        done: true
+```
+
+Plus the [shared settings](/docs/nodes#shared-settings).

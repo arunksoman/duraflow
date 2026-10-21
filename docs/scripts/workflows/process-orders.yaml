@@ -1,0 +1,70 @@
+document:
+  dsl: 1.0.0
+  taskQueue: docs-orders
+  workflowType: process-orders
+  version: 0.1.0
+  title: Process orders
+input:
+  schema:
+    format: json
+    document:
+      type: object
+      required:
+        - orderIds
+      properties:
+        orderIds:
+          type: array
+          items:
+            type: number
+        priority:
+          type: string
+do:
+  - init:
+      set:
+        region: eu-west
+  - summarise:
+      set:
+        orderCount: ${ $input.orderIds | length }
+        express: ${ $input.priority == "express" }
+  - eachOrder:
+      for:
+        each: item
+        at: index
+        in: ${ $input.orderIds }
+      do:
+        - reserveStock:
+            set:
+              reserved: ${ $data.item }
+        - pause:
+            wait:
+              seconds: 1
+  - notify:
+      fork:
+        branches:
+          - email:
+              set:
+                channel: email
+          - sms:
+              set:
+                channel: sms
+  - charge:
+      try:
+        - capturePayment:
+            raise:
+              error:
+                type: https://serverlessworkflow.io/spec/1.0.0/errors/communication
+                status: 502
+                title: Payment gateway unavailable
+      catch:
+        as: error
+        do:
+          - queuePayment:
+              set:
+                paymentQueued: true
+  - shipExpress:
+      if: ${ $input.priority == "express" }
+      set:
+        carrier: overnight
+  - done:
+      set:
+        status: complete

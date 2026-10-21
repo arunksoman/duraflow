@@ -1,0 +1,66 @@
+---
+title: Working on these docs
+description: Run the docs site, write pages, regenerate screenshots and deploy.
+---
+
+These docs are a [Fumadocs](https://fumadocs.dev) site (Next.js, exported as static HTML) in the
+repository's `docs/` folder. They're separate from the SvelteKit app and share no code with it.
+
+## Running locally
+
+```sh
+cd docs
+pnpm install
+pnpm dev        # http://localhost:3000
+pnpm build      # static export to docs/out
+```
+
+## Writing pages
+
+Pages are MDX files in `docs/content/docs/`. Each folder has a `meta.json` that sets the order of
+its pages, and the root `meta.json` sets the sidebar sections. Front matter needs a `title` and a
+`description`.
+
+Besides Fumadocs' built-in components (`Callout`, `Cards`, `Steps`, `Tabs`), two are available:
+
+```mdx
+<Screenshot name="builder-overview" alt="What the image shows" caption="Optional caption" />
+
+<Mermaid chart={`flowchart LR
+  A --> B`} />
+```
+
+`Screenshot` shows `public/screenshots/<name>-light.webp` or `<name>-dark.webp`, whichever matches
+the docs' current theme, and switches instantly when the theme is toggled. `Mermaid` diagrams
+follow the theme too.
+
+## Screenshots
+
+Screenshots are taken from the real app by `scripts/capture-screenshots.mjs`, which drives it with
+Playwright in both themes. It runs against its own copy of the stack, with an empty database and
+different ports, so nothing from your dev data appears in the docs and your dev stack can keep
+running:
+
+```sh
+cd docs
+pnpm exec playwright install chromium   # once
+pnpm screenshots:up      # build and start the screenshot stack (ports 15173, 18000, 17233)
+pnpm screenshots         # capture everything into public/screenshots/
+pnpm screenshots:down    # stop it and delete its database
+```
+
+`pnpm screenshots -- --only=node-` re-shoots only the screenshots whose name contains `node-`.
+
+The script creates an "Order fulfilment" project with the workflows in `scripts/workflows/`,
+runs them for real, and photographs each page. Per-node screenshots load the small documents in
+`scripts/node-gallery.mjs` into the builder's DSL editor, without saving them. To add a
+screenshot, add a scene to the script and reference its name from a page.
+
+## Deployment
+
+`.github/workflows/docs.yml` builds the site and publishes it to GitHub Pages on every push to
+`main` that touches `docs/`. It can also be run by hand from the Actions tab. The site is served
+under the repository's name, which the workflow passes to the build as `NEXT_PUBLIC_BASE_PATH`.
+
+GitHub Pages must be set to deploy from **GitHub Actions** (repository **Settings → Pages →
+Source**).

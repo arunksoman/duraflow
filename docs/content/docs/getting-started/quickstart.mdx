@@ -1,0 +1,98 @@
+---
+title: Quickstart
+description: Build, save and run your first workflow in a few minutes.
+---
+
+This walks through the whole loop: a project, a workflow designed on the canvas, a real run on
+Temporal, and inspecting what the run did. It assumes Duraflow is running (see
+[Installation](/docs/getting-started/installation)) and you are logged in.
+
+<Steps>
+<Step>
+
+### Create a project
+
+Projects group related workflows. On the **Dashboard**, click **New project**, give it a name and
+click **Create project**, then open it.
+
+<Screenshot name="dashboard" alt="The dashboard listing projects, with a New project button" />
+
+</Step>
+<Step>
+
+### Create a workflow
+
+In the project, click **New workflow**, name it and click **Create workflow**. Duraflow opens the
+builder on an empty canvas with a **Start** and an **End** node already connected.
+
+<Screenshot name="project" alt="A project page listing its workflows with their last run status" />
+
+</Step>
+<Step>
+
+### Add steps
+
+Drag nodes from the palette on the left onto the canvas, or click one to add it. Steps run in the
+order their edges connect them: drag from the bottom handle of one node to the top of the next,
+or drag the end of an existing edge onto another node to rewire it. Click any node to configure it
+in the panel on the right.
+
+For a first workflow, add a **Set** node and give it a variable such as `greeting` with the
+value `hello`. Then add a **Wait** node set to 2 seconds.
+
+<Screenshot
+  name="builder-node-panel"
+  alt="The builder with a For node selected and its configuration panel open on the right"
+  caption="Click a node to configure it. Every panel is split into collapsible sections."
+/>
+
+</Step>
+<Step>
+
+### Check the DSL
+
+Click **DSL** in the toolbar. This is the Zigflow YAML the canvas represents, and the thing that
+is actually stored and run. You can edit it here and the canvas follows. See
+[The DSL](/docs/dsl).
+
+</Step>
+<Step>
+
+### Save
+
+Click **Save**. Saving stores the DSL and (re)starts a dedicated Zigflow worker for this workflow,
+which registers it with Temporal. The worker appears on the **Workers** page.
+
+</Step>
+<Step>
+
+### Run it
+
+Click **Run**. The run window opens over the builder and the run starts at once (if the workflow
+declares inputs, you are asked for them first). Each node is coloured as the run reaches it:
+blue while running, green when it succeeds, red when it fails, and dashed amber when the run
+skipped it.
+
+<Screenshot
+  name="run-window"
+  alt="The run window: a read-only copy of the canvas with each step coloured by its result"
+/>
+
+Click a node in the run window to see its input, its output and the variables it changed.
+
+</Step>
+<Step>
+
+### Find it again
+
+Every run is listed under **Executions** in the sidebar, and opens on its own page with the same
+view. See [Executions](/docs/guides/executions).
+
+</Step>
+</Steps>
+
+## Next steps
+
+- Learn the [builder](/docs/guides/builder) and how [expressions](/docs/guides/expressions) work.
+- Browse the [nodes](/docs/nodes) to see what each step can do.
+- Put the workflow on a [schedule](/docs/guides/schedules).

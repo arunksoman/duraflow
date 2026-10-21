@@ -1,0 +1,214 @@
+---
+title: DSL to nodes
+description: How a Zigflow document becomes the canvas, and how the canvas is written back.
+---
+
+The canvas never stores anything of its own. Every time a workflow is opened, or the DSL editor
+changes, the canvas is rebuilt from the YAML; every time the canvas changes, the YAML is written
+again from it. This page describes that conversion, which lives in the frontend's
+`src/lib/zigflow-engine/` module (plain TypeScript, no UI code).
+
+## The pipeline
+
+<Mermaid
+  chart={`flowchart TB
+  subgraph load["Loading: DSL to canvas"]
+    direction LR
+    Y["YAML"] -- "parse" --> V["validate<br/>(JSON Schema)"] --> A["AST"] -- "astToGraph" --> S["scopes"] -- "compose + layout" --> C["canvas"]
+  end
+  subgraph save["Saving: canvas to DSL"]
+    direction LR
+    C2["canvas"] -- "decompose" --> S2["scopes"] -- "graphToAst" --> A2["AST"] -- "serialize" --> Y2["YAML"]
+  end
+  load ~~~ save`}
+/>
+
+| Step | File | What it does |
+| --- | --- | --- |
+| Parse and validate | `deserialize.ts`, `validate.ts` | Parses the YAML, validates the whole document against the vendored Zigflow schema, and maps every error back to a line and column for the editor. Fills in schema defaults (`for.each: item`, `for.at: index`, `fork.compete: false`, `catch.as: error`). |
+| AST | `ast.ts` | TypeScript types mirroring the schema: the eleven task types plus the shared task properties. |
+| To scopes | `graph.ts` `astToGraph` | Turns each task list into a **scope**: a small graph of nodes chained by edges. |
+| To canvas | `inlineScopeView.ts`, `layout.ts` | Flattens every scope onto one canvas, nested bodies inline, and lays it out. |
+| Back to scopes | `inlineScopeView.ts` `decomposeDisplayedScope` | Splits the canvas back into scopes and drops everything that was only drawn for display. |
+| To AST | `graph.ts` `graphToAst` | Walks each scope's chain and builds the tasks. |
+| To YAML | `serialize.ts` | Writes the YAML, using block style for multi-line code and bodies. |
+
+## Scopes: one graph per task list
+
+Every task list in a document (the top-level `do`, a loop body, each fork branch, the try and
+catch blocks, a group's `do`) becomes one **scope**: a list of nodes and the edges that chain
+them in order. A node that owns a body refers to its scope by a key built from its parent's key
+and its own id:
+
+| Body                    | Scope key                                         |
+| ----------------------- | ------------------------------------------------- |
+| The main workflow       | `root`                                            |
+| A `for` (or group) body | `<parent>/<node id>/do`                            |
+| A `try` block           | `<parent>/<node id>/try`                           |
+| A `catch` block         | `<parent>/<node id>/catch`                         |
+| A `fork` branch         | `<parent>/<node id>/branch/<branch id>`            |
+| A named workflow        | `workflow/<start node id>`                         |
+
+Because a nested key starts with its ancestors' keys, finding everything inside a node (to
+delete it, or to draw its frame around nested frames) is a string prefix check.
+
+The main scope always holds a **Start** and an **End** node. They are not tasks: they are added on
+load and dropped on save.
+
+## Task by task
+
+| DSL task | Node | Node data read from the task |
+| --- | --- | --- |
+| `call: http` | REST | `method`, `endpoint`, `headers`, `query`, `body`, `output`, `redirect` |
+| `call: grpc` | gRPC | proto endpoint, service host/port/name, `method`, `arguments` |
+| `set` | Set | the key/value pairs |
+| `run: script / shell / container` | BYOC | the run type and its fields, `arguments`, `environment` |
+| `run: workflow` | Child Flow | `type`, `input` (unwrapped from `value`), `await` |
+| `switch` | Switch | each case's name, `when` and `then` |
+| `for` + `do` | For | `each`, `at`, `in`, `while`; the body becomes a child scope |
+| `fork` | Fork | `compete`, and one child scope per branch |
+| `try` + `catch` | Try | `catch.as`; the try and catch blocks become two child scopes |
+| `wait` | Wait | a duration (days to seconds) or `until` |
+| `listen` | Listen | the strategy (`one`/`any`/`all`) and each event's `id`, `type`, `data`, `acceptIf` |
+| `raise` | Raise | the error's `type`, `status`, `title`, `detail`, `instance` |
+| `do` (first in its list) | Group | the body becomes a child scope |
+| `do` (after another task) | a named workflow | drawn as its own Start-to-End flow |
+
+The shared task properties are read onto every node the same way: `if` into **Run only if**,
+`output.as` and `export.as` into **Data Flow**, `metadata` into **Activity Options** (with any
+other metadata kept as-is), and `input`/`output`/`export` schemas kept as-is.
+
+## The special cases
+
+### The Start node's variables are an `init` task
+
+There is no start task in Zigflow, so the Start node's **Init Variables** are written as a first
+task named `init` that only does `set:`. On load, a leading `init` task that is exactly that is
+lifted back onto the Start node instead of being drawn as a step. Named workflows' parameters work
+the same way, inside their own `do:`.
+
+### Order comes from the edges
+
+When writing YAML, each scope's tasks are ordered by following its edges from Start (or from the
+node with no incoming edge, in a nested body). A node that isn't connected is written after the
+connected ones.
+
+### Named workflows
+
+A `do:` task that comes **after** another task in its list is not a step. Zigflow registers it as
+a separate Temporal workflow named after its key. Duraflow draws it as its own flow, with its own
+Start and End, in a column to the right. When writing YAML, each named workflow is written after
+the steps of the list that declares it. See [Named workflows](/docs/dsl/named-workflows).
+
+### Switch cases
+
+A case's `then:` is either a flow directive (`continue`, `exit`, `end`) or the name of a named
+workflow to start. Names are resolved to nodes after the whole document is loaded (named
+workflows first), and written back from the node, so renaming a named workflow keeps every case
+that starts it. A name that matches nothing is kept as written.
+
+### Fork branches
+
+A branch that is a single task is written as that task; a branch with several tasks is written as
+a `do:` list:
+
+```yaml
+branches:
+  - email:          # one task: written bare
+      set:
+        channel: email
+  - sms:            # several tasks: a do list
+      do:
+        - render: { set: { body: Shipped } }
+        - send: { set: { channel: sms } }
+```
+
+When loading, only a pure `{ do: [...] }` is unwrapped into the branch's steps; a branch that is
+any other task (a `for` included, even though it also has a `do` key) is loaded as that one task.
+
+### What's drawn but not saved
+
+Some edges exist only on the canvas and are never written:
+
+- edges that lead into each nested body and out of it again;
+- an edge from every dead-end step to its workflow's End;
+- the labelled edges of switch cases (the cases themselves are saved on the switch).
+
+The dotted frames around nested bodies, with their start and end markers, are drawn from where
+the nodes are, and are not stored either.
+
+## A worked example
+
+This document:
+
+```yaml
+do:
+  - init:
+      set:
+        region: eu-west
+  - summarise:
+      set:
+        orderCount: ${ $input.orderIds | length }
+  - eachOrder:
+      for:
+        each: item
+        in: ${ $input.orderIds }
+      do:
+        - reserveStock:
+            set:
+              reserved: ${ $data.item }
+        - pause:
+            wait:
+              seconds: 1
+  - notify:
+      fork:
+        branches:
+          - email:
+              set:
+                channel: email
+          - sms:
+              set:
+                channel: sms
+  - charge:
+      try:
+        - capturePayment:
+            raise:
+              error:
+                type: https://serverlessworkflow.io/spec/1.0.0/errors/communication
+                status: 502
+      catch:
+        as: error
+        do:
+          - queuePayment:
+              set:
+                paymentQueued: true
+  - shipExpress:
+      if: ${ $input.priority == "express" }
+      set:
+        carrier: overnight
+```
+
+becomes these scopes:
+
+| Scope                              | Nodes                                                          |
+| ---------------------------------- | -------------------------------------------------------------- |
+| `root`                             | Start (holding `region`), summarise, eachOrder, notify, charge, shipExpress, End |
+| `root/<eachOrder>/do`              | reserveStock, pause                                            |
+| `root/<notify>/branch/<email>`     | email                                                          |
+| `root/<notify>/branch/<sms>`       | sms                                                            |
+| `root/<charge>/try`                | capturePayment                                                 |
+| `root/<charge>/catch`              | queuePayment                                                   |
+
+and is drawn like this:
+
+<Screenshot
+  name="builder-overview"
+  alt="The example workflow on the canvas, with the loop body, both fork branches and the try and catch blocks drawn inline"
+/>
+
+## Runs use the same mapping
+
+A run's events name the task and the scope it ran in (for example `for_0` for the first loop
+iteration, `fork_sms` for a branch, `workflow_<name>` for a named workflow). The frontend resolves
+those onto the same scopes, which is how a run's colours land on the right nodes. See
+[Run observability](/docs/architecture/observability).

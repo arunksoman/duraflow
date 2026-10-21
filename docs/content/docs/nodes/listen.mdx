@@ -1,0 +1,50 @@
+---
+title: Listen
+description: Wait for a Temporal signal, query or update (listen).
+---
+
+Pauses the run until something outside the workflow talks to it, through Temporal's message
+types:
+
+| Event type | What it is                                                                    |
+| ---------- | ----------------------------------------------------------------------------- |
+| `signal`   | A one-way message, for example an approval. The run resumes when it arrives.  |
+| `query`    | A read of the workflow's state. It answers without blocking the run.          |
+| `update`   | A message the workflow handles and answers.                                   |
+
+<Screenshot name="node-listen" alt="A Listen node waiting for either an approve or a reject signal" />
+
+## Settings
+
+| Field    | DSL                   | Notes                                                                 |
+| -------- | --------------------- | --------------------------------------------------------------------- |
+| Strategy | `listen.to.one / any / all` | `one`: a single event. `any`: whichever of the events arrives first. `all`: every event. |
+| Events   | `with.id`, `with.type` | The event's id (the signal, query or update name) and type.          |
+| Data     | `with.data`           | Optional. For a query, the value it returns.                          |
+| Accept if| `with.acceptIf`       | Optional condition on the event's payload.                            |
+
+Plus the [shared settings](/docs/nodes#shared-settings).
+
+## DSL
+
+```yaml
+- awaitApproval:
+    listen:
+      to:
+        any:
+          - with:
+              id: approve
+              type: signal
+          - with:
+              id: reject
+              type: signal
+```
+
+## Notes
+
+- With the `one` strategy only the first event in the list is used.
+- Zigflow's listen times out after 60 seconds unless you set `metadata.timeout` on the task (in
+  the DSL editor).
+- A received signal's payload is available as `$data.<task name>`.
+- Send a signal with the Temporal CLI, for example
+  `temporal workflow signal --workflow-id <run id> --name approve --input '{"by":"me"}'`.
