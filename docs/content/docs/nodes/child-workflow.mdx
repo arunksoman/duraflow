@@ -1,0 +1,47 @@
+---
+title: Child Flow
+description: Run another workflow as a Temporal child workflow (run workflow).
+---
+
+Starts another workflow, by its workflow type, as a Temporal **child workflow**, and by default
+waits for it to finish. The child gets its own run, linked from the parent's run.
+
+<Screenshot name="node-child" alt="A Child Flow node configured to start the send-invoice workflow" />
+
+## Settings
+
+| Field            | DSL                   | Notes                                                                                     |
+| ---------------- | --------------------- | ----------------------------------------------------------------------------------------- |
+| Workflow type    | `run.workflow.type`   | Pick from the other workflows in the same project, or keep a type typed into the DSL.     |
+| Input expression | `run.workflow.input`  | What to pass as the child's input. The default, `${ . }`, passes this step's input and is left out of the DSL. |
+| Await completion | `await`               | On by default. Off starts the child and carries on without waiting.                       |
+
+Plus the [shared settings](/docs/nodes#shared-settings).
+
+## DSL
+
+```yaml
+- sendInvoice:
+    run:
+      workflow:
+        type: send-invoice
+        input:
+          value: ${ $input.orderId }
+```
+
+The DSL only accepts an object for `run.workflow.input`, so a custom input expression is written
+under a `value` key.
+
+## In a run
+
+The step's inspector links to the **Child run**, which has its own run page with its own canvas.
+The child's page links back to its parent. Child runs aren't listed separately on the Executions
+page; they belong to their parent's run, and are deleted with it.
+
+## Notes
+
+- The child must be registered on the **same task queue** as the parent: Zigflow looks it up by
+  type on the parent's task queue. In Duraflow that means giving both workflows the same
+  `taskQueue` in **Variables**.
+- To run steps of the same document as a separate workflow, use a
+  [named workflow](/docs/dsl/named-workflows) and start it from a switch case instead.

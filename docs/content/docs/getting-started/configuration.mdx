@@ -1,0 +1,64 @@
+---
+title: Configuration
+description: Every backend and frontend setting, and how to override it.
+---
+
+## Backend
+
+The backend reads its settings in this order, each layer overriding the one before:
+
+1. Built-in defaults (`backend/internal/config/config.go`).
+2. An optional `config/config.yaml` next to the binary (or in `../config`).
+3. `DURAFLOW_*` environment variables.
+
+A YAML key becomes an environment variable by upper-casing it, replacing dots with underscores and
+adding the `DURAFLOW_` prefix: `temporal.address` becomes `DURAFLOW_TEMPORAL_ADDRESS`.
+
+| Key                              | Default                                  | What it does                                                                                     |
+| -------------------------------- | ---------------------------------------- | ------------------------------------------------------------------------------------------------ |
+| `server.host`                    | `0.0.0.0`                                | Interface to listen on.                                                                          |
+| `server.port`                    | `8000`                                   | Port to listen on.                                                                               |
+| `server.basePath`                | `/api`                                   | Prefix for every API route.                                                                      |
+| `server.allowedOrigins`          | `http://localhost:5173`                  | CORS origins.                                                                                    |
+| `database.driver`                | `sqlite`                                 | `sqlite` or `postgres`.                                                                          |
+| `database.dsn`                   | `./data/duraflow.db?…` (WAL mode)        | Database connection string.                                                                      |
+| `auth.jwtSecret`                 | `dev-only-change-me`                     | Secret used to sign session tokens. **Change it.**                                               |
+| `auth.tokenTTL`                  | `24h`                                    | How long a login lasts.                                                                          |
+| `seedAdmin.email`                | `admin@duraflow.local`                   | Admin created on first boot, when the users table is empty.                                      |
+| `seedAdmin.password`             | `changeme123`                            | That admin's password. **Change it.**                                                            |
+| `seedAdmin.name`                 | `Admin`                                  | That admin's display name.                                                                       |
+| `temporal.address`               | `localhost:7233`                         | Temporal frontend gRPC address.                                                                  |
+| `temporal.zigflowBinary`         | `zigflow`                                | The Zigflow CLI the backend starts workers with.                                                 |
+| `temporal.workflowsDir`          | `./data/workflows`                       | Where each workflow's DSL file (and its worker's CloudEvents config) is written.                 |
+| `telemetry.sinkURL`              | derived from the server address          | Where workers send run events. Set it when workers can't reach the backend at its own address.  |
+| `telemetry.token`                | generated on each boot                   | Shared secret workers send with each event.                                                      |
+| `telemetry.timeout`              | `1s`                                     | How long a worker waits for the backend to accept an event.                                      |
+| `telemetry.maxEventBytes`        | `65536`                                  | Larger event payloads are stored truncated (the UI says so).                                     |
+| `telemetry.retentionPerExecution`| `2000`                                   | Maximum number of events kept per run.                                                           |
+
+### Postgres
+
+SQLite is the default. To use Postgres, set:
+
+```sh
+DURAFLOW_DATABASE_DRIVER=postgres
+DURAFLOW_DATABASE_DSN="host=db user=duraflow password=… dbname=duraflow sslmode=disable"
+```
+
+The schema is created and migrated automatically on every start. There are no migration files to
+run.
+
+## Frontend
+
+| Variable       | Default                      | What it does                                                                                  |
+| -------------- | ---------------------------- | --------------------------------------------------------------------------------------------- |
+| `API_BASE_URL` | `http://localhost:8000/api`  | Where the frontend's server reaches the backend API. The browser never calls the API directly. |
+| `ORIGIN`       | (inferred)                   | The public URL of the frontend. Set it when serving the production build behind anything but `http://localhost`. |
+| `PORT`, `HOST` | `3000`, `0.0.0.0`            | Where the production Node server listens (`adapter-node`).                                     |
+
+## Docker Compose
+
+`docker-compose.yml` wires the three services together: it points the backend at the `temporal`
+service, points the frontend at the `backend` service, mounts `backend/data` for persistence and
+sets the development admin and JWT secret. Edit the `environment:` blocks to change any of the
+settings above, without rebuilding the images.

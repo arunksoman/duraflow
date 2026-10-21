@@ -1,0 +1,65 @@
+---
+title: Introduction
+description: Design durable workflows visually, then watch every run unfold on the same canvas.
+---
+
+Duraflow is an open-source visual builder and run console for durable workflows. You draw a
+workflow as a flowchart: call an API, set some variables, branch, loop, run steps in parallel,
+wait, retry. Duraflow turns it into a [Zigflow](https://github.com/zigflow/zigflow) workflow
+definition that runs on [Temporal](https://temporal.io/). When it runs, the canvas lights up with
+the path the run actually took: which steps succeeded, which failed, which branches were skipped,
+and the exact input and output of every step.
+
+<Screenshot
+  name="builder-overview"
+  alt="The Duraflow builder showing a workflow with a loop, a parallel fork and a try/catch, each body drawn inline in a dotted frame"
+  caption="The builder. Nested loop, fork and try/catch bodies are drawn inline, in their own frames."
+/>
+
+## Why Duraflow
+
+Temporal guarantees that a workflow finishes, even across crashes, deploys and flaky third-party
+APIs. Getting there usually means writing and deploying worker code for every workflow, and
+reconstructing what happened from event histories when a run misbehaves.
+
+Zigflow removes the first problem: workflows are declared in YAML, based on the
+[CNCF Serverless Workflow](https://serverlessworkflow.io/) specification, and run on Temporal
+without any worker code. Duraflow adds the rest:
+
+- **A visual editor that keeps the DSL honest.** The canvas is always derived from the YAML, and
+  the YAML is always one click away and editable in both directions. What you see is exactly what
+  runs.
+- **A run console that speaks your design.** Runs are shown on the same canvas you designed, not as
+  Temporal event histories.
+- **A platform around it.** Projects, a cross-project run list, schedules, and one supervised
+  Zigflow worker per workflow, started for you when you save.
+
+## What's in these docs
+
+<Cards>
+  <Card title="Getting started" href="/docs/getting-started/installation">
+    Run Duraflow with Docker and build your first workflow.
+  </Card>
+  <Card title="Using Duraflow" href="/docs/guides/builder">
+    The builder, expressions, runs, executions, schedules and workers.
+  </Card>
+  <Card title="Nodes" href="/docs/nodes">
+    Every node on the palette, with its settings and the DSL it produces.
+  </Card>
+  <Card title="The DSL" href="/docs/dsl">
+    The Zigflow document format and exactly how it maps to the canvas.
+  </Card>
+  <Card title="Under the hood" href="/docs/architecture">
+    How the frontend, backend, Zigflow workers and Temporal fit together.
+  </Card>
+  <Card title="API" href="/docs/architecture/api">
+    The REST API behind everything the UI does.
+  </Card>
+</Cards>
+
+## Project status
+
+Duraflow is young and moving quickly. The builder, real execution, schedules and run
+observability work end to end. Backfills are modelled in the API and UI but are not produced yet,
+and a few advanced task options can only be edited in the DSL view. Expect rough edges and
+breaking changes.

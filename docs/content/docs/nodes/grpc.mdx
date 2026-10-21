@@ -1,0 +1,38 @@
+---
+title: gRPC
+description: Call a gRPC method (call grpc).
+---
+
+Calls a unary gRPC method, using a `.proto` file to describe the service.
+
+<Screenshot name="node-grpc" alt="A gRPC node selected, with its service, method, proto and arguments" />
+
+## Settings
+
+| Section        | Field        | DSL                   | Notes                                                    |
+| -------------- | ------------ | --------------------- | -------------------------------------------------------- |
+| Configuration  | Service host | `with.service.host`   | For example `pricing.internal`.                          |
+| Configuration  | Port         | `with.service.port`   | Optional.                                                |
+| Configuration  | Service name | `with.service.name`   | The fully qualified service, for example `pricing.PricingService`. |
+| Configuration  | Method       | `with.method`         | For example `GetQuote`.                                  |
+| Proto Resource | Endpoint     | `with.proto.endpoint` | Where the worker can fetch the `.proto` file.            |
+| Arguments      | Arguments    | `with.arguments`      | A JSON object; values can be expressions.                |
+
+Plus the [shared settings](/docs/nodes#shared-settings).
+
+## DSL
+
+```yaml
+- getQuote:
+    call: grpc
+    with:
+      proto:
+        endpoint: https://example.com/protos/pricing.proto
+      service:
+        name: pricing.PricingService
+        host: pricing.internal
+        port: 50051
+      method: GetQuote
+      arguments:
+        sku: ${ $input.sku }
+```

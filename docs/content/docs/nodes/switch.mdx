@@ -1,0 +1,84 @@
+---
+title: Switch
+description: Choose what happens next by condition (switch).
+---
+
+A switch evaluates its **cases** from top to bottom and acts on the first one whose condition is
+true. A case with no condition always matches, so it works as "otherwise".
+
+<Screenshot name="node-switch" alt="A Switch node with two cases: one starting a named workflow, one ending the workflow" />
+
+## What a case can do
+
+Each case sends the run somewhere, and one switch can mix the kinds:
+
+| Case routing     | DSL (`then:`)            | What happens                                                                                           |
+| ---------------- | ------------------------ | ------------------------------------------------------------------------------------------------------ |
+| Start a workflow | the workflow's name      | Starts that [named workflow](/docs/dsl/named-workflows) as a Temporal child workflow, waits for it, then carries on with the step after the switch. |
+| `continue`       | `continue`               | Carries on with the step after the switch.                                                             |
+| `exit`           | `exit`                   | Leaves the current list of steps (for example a loop body) and carries on after it.                     |
+| `end`            | `end`                    | Ends the workflow.                                                                                     |
+
+A case never owns steps of its own. The steps a case runs are a named workflow, drawn as its own
+Start-to-End flow beside the main one. If no case matches, the run carries on after the switch.
+
+## Editing cases on the canvas
+
+- **Add a case** by dragging a connection out of the switch onto a named workflow's Start (a case
+  that starts it) or onto the End of the switch's own workflow (an `end` case). The case editor
+  opens so you can set its name and condition.
+- **Edit a case** by clicking its edge.
+- **Delete a case** by deleting its edge.
+
+The panel's **Cases** list does the same as a list: add, remove, reorder (order matters: first
+match wins), and set each case's name, condition and routing.
+
+<Screenshot
+  name="builder-named-workflows"
+  alt="A switch with case edges leading to the Starts of two named workflows"
+  caption="Each case edge is labelled with the case's name."
+/>
+
+## DSL
+
+```yaml
+do:
+  - classify:
+      switch:
+        - electronic:
+            when: ${ $input.orderType == "electronic" }
+            then: processElectronicOrder
+        - physical:
+            when: ${ $input.orderType == "physical" }
+            then: processPhysicalOrder
+        - otherwise:
+            then: end
+  - confirm:
+      set:
+        confirmed: true
+  # Named workflows: a `do:` after another task is registered as a workflow of its own.
+  - processElectronicOrder:
+      do:
+        - sendLicenceKey:
+            set:
+              licenceSent: true
+  - processPhysicalOrder:
+      do:
+        - scheduleShipping:
+            wait:
+              seconds: 1
+```
+
+## In a run
+
+A case edge is highlighted when the workflow it starts ran, and that workflow's steps are
+coloured like any others. Workflows the run didn't start show as skipped.
+
+<Screenshot name="execution-switch" alt="A run where the electronic case started its workflow and the physical one was skipped" />
+
+## Notes
+
+- For a single optional step, the step's own [Run only if](/docs/nodes#run-only-if) condition is
+  simpler than a switch.
+- A `then:` that names an ordinary sibling task (rather than a named workflow) can still be loaded
+  from hand-written DSL and is drawn, but Zigflow can't start it; the case editor flags it.

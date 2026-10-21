@@ -1,0 +1,49 @@
+---
+title: Architecture overview
+description: How the frontend, backend, Zigflow workers and Temporal fit together.
+---
+
+Duraflow is three services plus one process per workflow:
+
+<Mermaid
+  chart={`flowchart LR
+  B["Browser"] <--> UI["Frontend<br/>SvelteKit"]
+  UI -- "REST (server side)" --> API["Backend<br/>Go API"]
+  API -- "SSE run stream" --> UI
+  API -- "starts and supervises" --> W["zigflow run<br/>one worker per workflow"]
+  API -- "start / describe / terminate runs" --> T[("Temporal")]
+  T <-- "poll task queue" --> W
+  W -- "task events (CloudEvents)" --> API
+  API --- DB[("SQLite or Postgres")]`}
+/>
+
+| Part | Built with | Responsible for |
+| --- | --- | --- |
+| [Frontend](/docs/architecture/frontend) | SvelteKit (Svelte 5), Svelte Flow, CodeMirror, Tailwind CSS with daisyUI | The builder and its DSL engine, the run views, every page. Talks to the backend only from its server side. |
+| [Backend](/docs/architecture/backend) | Go, Huma (OpenAPI 3.1) on Echo, GORM | Auth, projects, workflows, runs, workers; starting runs on Temporal; supervising workers; collecting run events. |
+| [Workers](/docs/architecture/execution) | The Zigflow CLI (`zigflow run`) | Executing a workflow's DSL as a real Temporal worker. |
+| Temporal | Temporal server | Durability: history, timers, retries, child workflows, schedules. |
+
+## The life of a workflow
+
+1. **Design.** The frontend's DSL engine converts between the canvas and the Zigflow YAML,
+   validating against the Zigflow JSON Schema. See [DSL to nodes](/docs/dsl/dsl-to-nodes).
+2. **Save.** The backend stores the DSL and (re)starts a dedicated `zigflow run` worker that
+   registers the workflow with Temporal. Zigflow also publishes the workflow's schedule, if it has
+   one. See [Execution](/docs/architecture/execution).
+3. **Run.** Starting a run is a real `ExecuteWorkflow` call to Temporal. Temporal hands the work to
+   the worker, and provides durability, retries and timers.
+4. **Observe.** The worker reports every task's start, completion and failure, with inputs and
+   outputs, as CloudEvents to the backend. The backend works out which run, loop iteration,
+   branch or child workflow each event belongs to, stores it, and streams it to the browser, which
+   replays it onto the canvas. See [Run observability](/docs/architecture/observability).
+
+## Design principles
+
+- **The DSL is the source of truth.** The canvas is derived from it; nothing about a workflow is
+  stored anywhere else.
+- **Nothing is simulated.** Runs execute on Temporal through the same worker production would
+  use, and the UI shows what the worker reported.
+- **Runs are shown in the terms they were designed in,** not as Temporal event histories.
+- **Everything the UI does is an API call,** documented by a generated OpenAPI spec. See
+  [API](/docs/architecture/api).

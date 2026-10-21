@@ -1,0 +1,51 @@
+---
+title: Try
+description: Handle errors from a block of steps (try / catch).
+---
+
+Runs the steps in its **try** block; if any of them fails, it runs the **catch** block instead of
+failing the workflow. Both blocks are drawn inline, in frames titled `<name> try` and
+`<name> catch`. The catch block's edges leave from the end of the try block, since it only runs
+when something in there failed.
+
+<Screenshot name="node-try" alt="A Try node with its try block and catch block drawn inline" />
+
+## Settings
+
+| Field          | DSL        | Notes                                                    |
+| -------------- | ---------- | -------------------------------------------------------- |
+| catch error as | `catch.as` | The name the caught error is stored under. Default `error`. |
+
+Plus the [shared settings](/docs/nodes#shared-settings).
+
+## DSL
+
+```yaml
+- charge:
+    try:
+      - capturePayment:
+          call: http
+          with:
+            method: post
+            endpoint: https://payments.example.com/capture
+    catch:
+      as: error
+      do:
+        - queuePayment:
+            set:
+              paymentQueued: true
+```
+
+## In a run
+
+The failed step shows red with its error in the inspector, the catch steps run, and the workflow
+carries on after the Try node.
+
+<Screenshot name="execution-detail" alt="A run where a step in the try block failed and the catch block ran" />
+
+## Notes
+
+- The catch block catches every error; there is no filtering by type. Inspect the error inside the
+  catch block if you need to handle types differently.
+- A step's [retry policy](/docs/nodes#activity-options) is used up before the catch block runs.
+- Zigflow runs the try block as a Temporal child workflow.

@@ -1,0 +1,63 @@
+---
+title: Schedules
+description: Run a workflow automatically on a fixed interval, a cron expression, or both.
+---
+
+A workflow's recurring trigger is part of the workflow itself: it is written into its DSL and
+edited in the builder, next to **Run**. There is no separate schedules page. When a schedule is
+on, the **Schedule** button shows a green dot.
+
+<Screenshot
+  name="builder-schedule"
+  alt="The Schedule dialog with an interval and a cron editor, showing a plain-English summary and the next three run times"
+/>
+
+## Setting one up
+
+Open **Schedule** in the builder toolbar and turn on **Run on a schedule**. Then choose either or
+both of:
+
+- **Fixed interval** (`schedule.every`): repeat every so many days, hours, minutes and seconds.
+- **Calendar times** (`schedule.cron`): a 5-field cron expression. The visual editor covers the
+  common shapes (every N minutes, hourly, every N hours, daily, on chosen weekdays, monthly on a
+  day). Anything else, such as ranges or a restricted month, falls back to editing the five fields
+  directly. Typing an expression updates the controls and the other way round.
+
+The dialog says in plain English when the workflow will run and lists the next three times.
+**Cron schedules are evaluated in UTC**, by Temporal, and the preview is shown in UTC too.
+
+When both are set, Temporal fires on either.
+
+Further options:
+
+| Option              | DSL                                  | Default                                  |
+| ------------------- | ------------------------------------ | ---------------------------------------- |
+| Workflow to trigger | `document.metadata.scheduleWorkflowName` | This workflow's `workflowType`.      |
+| Schedule ID         | `document.metadata.scheduleId`        | `zigflow_<workflowType>`.               |
+| Input               | `document.metadata.scheduleInput`     | None. Prefilled from the input schema.  |
+
+**Save** the workflow to publish the schedule. Nothing changes in Temporal until you do.
+
+## How it works
+
+Saving restarts the workflow's Zigflow worker. On every start, `zigflow run` deletes the Temporal
+schedule with this schedule's id and creates it again if the DSL still has a `schedule:` block.
+So saving with a schedule creates or updates it, and saving without one removes it.
+
+Duraflow handles the two cases Zigflow can't see:
+
+- **Deleting the workflow** deletes its schedule. Otherwise it would keep firing at a task queue
+  nothing polls any more.
+- **Changing the schedule ID** deletes the schedule under the old id.
+
+Runs that Temporal starts from a schedule appear under [Executions](/docs/guides/executions) with
+the type `scheduled`.
+
+## Turning it off
+
+Turning **Run on a schedule** off removes the `schedule:` block from the DSL, which is what makes
+Zigflow remove the Temporal schedule on the next save. So that you don't lose your settings, the
+builder keeps them under `document.metadata.duraflow.disabledSchedule`, and turning the schedule
+back on restores them.
+
+See [Schedules in the DSL](/docs/dsl/schedules) for the exact YAML.

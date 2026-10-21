@@ -1,0 +1,64 @@
+---
+title: BYOC (run)
+description: Bring your own code - run a script, a shell command or a container (run).
+---
+
+**BYOC** ("bring your own code") runs code that isn't a built-in step: a JavaScript or Python
+script, a shell command, or a container. Its output is what the code prints.
+
+<Screenshot name="node-run" alt="A BYOC node selected, running an inline Python script" />
+
+## Settings
+
+Pick the **Type** first; the fields below it change with it.
+
+### Script
+
+| Field                    | DSL                           | Notes                                                    |
+| ------------------------ | ----------------------------- | -------------------------------------------------------- |
+| Language                 | `run.script.language`         | `js` or `python`.                                        |
+| External source endpoint | `run.script.source.endpoint`  | Optional. Fetch the script from an `http`, `https` or `file` URL instead of writing it inline. |
+| Inline code              | `run.script.code`             | Edited in a code editor with syntax highlighting.        |
+
+### Shell command
+
+| Field   | DSL                 | Notes                       |
+| ------- | ------------------- | --------------------------- |
+| Command | `run.shell.command` | Edited in a shell editor.   |
+
+### Container
+
+| Field             | DSL                               | Notes                                          |
+| ----------------- | --------------------------------- | ---------------------------------------------- |
+| Image             | `run.container.image`             | For example `alpine:latest`.                   |
+| Pull policy       | `run.container.pullPolicy`        | `ifNotPresent`, `always` or `never`.           |
+| Container name    | `run.container.name`              | Optional.                                      |
+| Command           | `run.container.command`           | Optional.                                      |
+| Volumes           | `run.container.volumes`           | Optional JSON object.                          |
+| Lifetime cleanup  | `run.container.lifetime.cleanup`  | `always` or `never`.                           |
+
+### Arguments & Environment
+
+For all three types: **Arguments** (one per line, `arguments`) and **Environment** variables
+(`environment`), whose values can be expressions.
+
+Plus the [shared settings](/docs/nodes#shared-settings).
+
+## DSL
+
+```yaml
+- scoreRisk:
+    run:
+      script:
+        language: python
+        code: |
+          import json
+          print(json.dumps({"score": 0.12}))
+```
+
+## Notes
+
+- The code runs on the **worker's host**, which is the backend's host in Duraflow. Scripts need
+  Node.js or Python installed there; containers need Docker. Zigflow's Docker image includes
+  Node.js and Python.
+- A fourth kind of `run`, `run: workflow`, is its own node: [Child Flow](/docs/nodes/child-workflow).

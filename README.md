@@ -62,6 +62,10 @@ The backend exposes a full REST API with generated OpenAPI docs, so everything t
 
 Duraflow is young and moving quickly. The builder, real execution and run observability work end to end today. Schedules and backfills are modelled in the API and UI but don't trigger runs yet, and a few advanced step options can only be edited in the DSL view for now. Expect rough edges and breaking changes. Feedback and contributions are very welcome.
 
+## Documentation
+
+The full documentation, covering how Duraflow works under the hood, every node, and the DSL and how it maps to the canvas, is at **https://arunksoman.github.io/duraflow-ui/**. Its source is in [`docs/`](docs/).
+
 ## Try it
 
 With Docker installed, `docker compose up --build` starts Temporal, the backend and the frontend; open `http://localhost:5173`. See [CONTRIBUTING.md](CONTRIBUTING.md) for the full development setup.

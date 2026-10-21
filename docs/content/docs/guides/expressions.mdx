@@ -1,0 +1,67 @@
+---
+title: Expressions and data
+description: Runtime expressions, the variables a step can read, and the editors that build them.
+---
+
+Most values in a workflow can be computed at run time. Zigflow evaluates anything written as
+`${ … }` as a [jq](https://jqlang.org/manual/) expression (the gojq dialect) when the step runs.
+Anything else is a literal.
+
+```yaml
+message: hello                                   # the literal string "hello"
+userId: ${ $input.userId }                       # a value from the workflow's input
+endpoint: ${ "https://api.example.com/users/" + ($input.userId | tostring) }
+```
+
+## Variables
+
+| Variable   | What it holds                                                                                                                                       |
+| ---------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `$input`   | The input the run was started with. It never changes during the run.                                                                                |
+| `$data`    | The run's accumulating store. A **Set** step merges its keys into it; a step that calls something (REST, gRPC, BYOC, a child workflow) stores its result under its own task name. A loop's current item and index live here too (`$data.item`, `$data.index`). |
+| `$context` | Whatever steps have exported with **Export as**. Each export replaces it, so merge into it with `${ $context + { key: . } }`.                       |
+| `$output`  | The output of the previous step.                                                                                                                    |
+| `$env`     | Environment variables of the worker that start with `ZIGGY_`, without that prefix: `ZIGGY_API_TOKEN` is `$env.API_TOKEN`.                           |
+| `.`        | The current step's input.                                                                                                                           |
+
+A few built-in values are available: `uuid`, `timestamp` and `timestamp_iso8601`. They differ on
+every evaluation, and Temporal re-evaluates a workflow when it replays it, so use them **only in
+a Set step**. Store the value there and read it back from `$data` everywhere else.
+
+## The expression editor
+
+Fields that take a value use a chip-based editor, so you rarely need to write jq by hand.
+
+- Start typing, or type `$`, to see what is available at this step: the workflow's `$input`
+  fields (from the Start node's schema), the `$env` names from **Variables**, `$output`, `$context`
+  when something upstream exports, and the `$data` keys written by Start and by every Set step
+  before this one.
+- Picking one inserts a **variable chip**. Type `|` while a chip is selected to add a transform
+  such as `tostring`, `length`, `ascii_downcase`, `@base64` or `first`.
+- Plain text between chips becomes literal string parts, so `Order ` + `$input.orderId` builds
+  `${ "Order " + $input.orderId }`.
+- Anything the chips can't represent stays as a raw expression chip, and you can always switch to
+  editing the raw `${ … }` text.
+
+## The condition builder
+
+Conditions (a step's **Run only if**, a switch case, a loop's **while**, a listen filter) use a
+condition builder on top of the expression editor:
+
+- Each clause is `left operator right`, with `==`, `!=`, `>`, `>=`, `<`, `<=`, or `| not`.
+- The right-hand side is typed: a string, a number, a boolean, `null`, or another variable.
+- Clauses are joined with `and` or `or` (click the join to toggle it).
+- The `</>` button switches to the raw jq text, for anything more complex.
+
+It produces a single expression such as
+`${ $input.priority == "express" and $data.orderCount > 1 }`.
+
+## Shaping data between steps
+
+Every task node has a **Data Flow** section with two expressions:
+
+- **Output as** (`output.as`) reshapes what the step passes on as its output.
+- **Export as** (`export.as`) writes into `$context`. Use `${ $context + { name: . } }` to add to it
+  instead of replacing it.
+
+Both accept an expression, or a JSON object whose values are expressions.

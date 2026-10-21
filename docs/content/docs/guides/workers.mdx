@@ -1,0 +1,56 @@
+---
+title: Workers
+description: The Zigflow worker process behind each workflow, and the Workers page.
+---
+
+A Temporal workflow only runs if a **worker** is polling its task queue. With Zigflow you don't
+write worker code: the `zigflow run` command reads a workflow's DSL and becomes that worker.
+Duraflow starts and supervises one of these processes for every saved workflow, so saving is all
+it takes to make a workflow runnable.
+
+## The Workers page
+
+**Workers** in the sidebar lists the worker registered for each workflow.
+
+<Screenshot name="workers" alt="The Workers page listing each workflow's worker, task queue, status and last heartbeat" />
+
+| Column         | Meaning                                                                       |
+| -------------- | ----------------------------------------------------------------------------- |
+| Identity       | The workflow the worker runs.                                                 |
+| Task queue     | The `taskQueue` from the workflow's DSL header.                               |
+| Status         | `online` once the backend has started the worker; `offline` once it stopped it. |
+| Last heartbeat | When the backend last (re)started or stopped it.                              |
+
+The page records what the backend did to each worker. It is not a live health check of the
+process. If a run fails to start with a "no worker" error, check the backend's logs, where every
+worker's output is printed with a `[worker:<name>]` prefix.
+
+## Lifecycle
+
+| Event                         | What happens to the worker                                                    |
+| ----------------------------- | ----------------------------------------------------------------------------- |
+| A workflow is saved with steps | The backend writes the DSL to `<workflowsDir>/<id>.yaml` and (re)starts `zigflow run` on it. `zigflow run` has no hot reload, so every save restarts it. |
+| The backend starts            | It starts a worker for every stored workflow with a DSL.                      |
+| A workflow is deleted         | Its worker is stopped and its files and Workers row removed.                  |
+
+The backend waits for a freshly started worker to report ready (up to 15 seconds) before the save
+returns, so clicking **Run** right after a change doesn't race the worker's registration with
+Temporal.
+
+Each worker is started like this:
+
+```sh
+zigflow run -f data/workflows/<id>.yaml \
+  --temporal-address <temporal.address> \
+  --metrics-listen-address 127.0.0.1:<free port> \
+  --health-listen-address 127.0.0.1:<free port> \
+  --cloudevents-config data/workflows/<id>.cloudevents.yaml
+```
+
+Every worker gets its own metrics and health ports, so any number of them can run on one host.
+The CloudEvents config points the worker at the backend, which is how run events reach the UI; see
+[Run observability](/docs/architecture/observability).
+
+Because the workers are child processes of the backend, the backend's host needs the `zigflow`
+binary (the Docker image includes it), and anything a workflow's steps need at run time, such as
+Python or Node.js for a BYOC script, or Docker for a container step.

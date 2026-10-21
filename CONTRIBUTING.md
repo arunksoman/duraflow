@@ -15,6 +15,7 @@ Thanks for your interest in Duraflow! Bug reports, feature ideas, docs fixes and
 frontend/   SvelteKit app: builder canvas, Zigflow DSL engine, run console
 backend/    Go API: projects, workflows, runs, worker management, run telemetry
 docker/     Supporting images (currently the Temporal dev server)
+docs/       The documentation site (Fumadocs), published to GitHub Pages
 example/    Example workflow definitions
 ```
 

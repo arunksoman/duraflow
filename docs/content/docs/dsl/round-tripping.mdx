@@ -1,0 +1,52 @@
+---
+title: Round-tripping
+description: What survives loading a document onto the canvas and saving it again.
+---
+
+Because the canvas is rebuilt from the DSL and written back to it, a document goes through a
+round trip every time you open and save a workflow. Duraflow is built so that a hand-written
+document comes back the way it was written, as long as it's valid.
+
+## Preserved
+
+- **Task names**, exactly, when they are identifier-shaped (`processElectronicOrder`, `send_email`).
+- **Task order**, and the nesting of every body.
+- **Every task type and its fields**, including the ones the panels don't have a field for:
+  `metadata` other than activity options, and `input`/`output`/`export` schemas are carried along
+  unchanged.
+- `output.as` / `export.as` written as objects (they're shown and saved as JSON text).
+- The **document header**: `title`, `summary`, `tags` and `metadata` (including workflow-wide
+  `activityOptions` and `canMaxHistoryLength`).
+- **Named workflows**, in the list they were declared in.
+- **Switch cases**, in order, including a `then:` that names something the canvas can't resolve.
+- **Fork branches** written as a single task or as a `do:` list.
+- The **schedule**, and the Start node's `init` variables.
+
+## Normalised
+
+Some things are written in a canonical form, which means the same thing to Zigflow:
+
+- Defaults are left out: a REST call's `output: content` and `redirect: false`, a fork's
+  `compete: false`, zero-valued wait fields.
+- Schema defaults the parser fills in on load are written explicitly where the builder needs them,
+  such as `for.each: item` and `catch.as: error`.
+- A child workflow's custom input is written under `input.value`.
+- Comments and YAML formatting (quoting, key order within a task) are not preserved.
+- Named workflows are written after the steps of their list, wherever they were in it.
+
+## Not representable
+
+A few things the DSL allows can't be drawn, and the builder avoids producing them:
+
+- A `do:` that comes after another task is always a named workflow, never an in-place group, so a
+  group can only be the first task of its list.
+- A switch case's `then:` naming an ordinary sibling task (rather than a named workflow) is kept
+  and drawn, but Zigflow can't run it.
+- `call: activity` is not supported: there is no node for it, and the canvas would treat it as a
+  REST call. Don't load documents that use it into the builder.
+
+## Checking it yourself
+
+Open the DSL editor, paste your document, and look at the canvas; then **Reset** reloads the text
+from the canvas, which is exactly what will be saved. The round-trip behaviour is covered by the
+engine's tests, including a load-and-save of `example/switch.yaml` from the repository.

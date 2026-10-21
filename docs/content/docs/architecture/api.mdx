@@ -1,0 +1,80 @@
+---
+title: REST API
+description: The backend API that everything in the UI is built on.
+---
+
+Everything the UI does goes through the backend's REST API, so anything can be automated. The
+API is described by an OpenAPI 3.1 spec generated from the code:
+
+| URL                              | What                                     |
+| -------------------------------- | ---------------------------------------- |
+| `http://localhost:8000/docs`     | Interactive reference (Scalar).          |
+| `http://localhost:8000/openapi.json` | The spec, for generating clients.    |
+
+All routes are under `/api`. JSON fields are camelCase.
+
+## Authentication
+
+```sh
+TOKEN=$(curl -s -X POST http://localhost:8000/api/auth/login \
+  -H 'content-type: application/json' \
+  -d '{"email":"admin@duraflow.local","password":"changeme123"}' | jq -r .token)
+
+curl -s http://localhost:8000/api/projects -H "Authorization: Bearer $TOKEN"
+```
+
+Every operation except login needs the `Authorization: Bearer <token>` header. Tokens last
+`auth.tokenTTL` (24 hours by default).
+
+## Operations
+
+| Method | Path | What it does |
+| --- | --- | --- |
+| `POST` | `/auth/login` | Log in with email and password. |
+| `GET` | `/auth/me` | The authenticated user. |
+| `GET` | `/projects` | List projects. |
+| `POST` | `/projects` | Create a project. |
+| `GET` | `/projects/{id}` | Get a project. |
+| `PATCH` | `/projects/{id}` | Update a project. |
+| `DELETE` | `/projects/{id}` | Delete a project with its workflows, their runs, schedules and workers. |
+| `GET` | `/projects/{projectId}/workflows` | List a project's workflows. |
+| `POST` | `/projects/{projectId}/workflows` | Create a workflow (optionally with its DSL). |
+| `GET` | `/workflows/{id}` | Get a workflow. |
+| `PATCH` | `/workflows/{id}` | Update a workflow. Changing the DSL bumps its version and restarts its worker. |
+| `DELETE` | `/workflows/{id}` | Delete a workflow with its runs, schedule and worker. |
+| `GET` | `/workflows/{id}/executions` | List a workflow's runs. |
+| `POST` | `/workflows/{id}/executions` | Start a run: `{ "input": {...}, "trigger": "manual" }`. |
+| `GET` | `/executions` | List runs across projects. Filters: `workflowId`, `projectId`, `trigger`, `status`, `from`, `to`; paging: `limit`, `offset`. Returns `{ items, total }`. |
+| `GET` | `/executions/{id}` | Get a run. |
+| `PATCH` | `/executions/{id}` | Update a run's status or output. |
+| `DELETE` | `/executions/{id}` | Delete a run and everything under it. `?force=true` terminates it first if it is still running. |
+| `POST` | `/executions/delete` | Delete several runs, all or nothing. |
+| `GET` | `/executions/{id}/events` | A run's recorded task events. |
+| `GET` | `/executions/{id}/watch` | Server-sent event stream of a run's events, from `?afterSeq=`. |
+| `GET` | `/executions/{id}/children` | The child-workflow runs a run started. |
+| `GET` | `/workers` | List workers. |
+| `POST` | `/workers` | Register a worker or record its heartbeat. |
+| `POST` | `/internal/zigflow/events` | Where workers post run events. Authenticated by the telemetry token, not a login. |
+
+## Example: deploy and run a workflow
+
+```sh
+API=http://localhost:8000/api
+AUTH="Authorization: Bearer $TOKEN"
+
+PROJECT=$(curl -s -X POST $API/projects -H "$AUTH" -H 'content-type: application/json' \
+  -d '{"name":"Automation"}' | jq -r .id)
+
+# Creating a workflow with a DSL starts its worker.
+WORKFLOW=$(curl -s -X POST $API/projects/$PROJECT/workflows -H "$AUTH" \
+  -H 'content-type: application/json' \
+  --data-binary @- <<'EOF' | jq -r .id
+{"name":"Greeter","dsl":"document:\n  dsl: 1.0.0\n  taskQueue: greeter\n  workflowType: greeter\n  version: 0.1.0\ndo:\n  - greet:\n      set:\n        message: hello\n"}
+EOF
+)
+
+RUN=$(curl -s -X POST $API/workflows/$WORKFLOW/executions -H "$AUTH" \
+  -H 'content-type: application/json' -d '{"input":{}}' | jq -r .id)
+
+curl -s $API/executions/$RUN -H "$AUTH" | jq '{status, output}'
+```

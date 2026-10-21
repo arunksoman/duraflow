@@ -1,0 +1,95 @@
+---
+title: Run observability
+description: How every task's start, finish and failure reaches the canvas.
+---
+
+Temporal's history alone can't describe a Zigflow run: `set` and `switch` leave no events to
+correlate, and loop iterations, fork branches and try blocks run as separate child workflows
+whose activities never appear in the parent's history. So Duraflow asks the worker itself.
+
+<Mermaid
+  chart={`sequenceDiagram
+  participant W as zigflow worker
+  participant I as Backend: ingest
+  participant R as Backend: resolver
+  participant DB as Database
+  participant S as Backend: watch stream
+  participant B as Browser
+  W->>I: POST CloudEvent (task.started, ...)
+  I->>DB: insert event (deduplicated)
+  I-->>W: 2xx
+  R->>DB: read unresolved events
+  R->>R: walk Temporal parent chain to the run
+  R->>DB: set execution + scope path
+  R->>S: publish
+  S-->>B: server-sent event
+  B->>B: reduce onto the canvas`}
+/>
+
+## 1. The worker reports every task
+
+Each worker is started with a CloudEvents config pointing at the backend. Zigflow then posts one
+CloudEvent per lifecycle moment of every task:
+
+| Event | Carries |
+| --- | --- |
+| `workflow.started` / `workflow.completed` | the workflow's input / output |
+| `task.started` | the attempt number, the task's input and the workflow state |
+| `task.completed` | input, output and state |
+| `task.faulted` | the error |
+| `task.retried`, `task.cancelled` | |
+| `iteration.completed` | |
+
+## 2. Ingest stores it, fast
+
+`POST /api/internal/zigflow/events` is authenticated with a token the backend generates on boot
+and writes into each worker's config. Zigflow waits for the response while the workflow runs, so
+this handler does one indexed insert and nothing else. Zigflow re-sends events when Temporal
+replays a workflow; a content hash collapses those duplicates. Payloads larger than
+`telemetry.maxEventBytes` are stored truncated, and only the newest `telemetry.retentionPerExecution`
+events are kept per run.
+
+## 3. The resolver places it
+
+An event names the Temporal workflow execution it came from, which for a loop iteration is
+something like `<parent>_for_0`. On its own goroutine, the resolver walks Temporal's parent chain
+from that execution up to a run Duraflow knows (caching each answer), and records:
+
+- **which run it belongs to.** A `run: workflow` child gets its own Execution row, linked to its
+  parent and the task that started it. A scheduled run gets its Execution row now (see
+  [Execution](/docs/architecture/execution#schedules));
+- **its scope path**: where on the parent's canvas it happened, for example `for_0`, `try`,
+  `fork_sms`, `for_0_try`, or `workflow_<name>` for a named workflow started by a switch.
+
+## 4. The stream delivers it
+
+`GET /api/executions/{id}/watch` is a server-sent event stream: it replays the stored events after
+`?afterSeq=` and then streams new ones live. A reconnect, or a page opened on a run that finished
+long ago, sees the identical timeline. `GET /api/executions/{id}/events` returns the same data
+without streaming.
+
+## 5. The browser replays it
+
+On the frontend:
+
+| File | Responsibility |
+| --- | --- |
+| `runtime/runSession.svelte.ts` | Owns the stream, reconnects from the last sequence number, keeps child runs current, and re-reads the whole log when the run ends. |
+| `zigflow-engine/runIndex.ts` | Maps each (scope, task name) to a canvas node. Task names are only unique within a scope, so this isn't a flat map. |
+| `zigflow-engine/runScope.ts` | Turns a scope path such as `for_0_try` into a canvas scope. |
+| `zigflow-engine/runState.ts` | A pure reducer from events to per-node state and history. |
+
+The reducer keeps every execution of a node (each loop iteration, retry or revisit) as its own
+attempt, with its input, output and the workflow state before and after. When the run finishes,
+every node that is still pending becomes **skipped**: that is what makes the path not taken
+visible. Events can arrive out of order (the resolver may place a task's start after its finish);
+the session then replays the whole log in order.
+
+The run index is built from the exact DSL that was submitted for the run, and frozen for its
+duration, so editing the design during a run can't misplace its events.
+
+## Why not both sources?
+
+The backend keeps no second, Temporal-history-based picture of a run. Two sources that disagree
+would be worse than one with known gaps. Temporal is still the source of a run's final status,
+output and error.

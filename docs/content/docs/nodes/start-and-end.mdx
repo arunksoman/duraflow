@@ -1,0 +1,80 @@
+---
+title: Start and End
+description: Where every workflow begins and ends, its inputs and its initial variables.
+---
+
+Every workflow on the canvas runs from a **Start** to an **End**. The main workflow's Start and
+End are always there and can't be deleted.
+
+<Screenshot
+  name="node-start"
+  alt="The Start node selected, with its $input Schema and Init Variables sections open"
+/>
+
+## Start
+
+The main workflow's Start has two sections.
+
+### $input Schema
+
+The inputs a caller must (or may) pass when starting the workflow. Each field has a name, a type
+(`string`, `number`, `boolean`, `object` or `array`, with an item type for arrays), a required
+flag and an optional example value.
+
+The schema drives the [run inputs form](/docs/guides/running-workflows#starting-a-run), the
+expression editor's `$input` suggestions, and the input prefilled for a
+[schedule](/docs/guides/schedules). In the DSL it is the document's top-level `input.schema`:
+
+```yaml
+input:
+  schema:
+    format: json
+    document:
+      type: object
+      required:
+        - customerId
+      properties:
+        customerId:
+          type: string
+        plan:
+          type: string
+```
+
+Example values are a hint for the form only and are not saved.
+
+### Init Variables
+
+Values to put in `$data` before the first step runs. There is no "start" task in Zigflow, so they
+are saved as a leading `set` task named `init`. When a document is loaded, a first task named
+`init` that does nothing but `set:` is lifted back onto the Start node.
+
+```yaml
+do:
+  - init:
+      set:
+        attempts: 0
+        region: eu-west
+  - welcome:
+      set:
+        message: ${ "Welcome " + $input.customerId }
+```
+
+## A Start from the palette: named workflows
+
+Dropping a **Start** from the palette declares a second workflow in the same document, a
+**named workflow**. You're asked for its name, which is also the Temporal workflow type it
+registers as, and its **Parameters** (its Init Variables). It is drawn in its own column, with
+its own End, exactly like the main workflow.
+
+A [Switch](/docs/nodes/switch) case starts a named workflow by drawing an edge to its Start.
+Deleting a named workflow's Start deletes that whole workflow.
+
+See [Named workflows](/docs/dsl/named-workflows) for how they are written in the DSL and how
+Zigflow runs them.
+
+## End
+
+End has no settings and is not a task: reaching it ends that workflow. Every step with nothing
+after it is drawn with an edge into its own workflow's End, so it's always clear where each path
+finishes. A switch case can also end the workflow straight away; see
+[Switch](/docs/nodes/switch).

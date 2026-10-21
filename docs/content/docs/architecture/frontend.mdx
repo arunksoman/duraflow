@@ -1,0 +1,86 @@
+---
+title: Frontend
+description: The SvelteKit app, its DSL engine, the builder and the run views.
+---
+
+The frontend is a SvelteKit app (Svelte 5, TypeScript) in `frontend/`. It has no database: every
+piece of data comes from the backend API.
+
+## Structure
+
+```
+src/
+  routes/
+    login/                       login page
+    (app)/                       everything behind login
+      dashboard/                 projects
+      projects/[projectId]/      a project's workflows
+        workflows/[workflowId]/builder/   the builder (full screen)
+      executions/                the run list, and [id]/ for one run
+      workers/                   the Workers page
+  lib/
+    server/                      thin API clients, one file per resource (server side only)
+    zigflow-engine/              the DSL engine (plain TypeScript, no UI)
+    components/builder/          canvas nodes, node panels, expression and condition editors
+    components/execution/        the run views (RunWorkspace, RunInspector, RunModal)
+    runtime/runSession.svelte.ts the live run stream
+    types/index.ts               domain types, mirrored by the backend
+```
+
+## Data and auth
+
+The browser never calls the backend directly. Pages load their data in `+page.server.ts` and
+change it through SvelteKit form actions, which call the backend through `src/lib/server/*.ts`
+(`API_BASE_URL`, default `http://localhost:8000/api`).
+
+Logging in stores the backend's token in an HTTP-only `session` cookie. `hooks.server.ts`
+resolves it to the current user on every request, and the `(app)` layout redirects to `/login`
+when there is none.
+
+## The DSL engine
+
+`src/lib/zigflow-engine/` owns everything to do with the DSL, independently of the UI, and every
+file in it has unit tests:
+
+| File | Responsibility |
+| --- | --- |
+| `schema/zigflow.schema.json` | A vendored copy of the published Zigflow JSON Schema. |
+| `ast.ts` | Types for the document and the eleven task types. |
+| `validate.ts` | Schema validation (ajv). |
+| `deserialize.ts` / `serialize.ts` | YAML to AST, with errors mapped to source positions; AST to YAML. |
+| `graph.ts` | AST to scopes and back: the [DSL to nodes](/docs/dsl/dsl-to-nodes) mapping, named workflows, switch cases. |
+| `inlineScopeView.ts`, `layout.ts` | Flattening every scope onto one canvas with nested bodies inline, the dotted lane frames, and the auto-layout (no external layout library). |
+| `scopeKey.ts`, `slug.ts`, `switchCases.ts` | Scope ids, task naming, and the single reader of switch cases. |
+| `schedule.ts`, `cron.ts` | The schedule's DSL mapping, and cron to visual presets. |
+| `header.ts`, `inputSchema.ts` | Reading a DSL header or input schema without loading it; input forms and validation. |
+| `runIndex.ts`, `runScope.ts`, `runState.ts` | Mapping run events onto the canvas. See [Run observability](/docs/architecture/observability). |
+
+The builder only calls the engine's public functions (`deserializeZigflowDocument`, `astToGraph`,
+`graphToAst`, `serializeZigflowDocument`); it never writes YAML or task objects by hand.
+
+## The builder
+
+The builder page (`builder/+page.svelte`) holds the current workflow as scopes, composes them
+into one Svelte Flow canvas, and turns every canvas change back into DSL text. Saving is a form
+action that sends that text to the backend. Key components:
+
+| Component | Purpose |
+| --- | --- |
+| `WorkflowNode.svelte` | The node card, also used read-only in run views. |
+| `NodePalette.svelte` | The palette, generated from `builderConfig.ts`'s `NODE_META`. |
+| `NodePanel.svelte` | Every node's settings panel. |
+| `LaneBoxLayer.svelte` | The dotted frames around nested bodies, drawn behind the nodes. |
+| `ExpressionInput.svelte`, `ConditionBuilder.svelte` | The [expression and condition editors](/docs/guides/expressions). |
+| `CodeMirrorEditor.svelte` | A thin CodeMirror 6 wrapper (YAML, JSON, JavaScript, Python, shell), following the theme. |
+| `ScheduleModal.svelte`, `CronBuilder.svelte` | The schedule dialog and visual cron editor. |
+
+## Run views
+
+`RunWorkspace.svelte` (a read-only canvas coloured by run state, plus `RunInspector.svelte`) is
+shared by the builder's run window and the `/executions/[id]` page, so a live run and a replayed
+one look the same.
+
+## Theme and language
+
+Light and dark themes use daisyUI, with the choice stored in the browser. UI text is compiled
+with Paraglide from `messages/*.json`.

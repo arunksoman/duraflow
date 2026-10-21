@@ -1,0 +1,79 @@
+---
+title: Running workflows
+description: Start a run from the builder, follow it live, and inspect every step.
+---
+
+Runs are real Temporal workflow executions. Duraflow doesn't simulate anything: what you see is
+what the Zigflow worker actually did.
+
+## Starting a run
+
+Click **Run** in the builder toolbar. The run window opens over the builder, and the run happens
+inside it.
+
+- If the workflow declares **inputs** (on its Start node), a dialog asks for them first. Fill in
+  the form, which is generated from the input schema and checks required fields and types, or
+  switch to **JSON** and type the whole `$input` yourself.
+- If it declares none, the run starts at once. The `{}` button still lets you pass a JSON
+  `$input`.
+
+<Screenshot name="run-inputs" alt="The run inputs dialog, in JSON mode, over the run window" />
+
+Starting a run **saves the design first**, so you always run what is on screen. The backend then
+asks Temporal to start the workflow on its task queue. If Temporal is unreachable, or the
+workflow's worker hasn't registered yet, the run fails to start and the window says why.
+
+## Following a run
+
+The run window shows a read-only copy of the canvas, coloured as events arrive from the worker:
+
+| Colour             | Meaning                                                                    |
+| ------------------ | -------------------------------------------------------------------------- |
+| Blue               | Running now. Edges into a running step are animated.                      |
+| Green              | Finished successfully.                                                     |
+| Red                | Failed.                                                                    |
+| Dashed amber       | Skipped: the run finished without reaching this step.                     |
+| Neutral            | Not reached yet.                                                           |
+
+Edges the run travelled are highlighted, so the path the run took (and the branches it didn't
+take) is visible at a glance. The header shows the run's status and elapsed time.
+
+<Screenshot
+  name="run-window"
+  alt="A completed run: steps on the path are green, the catch body ran, and the guarded step is dashed amber"
+  caption="A finished run. The payment step failed and its catch block ran; the express-shipping step was skipped by its Run only if guard."
+/>
+
+Closing the window only hides it. A run in progress keeps going, and reopening the window shows
+it. If you change the design after starting a run, the window says so: it keeps showing what was
+actually run.
+
+- **Run again** saves the current design and starts a new run in the same window.
+- **Clear run** forgets the last run in this window, so it shows the design again. The run itself
+  is kept.
+- **Run page** opens this run on its own page; **All runs** lists every run of this workflow.
+
+## Inspecting a step
+
+Click any step in the run window (or on a run's own page) to inspect it.
+
+<Screenshot
+  name="run-inspector"
+  alt="The run inspector showing a step's input and output"
+/>
+
+- **Input / Output** shows exactly what the step received and returned, as collapsible JSON.
+- **Variables** shows what the step changed in the workflow's state (added, changed or removed
+  keys), and the full state before it ran.
+- If the step failed, its error is shown on top.
+- A step that ran more than once, such as a step in a loop, a retried step, or one reached again,
+  keeps **every attempt**. Step through them with the arrows ("Run 2 of 3"); the label under the
+  title says which loop iteration or branch each one ran in.
+- A step that started a child workflow links to that **Child run**.
+
+With no step selected, the panel shows the whole run's input (`$input`) and output.
+
+<Callout title="Very large payloads">
+  The backend stores at most `telemetry.maxEventBytes` (64 KiB by default) per event. Anything
+  larger is kept truncated, and the inspector says so.
+</Callout>

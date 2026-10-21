@@ -1,0 +1,42 @@
+---
+title: Wait
+description: Pause for a duration or until a point in time (wait).
+---
+
+A durable timer. The run pauses here for a duration, or until a timestamp, and the timer survives
+worker restarts and deploys, because Temporal keeps it.
+
+<Screenshot name="node-wait" alt="A Wait node configured for 5 minutes 30 seconds" />
+
+## Settings
+
+Choose a mode:
+
+| Mode     | Fields                          | DSL                                     |
+| -------- | ------------------------------- | --------------------------------------- |
+| Duration | days, hours, minutes, seconds   | `wait.days` … `wait.seconds`            |
+| Until    | an RFC 3339 timestamp or expression | `wait.until`                        |
+
+Plus the [shared settings](/docs/nodes#shared-settings). Zero duration fields are left out of
+the DSL.
+
+## DSL
+
+```yaml
+- coolDown:
+    wait:
+      minutes: 5
+      seconds: 30
+```
+
+```yaml
+- untilLaunch:
+    wait:
+      until: ${ $input.launchAt }
+```
+
+## Notes
+
+- An `until` time in the past doesn't wait at all.
+- Don't use `uuid` or `timestamp` in a wait expression: compute the value in a
+  [Set](/docs/nodes/set) first.

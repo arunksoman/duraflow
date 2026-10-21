@@ -1,0 +1,110 @@
+---
+title: The builder
+description: The canvas, the palette, node panels, the DSL editor and workflow settings.
+---
+
+The builder is where a workflow is designed. It opens from a project's workflow list, at
+`/projects/<project>/workflows/<workflow>/builder`.
+
+<Screenshot
+  name="builder-overview"
+  alt="The builder: toolbar on top, node palette on the left, the canvas in the middle"
+/>
+
+## Layout
+
+| Area          | What it's for                                                                                                                    |
+| ------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| **Toolbar**   | Back to the project, **Variables**, the theme toggle, **Schedule**, **Run**, **DSL** and **Save**.                              |
+| **Palette**   | Every node you can add, grouped into Actions, Control Flow, Events, Structure and Terminal. Drag one onto the canvas, or click it. Collapse it with the arrow at its top. |
+| **Canvas**    | The workflow. Pan by dragging the background, zoom with the wheel or the controls in the corner, and use the minimap to jump around. |
+| **Node panel**| Opens on the right when you click a node. Drag its left edge to resize it.                                                      |
+
+## How the canvas reads
+
+Every workflow is drawn from its **Start** to its **End**, top to bottom. Steps run in the order
+their edges connect them.
+
+- **Nested bodies are drawn inline.** A loop's body, each branch of a fork, and the try and catch
+  blocks of a try/catch are laid out beside the node that owns them, in a **dotted frame** titled
+  with the name the DSL knows that body by (`eachOrder body`, `charge try`, `charge catch`, a
+  fork branch's name). Frames nest to any depth, and each one has a start and end marker so you
+  can see where its body begins and ends. There is no "drill in": everything in the document is
+  on screen at once.
+- **Dead ends run to End.** A step with nothing after it, such as the last step of a fork branch,
+  is drawn with an edge to its workflow's End, so nothing on the canvas looks unfinished. These
+  edges are only visual.
+- **Extra workflows sit beside the main one.** A document can declare more than one workflow;
+  each extra one is drawn in its own column with its own Start and End. See
+  [Named workflows](/docs/dsl/named-workflows).
+
+<Screenshot
+  name="builder-named-workflows"
+  alt="A switch whose cases lead to two named workflows drawn to the right of the main flow"
+  caption="A switch whose cases start named workflows, each drawn as its own Start-to-End flow."
+/>
+
+## Editing
+
+- **Add a step:** drag it from the palette. Dropping it inside a dotted frame puts it in that
+  body; the innermost frame under the cursor wins. Outside any frame it goes in the workflow it
+  lands beside.
+- **Connect steps:** drag from the bottom handle of one node to the top of the next. Drag an end
+  of an existing edge to rewire it.
+- **Delete:** select a node or edge and press <kbd>Delete</kbd> or <kbd>Backspace</kbd>, or use
+  the node's hover delete button. Deleting a loop, fork, try or group deletes everything inside
+  it. Start and End can't be deleted, except the Start of a named workflow, which deletes that
+  whole workflow.
+- **Configure:** click a node. Its panel is split into collapsible sections; a section opens by
+  itself when it already holds something.
+
+<Screenshot
+  name="builder-node-panel"
+  alt="The node panel for a For node, showing its Configuration, Run only if, Data Flow and Activity Options sections"
+/>
+
+Every task node shares three sections at the bottom of its panel: **Run only if**, **Data Flow**
+and **Activity Options**. They are described in [Nodes](/docs/nodes#shared-settings).
+
+Values in most fields are built with the [expression editor](/docs/guides/expressions), which
+knows which variables exist at that step.
+
+## Workflow settings
+
+**Variables** in the toolbar opens the workflow's own settings:
+
+- `workflowType`, `taskQueue` and `version`, the DSL header fields that identify the workflow to
+  Temporal (see [Workflow identity](/docs/guides/projects-and-workflows#workflow-identity));
+- `$env` variables: the names of environment variables your expressions use, so the expression
+  editor can suggest them. They are a hint for the editor only and are not written to the DSL.
+
+<Screenshot name="builder-variables" alt="The Workflow Variables dialog" />
+
+The workflow's **inputs** (its `$input` schema) are edited on the **Start** node instead, because
+they describe what a caller passes in. See [Start and End](/docs/nodes/start-and-end).
+
+## The DSL editor
+
+**DSL** opens the Zigflow YAML the canvas represents, in a full code editor.
+
+<Screenshot
+  name="builder-dsl"
+  alt="The DSL editor showing the workflow's Zigflow YAML"
+/>
+
+- **The canvas follows the text.** With **Sync to canvas** on, each edit is parsed, validated
+  against the Zigflow JSON Schema, and redrawn on the canvas a moment after you stop typing.
+- **Errors point at the line.** Invalid YAML or anything the schema rejects is listed under the
+  editor and marked in the gutter, and the canvas keeps its last valid state until you fix it.
+- **Reset** throws away your edits and reloads the text from the canvas. **Copy** copies it.
+
+Pasting a whole document is a quick way to import a workflow written elsewhere. The canvas is
+always rebuilt from the text, so anything the DSL can express survives a round trip. See
+[Round-tripping](/docs/dsl/round-tripping) for the details.
+
+## Saving and running
+
+**Save** stores the DSL and starts the workflow's worker; see
+[What saving does](/docs/guides/projects-and-workflows#what-saving-does). **Run** saves and then
+runs; see [Running workflows](/docs/guides/running-workflows). **Schedule** sets up a recurring
+trigger; see [Schedules](/docs/guides/schedules).

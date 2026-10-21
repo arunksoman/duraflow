@@ -1,0 +1,46 @@
+document:
+  dsl: 1.0.0
+  taskQueue: docs-routing
+  workflowType: route-order
+  version: 0.1.0
+  title: Route order
+input:
+  schema:
+    format: json
+    document:
+      type: object
+      required:
+        - orderType
+      properties:
+        orderType:
+          type: string
+do:
+  - classify:
+      switch:
+        - electronic:
+            when: ${ $input.orderType == "electronic" }
+            then: processElectronicOrder
+        - physical:
+            when: ${ $input.orderType == "physical" }
+            then: processPhysicalOrder
+        - otherwise:
+            then: end
+  - confirm:
+      set:
+        confirmed: true
+  - processElectronicOrder:
+      do:
+        - validatePayment:
+            set:
+              paymentValid: true
+        - sendLicenceKey:
+            set:
+              licenceSent: true
+  - processPhysicalOrder:
+      do:
+        - checkInventory:
+            set:
+              inStock: true
+        - scheduleShipping:
+            wait:
+              seconds: 1

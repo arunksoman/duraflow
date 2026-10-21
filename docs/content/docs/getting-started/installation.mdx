@@ -1,0 +1,80 @@
+---
+title: Installation
+description: Run Duraflow locally with Docker, or run its three parts by hand.
+---
+
+Duraflow is three services: the **frontend** (a SvelteKit app), the **backend** (a Go API that
+also starts and supervises Zigflow workers) and a **Temporal** server. Docker Compose starts all
+three.
+
+## With Docker
+
+You need Docker with Compose v2. From the root of the repository:
+
+```sh
+git clone https://github.com/arunksoman/duraflow-ui.git
+cd duraflow-ui
+docker compose up --build
+```
+
+| Service                       | URL                                           |
+| ----------------------------- | --------------------------------------------- |
+| Frontend                      | http://localhost:5173                         |
+| Backend API (docs at `/docs`) | http://localhost:8000                         |
+| Temporal (gRPC / web UI)      | `localhost:7233` / http://localhost:8233      |
+
+Open http://localhost:5173 and log in with the admin user that is created on first boot:
+
+| Email                  | Password      |
+| ---------------------- | ------------- |
+| `admin@duraflow.local` | `changeme123` |
+
+<Screenshot name="login" alt="The Duraflow login page" />
+
+The SQLite database and each workflow's DSL file are kept in `backend/data/`. To start from
+scratch, stop the stack and delete `backend/data/duraflow.db`.
+
+<Callout type="warn" title="Change the defaults before exposing Duraflow">
+  `docker-compose.yml` sets a development JWT secret and admin password. Set
+  `DURAFLOW_AUTH_JWTSECRET`, `DURAFLOW_SEEDADMIN_EMAIL` and `DURAFLOW_SEEDADMIN_PASSWORD` to your
+  own values before running it anywhere but your own machine. See
+  [Configuration](/docs/getting-started/configuration).
+</Callout>
+
+<Callout title="Opening the app from another address">
+  If you open the frontend from anything other than `http://localhost:5173`, set `ORIGIN` in
+  `docker-compose.yml` to that address. Otherwise SvelteKit's CSRF check rejects every form
+  submission.
+</Callout>
+
+## Without Docker
+
+You need:
+
+- Go (the version in `backend/go.mod`)
+- Node.js 20 or later, with pnpm
+- The [Temporal CLI](https://github.com/temporalio/cli/releases)
+- The [Zigflow CLI](https://github.com/zigflow/zigflow) on your `PATH`
+
+Zigflow's `go.mod` has a `replace` directive, so `go install github.com/zigflow/zigflow@latest`
+fails. Build it from a clone instead, at the version `backend/Dockerfile` uses:
+
+```sh
+git clone --depth 1 --branch v0.17.1 https://github.com/zigflow/zigflow.git
+cd zigflow && go install .   # installs to $(go env GOPATH)/bin
+```
+
+Then start the three parts, each in its own terminal:
+
+```sh
+temporal server start-dev                 # localhost:7233, web UI at :8233
+cd backend && go run ./cmd/server         # localhost:8000, API docs at /docs
+cd frontend && pnpm install && pnpm dev   # localhost:5173
+```
+
+The frontend finds the backend at `http://localhost:8000/api` and the backend finds Temporal at
+`localhost:7233` by default. Change either with the settings in
+[Configuration](/docs/getting-started/configuration).
+
+The backend still starts without Temporal or the `zigflow` binary. It serves the API, but it
+can't start workers or run anything until both are available.

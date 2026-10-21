@@ -1,0 +1,50 @@
+---
+title: Fork
+description: Run branches in parallel (fork).
+---
+
+Runs several **branches** at the same time and waits for them. Each branch is drawn inline in its
+own dotted frame, titled with the branch's name, and can hold any number of steps, including
+other loops, forks and try blocks.
+
+<Screenshot name="node-fork" alt="A Fork node with two branches drawn side by side, one with two steps" />
+
+## Settings
+
+| Section       | Field        | DSL             | Notes                                                              |
+| ------------- | ------------ | --------------- | ------------------------------------------------------------------ |
+| Configuration | Compete mode | `fork.compete`  | Off: wait for every branch. On: the first branch to finish wins and the rest are cancelled. |
+| Branches      | Branch names | `fork.branches` | Add, rename or remove branches. Removing a branch removes its steps. |
+
+Plus the [shared settings](/docs/nodes#shared-settings).
+
+The output is an array of every branch's output, in declaration order, or only the winner's
+output in compete mode.
+
+## DSL
+
+A branch with one step is written as that step; a branch with several is a `do:` list:
+
+```yaml
+- notify:
+    fork:
+      compete: false
+      branches:
+        - email:
+            set:
+              channel: email
+        - sms:
+            do:
+              - render:
+                  set:
+                    body: Your order shipped
+              - send:
+                  set:
+                    channel: sms
+```
+
+## Notes
+
+- Zigflow runs **each branch as a Temporal child workflow**. An error in a branch fails the fork,
+  unless the branch's steps are wrapped in a [Try](/docs/nodes/try).
+- In compete mode, side effects in the cancelled branches are not undone.

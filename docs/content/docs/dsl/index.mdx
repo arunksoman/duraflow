@@ -1,0 +1,110 @@
+---
+title: The Zigflow DSL
+description: The document format every Duraflow workflow is stored, run and versioned as.
+---
+
+Every Duraflow workflow **is** a [Zigflow](https://github.com/zigflow/zigflow) document: YAML
+based on the [CNCF Serverless Workflow](https://serverlessworkflow.io/) specification (DSL
+version `1.0.0`). That text is what Duraflow stores, what the worker runs, and what you can
+review and diff. The canvas is drawn from it, never the other way round.
+
+Duraflow ships a copy of the published Zigflow JSON Schema and validates every document against
+it, in the browser, as you type in the [DSL editor](/docs/guides/builder#the-dsl-editor).
+
+## Document structure
+
+A document has a header, optional inputs, an optional schedule, and a list of tasks:
+
+```yaml
+document:                      # required header
+  dsl: 1.0.0
+  taskQueue: docs-orders       # Temporal task queue the worker polls (RFC 1123 label)
+  workflowType: process-orders # Temporal workflow type it registers (RFC 1123 label)
+  version: 0.1.0               # semantic version
+  title: Process orders        # optional
+  summary: Reserve stock and take payment   # optional
+  tags: { team: fulfilment }   # optional string map
+  metadata:                    # optional: workflow-wide settings
+    activityOptions:
+      startToCloseTimeout:
+        minutes: 1
+      retryPolicy:
+        maximumAttempts: 3
+
+input:                         # optional: what a caller passes in
+  schema:
+    format: json
+    document:
+      type: object
+      required: [orderIds]
+      properties:
+        orderIds:
+          type: array
+          items: { type: number }
+
+schedule:                      # optional: see Schedules in the DSL
+  cron: '0 6 * * *'
+
+do:                            # required: the tasks, in order
+  - summarise:
+      set:
+        orderCount: ${ $input.orderIds | length }
+  - eachOrder:
+      for:
+        in: ${ $input.orderIds }
+      do:
+        - reserveStock:
+            set:
+              reserved: ${ $data.item }
+```
+
+| Part        | Edited in the builder                                                        |
+| ----------- | ---------------------------------------------------------------------------- |
+| `document`  | `workflowType`, `taskQueue` and `version` in **Variables**. `title`, `summary`, `tags` and `metadata` in the DSL editor (they are kept on every save). |
+| `input`     | The Start node's **$input Schema**.                                          |
+| `schedule`  | The **Schedule** dialog.                                                     |
+| `do`        | The canvas.                                                                  |
+
+## Tasks
+
+`do` is an ordered list. Each entry is a single-key map: the key is the task's name, the value is
+the task. The same shape is used everywhere a list of tasks appears: a loop body, each fork
+branch, the try and catch blocks, and a `do:` group.
+
+The schema defines eleven task types. Duraflow draws each as a node:
+
+| Task     | Node                                         |
+| -------- | -------------------------------------------- |
+| `call`   | [REST](/docs/nodes/rest) (`http`) or [gRPC](/docs/nodes/grpc) (`grpc`) |
+| `do`     | [Group](/docs/nodes/group), or a [named workflow](/docs/dsl/named-workflows) |
+| `for`    | [For](/docs/nodes/for)                       |
+| `fork`   | [Fork](/docs/nodes/fork)                     |
+| `listen` | [Listen](/docs/nodes/listen)                 |
+| `raise`  | [Raise](/docs/nodes/raise)                   |
+| `run`    | [BYOC](/docs/nodes/byoc), or [Child Flow](/docs/nodes/child-workflow) for `run: workflow` |
+| `set`    | [Set](/docs/nodes/set)                       |
+| `switch` | [Switch](/docs/nodes/switch)                 |
+| `try`    | [Try](/docs/nodes/try)                       |
+| `wait`   | [Wait](/docs/nodes/wait)                     |
+
+Every task can also have these shared properties:
+
+| Property         | What it does                                                    | In the builder                  |
+| ---------------- | --------------------------------------------------------------- | ------------------------------- |
+| `if`             | Skip the task unless the expression is true.                    | **Run only if**                 |
+| `output.as`      | Reshape the task's output.                                      | **Data Flow → Output as**       |
+| `export.as`      | Write to `$context`.                                            | **Data Flow → Export as**       |
+| `metadata`       | Per-task settings, such as `activityOptions`.                   | **Activity Options** (the rest in the DSL editor) |
+| `input.schema`, `output.schema`, `export.schema` | Validate data with a JSON Schema. | DSL editor only (kept on save) |
+
+Expressions (`${ … }`) and the variables they can use are described in
+[Expressions and data](/docs/guides/expressions).
+
+## Learn more
+
+- [DSL to nodes](/docs/dsl/dsl-to-nodes): exactly how a document becomes a canvas and back.
+- [Named workflows](/docs/dsl/named-workflows): several workflows in one document.
+- [Schedules in the DSL](/docs/dsl/schedules).
+- [Round-tripping](/docs/dsl/round-tripping): what's preserved when you edit on the canvas.
+- Zigflow's own documentation at [zigflow.dev](https://zigflow.dev) covers each task's runtime
+  behaviour in depth.

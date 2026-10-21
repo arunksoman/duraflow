@@ -1,0 +1,58 @@
+---
+title: Schedules in the DSL
+description: The YAML behind the Schedule dialog.
+---
+
+Zigflow splits a schedule across two places in the document. The builder's
+[Schedule dialog](/docs/guides/schedules) reads and writes both, so a document pasted into the DSL
+editor with a schedule shows up in the dialog, and the other way round.
+
+```yaml
+document:
+  dsl: 1.0.0
+  taskQueue: reports
+  workflowType: nightly-report
+  version: 0.1.0
+  metadata:
+    scheduleWorkflowName: nightly-report   # required whenever schedule: is set
+    scheduleId: nightly-report-schedule    # optional
+    scheduleInput:                         # optional: a list of workflow arguments
+      - region: eu-west
+schedule:
+  cron: '0 2 * * *'     # calendar times, evaluated in UTC
+  every:                # and/or a fixed interval
+    hours: 6
+do:
+  - build:
+      set:
+        started: ${ $data.workflow.start_time }
+```
+
+| Key                                       | Meaning                                                                                   |
+| ----------------------------------------- | ----------------------------------------------------------------------------------------- |
+| `schedule.cron`                           | A 5-field cron expression, evaluated by Temporal in UTC.                                  |
+| `schedule.every`                          | An interval: any of `days`, `hours`, `minutes`, `seconds`, `milliseconds`.                |
+| `document.metadata.scheduleWorkflowName`  | The workflow type the schedule starts. Required by Zigflow; the builder writes this workflow's `workflowType`. |
+| `document.metadata.scheduleId`            | The Temporal schedule id. Defaults to `zigflow_<workflowType>`.                           |
+| `document.metadata.scheduleInput`         | The arguments each scheduled run starts with. Temporal takes a list, so the builder's single input object is written as a one-item list. |
+
+With both `cron` and `every`, Temporal fires on either. Zigflow does not support `schedule.after`.
+
+## Turning a schedule off
+
+Zigflow only looks at whether `schedule:` is present: on every worker start it deletes the
+schedule with this id and recreates it if the block is there. An `enabled: false` flag would do
+nothing, so turning a schedule off in the builder **removes** `schedule:` and the three metadata
+keys, and parks the settings in Duraflow's own metadata so turning it back on restores them:
+
+```yaml
+document:
+  metadata:
+    duraflow:
+      disabledSchedule:
+        useCron: true
+        useInterval: false
+        cron: '0 2 * * *'
+```
+
+Only one of the two forms exists at a time. A workflow that was never scheduled has neither.

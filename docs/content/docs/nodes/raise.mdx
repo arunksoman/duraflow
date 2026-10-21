@@ -1,0 +1,37 @@
+---
+title: Raise
+description: Fail with a typed error (raise).
+---
+
+Stops the current path with an error, described the
+[RFC 7807 Problem Details](https://www.rfc-editor.org/rfc/rfc7807) way. If it isn't inside a
+[Try](/docs/nodes/try), the workflow fails with that error.
+
+<Screenshot name="node-raise" alt="A Raise node with an error type, status, title and detail" />
+
+## Settings
+
+| Field       | DSL                    | Notes                                                                 |
+| ----------- | ---------------------- | --------------------------------------------------------------------- |
+| error type  | `raise.error.type`     | A URI naming the kind of error. Custom URIs are fine.                 |
+| status code | `raise.error.status`   | An HTTP-style status code.                                            |
+| title       | `raise.error.title`    | Optional short summary.                                               |
+| detail      | `raise.error.detail`   | Optional; can be an expression.                                       |
+| instance    | `raise.error.instance` | Optional JSON Pointer to where the error happened.                    |
+
+Plus the [shared settings](/docs/nodes#shared-settings).
+
+## DSL
+
+```yaml
+- outOfStock:
+    raise:
+      error:
+        type: https://example.com/errors/out-of-stock
+        status: 409
+        title: Item out of stock
+        detail: ${ "SKU " + $input.sku + " is unavailable" }
+```
+
+The [Serverless Workflow spec](https://serverlessworkflow.io/) defines standard types such as
+`https://serverlessworkflow.io/spec/1.0.0/errors/communication`.
