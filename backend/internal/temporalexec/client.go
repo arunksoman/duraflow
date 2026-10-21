@@ -22,6 +22,12 @@ func NewLazyClient(address string) *LazyClient {
 	return &LazyClient{address: address}
 }
 
+// NewStaticClient wraps an already-connected client instead of dialing one — how tests stand a
+// fake Temporal in for the real thing.
+func NewStaticClient(c client.Client) *LazyClient {
+	return &LazyClient{client: c}
+}
+
 func (l *LazyClient) Get() (client.Client, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()

@@ -12,3 +12,11 @@ vite.config.ts.timestamp-*
 # Paraglide
 src/lib/paraglide
 project.inlang/cache/
+
+# Vitest coverage reports
+coverage
+
+# Playwright end-to-end output
+/playwright-report
+/test-results
+/e2e/.auth

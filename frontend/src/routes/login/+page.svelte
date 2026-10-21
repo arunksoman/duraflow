@@ -1,12 +1,20 @@
 <script lang="ts">
 	import { enhance } from '$app/forms';
 	import { dev } from '$app/environment';
+	import { page } from '$app/state';
 	import { Eye, EyeOff, FlaskConical, Lock, Mail, LoaderCircle, Workflow } from '@lucide/svelte';
 	import type { PageProps } from './$types';
 
 	let { form }: PageProps = $props();
 
 	let loading = $state(false);
+
+	// A relative `action="?/login"` would replace this page's query string, dropping the
+	// `redirectTo` the (app) layout put there — so carry it over into the action URL.
+	const redirectQuery = $derived.by(() => {
+		const target = page.url.searchParams.get('redirectTo');
+		return target ? `&redirectTo=${encodeURIComponent(target)}` : '';
+	});
 	let showPassword = $state(false);
 </script>
 
@@ -27,7 +35,7 @@
 
 			<form
 				method="POST"
-				action="?/login"
+				action="?/login{redirectQuery}"
 				class="flex flex-col gap-4"
 				use:enhance={() => {
 					loading = true;
@@ -94,7 +102,7 @@
 
 			{#if dev}
 				<div class="divider text-base-content/40 text-xs">no backend yet?</div>
-				<form method="POST" action="?/devBypass">
+				<form method="POST" action="?/devBypass{redirectQuery}">
 					<button type="submit" class="btn btn-ghost btn-sm w-full">
 						<FlaskConical size={14} />
 						Continue as demo user (dev only)

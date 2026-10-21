@@ -73,7 +73,13 @@ The database is SQLite by default, and the schema migrates automatically on star
 pnpm check   # type checking
 pnpm lint    # prettier + eslint
 pnpm test    # unit tests (Node) and component tests (headless Chromium)
+pnpm test:coverage   # the same, with a coverage report (coverage/index.html)
+pnpm test:e2e        # end-to-end, against a running stack (see below)
 ```
+
+End-to-end tests drive a real browser through the whole product. Start the stack with `docker compose up --build` from the repo root, wait for http://localhost:5173 to answer, then run `pnpm test:e2e` from `frontend/`. They create and delete their own projects, in whatever database that stack uses.
+
+CI runs all of the above (backend, frontend and end-to-end) on every push and pull request; test reports, coverage and Playwright traces are attached to each run as artifacts.
 
 Run `pnpm format` to fix formatting. Component tests need Playwright's Chromium: run `pnpm exec playwright install chromium` once.
 
@@ -82,8 +88,11 @@ Run `pnpm format` to fix formatting. Component tests need Playwright's Chromium:
 ```sh
 go build ./...
 go vet ./...
+go test ./...   # add -cover for a per-package coverage figure
 gofmt -l .   # should print nothing
 ```
+
+Backend tests need neither Temporal nor the Zigflow CLI: they use a temp-file SQLite database and an in-memory Temporal client (`internal/temporalexec/temporaltest`).
 
 ## Guidelines
 

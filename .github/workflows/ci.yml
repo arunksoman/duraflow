@@ -1,0 +1,211 @@
+name: CI
+
+# Every branch, every PR, and merge-queue merges. A merge to a branch is a push, so it's covered too.
+on:
+  push:
+    branches: ['**']
+  pull_request:
+    branches: ['**']
+  merge_group:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A newer push to the same branch or PR supersedes the run in progress.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: Backend tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Check formatting
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "::error::gofmt needed on:"; echo "$unformatted"; exit 1
+          fi
+
+      - name: Test
+        run: |
+          mkdir -p test-results
+          go run gotest.tools/gotestsum@v1.13.0 \
+            --format testname \
+            --junitfile test-results/backend-junit.xml \
+            --jsonfile test-results/backend-tests.json \
+            -- -race -coverprofile=test-results/coverage.out -covermode=atomic ./...
+
+      - name: Coverage report
+        if: ${{ !cancelled() && hashFiles('backend/test-results/coverage.out') != '' }}
+        run: |
+          go tool cover -html=test-results/coverage.out -o test-results/coverage.html
+          go tool cover -func=test-results/coverage.out > test-results/coverage.txt
+          {
+            echo "### Backend coverage"
+            echo
+            echo '```'
+            grep -E '^total:' test-results/coverage.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload results
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-test-results
+          path: backend/test-results/
+          if-no-files-found: warn
+          retention-days: 14
+
+  frontend:
+    name: Frontend tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # src/lib/paraglide is generated (and gitignored). Vite's paraglide plugin writes it during
+      # a build or test run, but the type check comes first and imports from it.
+      - name: Generate i18n messages
+        run: pnpm exec paraglide-js compile --project ./project.inlang --outdir ./src/lib/paraglide
+
+      # Component tests run in real Chromium through Vitest's Playwright provider.
+      - name: Install Chromium
+        run: pnpm exec playwright install --with-deps chromium
+
+      - name: Type check
+        run: pnpm check
+
+      # Not blocking yet: existing source files still have Prettier/ESLint findings. Drop
+      # continue-on-error once `pnpm lint` is clean.
+      - name: Lint
+        continue-on-error: true
+        run: pnpm lint
+
+      - name: Unit and component tests
+        run: >
+          pnpm test:coverage
+          --reporter=default
+          --reporter=junit
+          --outputFile.junit=test-results/frontend-junit.xml
+
+      - name: Coverage summary
+        if: ${{ !cancelled() && hashFiles('frontend/coverage/index.html') != '' }}
+        run: |
+          {
+            echo "### Frontend coverage"
+            echo
+            echo "See the \`frontend-test-results\` artifact for the full HTML report."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload results
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-test-results
+          path: |
+            frontend/test-results/
+            frontend/coverage/
+          if-no-files-found: warn
+          retention-days: 14
+
+  e2e:
+    name: End-to-end tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      # The whole product as users get it: Temporal, the backend (spawning real zigflow
+      # workers) and the frontend, built from this commit.
+      - name: Start the stack
+        run: docker compose up --build --detach --wait --wait-timeout 600
+
+      - name: Wait for the app
+        run: |
+          for url in http://localhost:8000/openapi.json http://localhost:5173/login; do
+            for i in $(seq 1 60); do
+              if curl --silent --fail --output /dev/null "$url"; then echo "up: $url"; break; fi
+              if [ "$i" = 60 ]; then echo "::error::$url never answered"; exit 1; fi
+              sleep 2
+            done
+          done
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - name: Install dependencies
+        working-directory: frontend
+        run: pnpm install --frozen-lockfile
+
+      - name: Install Chromium
+        working-directory: frontend
+        run: pnpm exec playwright install --with-deps chromium
+
+      - name: Run end-to-end tests
+        working-directory: frontend
+        env:
+          CI: 'true'
+        run: pnpm test:e2e
+
+      - name: Collect service logs
+        if: ${{ !cancelled() }}
+        run: |
+          mkdir -p frontend/test-results
+          docker compose ps --all > frontend/test-results/compose-ps.txt
+          docker compose logs --no-color --timestamps > frontend/test-results/compose.log
+
+      - name: Upload results
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-test-results
+          path: |
+            frontend/playwright-report/
+            frontend/test-results/
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Stop the stack
+        if: ${{ always() }}
+        run: docker compose down --volumes
