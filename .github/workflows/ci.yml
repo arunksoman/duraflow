@@ -1,11 +1,13 @@
 name: CI
 
-# Every branch, every PR, and merge-queue merges. A merge to a branch is a push, so it's covered too.
+# Pull requests, pushes to main (which is how a PR lands) and merge-queue merges. Pushes to other
+# branches are left to the pull_request event: triggering on both ran every PR commit twice, and the
+# two runs never cancelled each other since one is grouped by branch and the other by PR number.
+# Use "Run workflow" (workflow_dispatch) to test a branch that has no PR yet.
 on:
   push:
-    branches: ['**']
+    branches: [main]
   pull_request:
-    branches: ['**']
   merge_group:
   workflow_dispatch:
 
