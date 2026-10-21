@@ -83,7 +83,7 @@ pnpm test:e2e        # end-to-end, against a running stack (see below)
 
 End-to-end tests drive a real browser through the whole product. Start the stack with `docker compose up --build` from the repo root, wait for http://localhost:5173 to answer, then run `pnpm test:e2e` from `frontend/`. They create and delete their own projects, in whatever database that stack uses.
 
-CI runs all of the above (backend, frontend and end-to-end) on every push and pull request; test reports, coverage and Playwright traces are attached to each run as artifacts.
+CI runs all of the above (backend, frontend and end-to-end) on every pull request and every push to `main`; test reports, coverage and Playwright traces are attached to each run as artifacts.
 
 Run `pnpm format` to fix formatting. Component tests need Playwright's Chromium: run `pnpm exec playwright install chromium` once.
 
