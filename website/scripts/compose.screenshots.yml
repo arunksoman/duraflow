@@ -1,7 +1,7 @@
 # A throwaway copy of the stack for docs screenshots: its own ports and an empty database, so the
 # screenshots never show anything from your dev data and the dev stack can keep running.
 #
-#   docker compose -p duraflow-docs -f docker-compose.yml -f docs/scripts/compose.screenshots.yml up --build --wait
+#   docker compose -p duraflow-docs -f docker-compose.yml -f website/scripts/compose.screenshots.yml up --build --wait
 services:
   temporal:
     ports: !override

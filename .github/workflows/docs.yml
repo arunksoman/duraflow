@@ -1,16 +1,16 @@
 name: Docs
 
-# Builds the Fumadocs site in docs/ on every PR that touches it, and publishes it to GitHub Pages
+# Builds the Fumadocs site in website/ on every PR that touches it, and publishes it to GitHub Pages
 # when those changes land on main. Pages must be set to "GitHub Actions" in Settings → Pages.
 on:
   push:
     branches: [main]
     paths:
-      - 'docs/**'
+      - 'website/**'
       - '.github/workflows/docs.yml'
   pull_request:
     paths:
-      - 'docs/**'
+      - 'website/**'
       - '.github/workflows/docs.yml'
   workflow_dispatch:
 
@@ -30,7 +30,7 @@ jobs:
     timeout-minutes: 20
     defaults:
       run:
-        working-directory: docs
+        working-directory: website
     steps:
       - uses: actions/checkout@v4
 
@@ -42,7 +42,7 @@ jobs:
         with:
           node-version: 22
           cache: pnpm
-          cache-dependency-path: docs/pnpm-lock.yaml
+          cache-dependency-path: website/pnpm-lock.yaml
 
       # Gives the path the site is served under (/<repo> for a project site).
       - name: Configure Pages
@@ -66,7 +66,7 @@ jobs:
         if: ${{ github.event_name != 'pull_request' }}
         uses: actions/upload-pages-artifact@v3
         with:
-          path: docs/out
+          path: website/out
 
   deploy:
     name: Deploy to GitHub Pages

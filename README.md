@@ -64,7 +64,7 @@ Duraflow is young and moving quickly. The builder, real execution and run observ
 
 ## Documentation
 
-The full documentation, covering how Duraflow works under the hood, every node, and the DSL and how it maps to the canvas, is at **https://arunksoman.github.io/duraflow/**. Its source is in [`docs/`](docs/).
+The full documentation, covering how Duraflow works under the hood, every node, and the DSL and how it maps to the canvas, is at **https://arunksoman.github.io/duraflow/**. Its source is in [`website/`](website/).
 
 ## Try it
 

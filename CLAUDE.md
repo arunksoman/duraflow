@@ -8,10 +8,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 frontend/   SvelteKit app — see frontend/CLAUDE.md
 backend/    Go API + Temporal/Zigflow worker management — see backend/CLAUDE.md
 docker/     Supporting images (currently just the Temporal dev server)
-docs/       User and developer documentation — a Fumadocs (Next.js) static site, deployed to GitHub Pages by .github/workflows/docs.yml
+website/    User and developer documentation — a Fumadocs (Next.js) static site, deployed to GitHub Pages by .github/workflows/docs.yml
 ```
 
-`docs/` is independent of the app (its own pnpm project, no shared code). Its screenshots are captured from a real stack by `docs/scripts/capture-screenshots.mjs` — see `docs/content/docs/contributing/documentation.mdx`. When a change alters behaviour the docs describe (node settings, DSL mapping, run views, API), update the matching page.
+`website/` is independent of the app (its own pnpm project, no shared code). Its screenshots are captured from a real stack by `website/scripts/capture-screenshots.mjs` — see `website/content/docs/contributing/documentation.mdx`. When a change alters behaviour the docs describe (node settings, DSL mapping, run views, API), update the matching page.
 
 There is no root-level build tooling — each side is developed and run from within its own folder. Read the relevant subfolder's `CLAUDE.md` before making changes there; this file only covers what spans both.
 

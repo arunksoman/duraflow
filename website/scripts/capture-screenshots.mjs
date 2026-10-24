@@ -4,7 +4,7 @@
 // It expects the isolated screenshot stack (see compose.screenshots.yml), which has an empty
 // database, so nothing from your own dev data ends up in the docs:
 //
-//   pnpm screenshots:up      # from docs/ — builds and starts the stack on ports 15173/18000
+//   pnpm screenshots:up      # from website/ — builds and starts the stack on ports 15173/18000
 //   pnpm screenshots         # writes public/screenshots/<name>-light.webp and <name>-dark.webp
 //   pnpm screenshots:down    # removes the stack and its database
 //

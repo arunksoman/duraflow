@@ -4,20 +4,20 @@ description: Run the docs site, write pages, regenerate screenshots and deploy.
 ---
 
 These docs are a [Fumadocs](https://fumadocs.dev) site (Next.js, exported as static HTML) in the
-repository's `docs/` folder. They're separate from the SvelteKit app and share no code with it.
+repository's `website/` folder. They're separate from the SvelteKit app and share no code with it.
 
 ## Running locally
 
 ```sh
-cd docs
+cd website
 pnpm install
 pnpm dev        # http://localhost:3000
-pnpm build      # static export to docs/out
+pnpm build      # static export to website/out
 ```
 
 ## Writing pages
 
-Pages are MDX files in `docs/content/docs/`. Each folder has a `meta.json` that sets the order of
+Pages are MDX files in `website/content/docs/`. Each folder has a `meta.json` that sets the order of
 its pages, and the root `meta.json` sets the sidebar sections. Front matter needs a `title` and a
 `description`.
 
@@ -42,7 +42,7 @@ different ports, so nothing from your dev data appears in the docs and your dev 
 running:
 
 ```sh
-cd docs
+cd website
 pnpm exec playwright install chromium   # once
 pnpm screenshots:up      # build and start the screenshot stack (ports 15173, 18000, 17233)
 pnpm screenshots         # capture everything into public/screenshots/
@@ -59,7 +59,7 @@ screenshot, add a scene to the script and reference its name from a page.
 ## Deployment
 
 `.github/workflows/docs.yml` builds the site and publishes it to GitHub Pages on every push to
-`main` that touches `docs/`. It can also be run by hand from the Actions tab. The site is served
+`main` that touches `website/`. It can also be run by hand from the Actions tab. The site is served
 under the repository's name, which the workflow passes to the build as `NEXT_PUBLIC_BASE_PATH`.
 
 GitHub Pages must be set to deploy from **GitHub Actions** (repository **Settings → Pages →
