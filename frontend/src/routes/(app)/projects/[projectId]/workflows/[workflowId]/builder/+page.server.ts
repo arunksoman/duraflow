@@ -62,9 +62,8 @@ export const actions: Actions = {
 		}
 
 		try {
-			// Run always executes the DSL currently on screen, so save it first — the worker that
-			// registers this workflow's Temporal task queue loads from the persisted file, not the
-			// canvas.
+			// Run always executes the DSL currently on screen, so save it first — a run starts on the
+			// workflow's saved version, not the canvas.
 			await updateWorkflow(token, params.workflowId, { dsl });
 			// The builder only starts designer test runs.
 			const execution = await createExecution(token, params.workflowId, {

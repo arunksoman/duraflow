@@ -76,7 +76,7 @@ Things that bite in these tests: Tailwind isn't loaded, so sizing classes do not
 
 **End-to-end tests** (`e2e/`, `playwright.config.ts`, `pnpm test:e2e`) drive a real browser against the whole stack — they start no servers. Bring it up first with `docker compose up --build` from the repo root (Temporal, the backend spawning real zigflow workers, and this app), then run `pnpm test:e2e`; `E2E_BASE_URL`/`E2E_ADMIN_EMAIL`/`E2E_ADMIN_PASSWORD` point it elsewhere. `auth.setup.ts` logs in once and the other specs reuse its session; each spec creates uniquely named projects and deletes them again, but note that locally they write to your dev database (`backend/data`). Reports land in `playwright-report/` and `test-results/` (gitignored).
 
-CI (`.github/workflows/ci.yml`) runs three jobs on every push and PR — backend (`go test -race`), frontend (check, lint — non-blocking until existing findings are fixed — and `test:coverage`) and e2e (the compose stack plus `test:e2e`) — and uploads each one's JUnit XML, coverage and Playwright report/traces/compose logs as artifacts.
+CI (`.github/workflows/ci.yml`) runs three jobs on every PR and every push to `main` (other branches only via a PR or a manual run, so a PR commit isn't tested twice) — backend (`go test -race`), frontend (check, lint — non-blocking until existing findings are fixed — and `test:coverage`) and e2e (the compose stack plus `test:e2e`) — and uploads each one's JUnit XML, coverage and Playwright report/traces/compose logs as artifacts.
 
 ---
 

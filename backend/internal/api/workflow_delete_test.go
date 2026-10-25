@@ -10,6 +10,7 @@ import (
 
 	"duraflow/backend/internal/config"
 	"duraflow/backend/internal/db"
+	"duraflow/backend/internal/dslruntime"
 	"duraflow/backend/internal/events"
 	"duraflow/backend/internal/models"
 	"duraflow/backend/internal/temporalexec"
@@ -35,13 +36,14 @@ func newDeleteTestAPI(t *testing.T) (humatest.TestAPI, *Deps) {
 	// Nothing listens on port 1: Temporal calls fail fast and are skipped, as when it's down.
 	temporal := temporalexec.NewLazyClient("127.0.0.1:1")
 	bus := events.NewBroker()
+	dslEnv, err := dslruntime.NewEnv()
+	if err != nil {
+		t.Fatal(err)
+	}
 	deps := &Deps{
 		DB:       conn,
 		Temporal: temporal,
-		Workers: temporalexec.NewWorkerManager(
-			config.TemporalConfig{ZigflowBinary: "zigflow-not-installed", WorkflowsDir: t.TempDir()},
-			config.TelemetryConfig{},
-		),
+		Runtime:  dslruntime.NewCache(dslEnv, dslruntime.DBStore{DB: conn}, 0),
 		Bus:      bus,
 		Resolver: temporalexec.NewResolver(conn, temporal, bus, 0),
 	}
@@ -51,8 +53,8 @@ func newDeleteTestAPI(t *testing.T) (humatest.TestAPI, *Deps) {
 	return api, deps
 }
 
-// seedWorkflow creates a workflow with a finished run (plus a child run and events), a schedule and
-// a worker row, the way real use leaves them.
+// seedWorkflow creates a saved workflow (with its DSL version and registrations) and a finished run
+// (plus a child run and events), the way real use leaves them.
 func seedWorkflow(t *testing.T, deps *Deps, projectID, name string) models.Workflow {
 	t.Helper()
 	must := func(err error) {
@@ -62,8 +64,11 @@ func seedWorkflow(t *testing.T, deps *Deps, projectID, name string) models.Workf
 		}
 	}
 	wf := models.Workflow{ProjectID: projectID, Name: name, DSL: dslFor(name + "-type")}
-	applyDSLHeader(&wf)
-	must(deps.DB.Create(&wf).Error)
+	build := compileWorkflowDSL(deps, &wf)
+	if build == nil {
+		t.Fatalf("seed DSL does not build: %s", wf.DSLError)
+	}
+	must(storeWorkflow(deps.DB, &wf, build, true))
 
 	root := models.Execution{WorkflowID: wf.ID, Status: models.ExecutionCompleted, StartedAt: time.Now()}
 	must(deps.DB.Create(&root).Error)
@@ -79,7 +84,6 @@ func seedWorkflow(t *testing.T, deps *Deps, projectID, name string) models.Workf
 			EventType: "dev.zigflow.task.completed", DedupeKey: execID + string(rune('a'+i)),
 		}).Error)
 	}
-	upsertWorker(deps, t.Context(), wf.Name, wf.TaskQueue, models.WorkerOnline)
 	return wf
 }
 
@@ -92,7 +96,7 @@ func count(t *testing.T, deps *Deps, model any, query string, args ...any) int64
 	return n
 }
 
-func TestDeleteWorkflowRemovesRunsAndWorker(t *testing.T) {
+func TestDeleteWorkflowRemovesRunsAndRegistrations(t *testing.T) {
 	api, deps := newDeleteTestAPI(t)
 	project := models.Project{Name: "p"}
 	deps.DB.Create(&project)
@@ -123,27 +127,15 @@ func TestDeleteWorkflowRemovesRunsAndWorker(t *testing.T) {
 	if got := count(t, deps, &models.ExecutionEvent{}, "1 = 1"); got != 2 {
 		t.Errorf("events: want only the other workflow's 2 left, got %d", got)
 	}
-	if got := count(t, deps, &models.Worker{}, "identity = ?", doomed.Name); got != 0 {
-		t.Errorf("worker row left for deleted workflow")
+	if got := count(t, deps, &models.WorkflowRegistration{}, "workflow_id = ?", doomed.ID); got != 0 {
+		t.Errorf("registrations left for deleted workflow: %d", got)
 	}
-	if got := count(t, deps, &models.Worker{}, "identity = ?", kept.Name); got != 1 {
-		t.Errorf("other workflow's worker row removed")
+	if got := count(t, deps, &models.WorkflowRegistration{}, "workflow_id = ?", kept.ID); got != 1 {
+		t.Errorf("other workflow's registrations removed")
 	}
-}
-
-func TestDeleteWorkflowKeepsWorkerRowSharedByAnotherWorkflow(t *testing.T) {
-	api, deps := newDeleteTestAPI(t)
-	project := models.Project{Name: "p"}
-	deps.DB.Create(&project)
-	// Same name and task queue, so both map to one Workers-page row.
-	first := seedWorkflow(t, deps, project.ID, "same")
-	seedWorkflow(t, deps, project.ID, "same")
-
-	if resp := api.Delete("/api/workflows/" + first.ID); resp.Code != http.StatusNoContent {
-		t.Fatalf("delete workflow: status %d: %s", resp.Code, resp.Body.String())
-	}
-	if got := count(t, deps, &models.Worker{}, "identity = ?", "same"); got != 1 {
-		t.Errorf("shared worker row: want kept, got %d rows", got)
+	// Versions are content-addressed and may be shared, so they stay.
+	if got := count(t, deps, &models.DSLVersion{}, "hash = ?", doomed.CurrentHash); got != 1 {
+		t.Errorf("DSL version of the deleted workflow removed")
 	}
 }
 
@@ -170,8 +162,8 @@ func TestDeleteProjectCascadesToItsWorkflows(t *testing.T) {
 	if got := count(t, deps, &models.Execution{}, "workflow_id IN ?", []string{a.ID, b.ID}); got != 0 {
 		t.Errorf("runs left: %d", got)
 	}
-	if got := count(t, deps, &models.Worker{}, "identity IN ?", []string{"a", "b"}); got != 0 {
-		t.Errorf("worker rows left: %d", got)
+	if got := count(t, deps, &models.WorkflowRegistration{}, "workflow_id IN ?", []string{a.ID, b.ID}); got != 0 {
+		t.Errorf("registrations left: %d", got)
 	}
 	if got := count(t, deps, &models.Execution{}, "workflow_id = ?", c.ID); got != 2 {
 		t.Errorf("other project's runs: want 2, got %d", got)

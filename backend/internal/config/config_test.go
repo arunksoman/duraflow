@@ -41,13 +41,82 @@ func TestLoadDefaults(t *testing.T) {
 	}
 }
 
-func TestLoadGeneratesFreshTokenEachBoot(t *testing.T) {
+func TestLoadDerivesTheSameTokenOnEveryCopy(t *testing.T) {
 	t.Chdir(t.TempDir())
 	a, _ := Load()
 	b, _ := Load()
-	if a.Telemetry.Token == b.Telemetry.Token {
-		t.Error("two boots share a telemetry token")
+	if a.Telemetry.Token != b.Telemetry.Token {
+		t.Error("two copies with the same JWT secret derived different telemetry tokens")
 	}
+	t.Setenv("DURAFLOW_AUTH_JWTSECRET", "another-secret")
+	c, _ := Load()
+	if c.Telemetry.Token == a.Telemetry.Token {
+		t.Error("the telemetry token does not depend on the JWT secret")
+	}
+}
+
+func TestLoadRoles(t *testing.T) {
+	t.Chdir(t.TempDir())
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.SingleProcess() || !cfg.HasRole(RoleAPI) || !cfg.HasRole(RoleWorker) {
+		t.Errorf("default roles: %v", cfg.RoleSet)
+	}
+
+	t.Setenv("DURAFLOW_DATABASE_DRIVER", "postgres")
+	t.Setenv("DURAFLOW_ROLES", " API ")
+	cfg, err = Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.HasRole(RoleAPI) || cfg.HasRole(RoleWorker) {
+		t.Errorf("api-only roles: %v", cfg.RoleSet)
+	}
+
+	t.Setenv("DURAFLOW_ROLES", "api,api worker")
+	cfg, err = Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.RoleSet) != 2 {
+		t.Errorf("duplicate roles not collapsed: %v", cfg.RoleSet)
+	}
+}
+
+func TestLoadRejectsInvalidRoleSetups(t *testing.T) {
+	cases := map[string]map[string]string{
+		"unknown role":              {"DURAFLOW_ROLES": "api,scheduler", "DURAFLOW_DATABASE_DRIVER": "postgres"},
+		"no role":                   {"DURAFLOW_ROLES": " , "},
+		"split roles on sqlite":     {"DURAFLOW_ROLES": "api"},
+		"worker without a sink URL": {"DURAFLOW_ROLES": "worker", "DURAFLOW_DATABASE_DRIVER": "postgres"},
+	}
+	for name, env := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Chdir(t.TempDir())
+			for k, v := range env {
+				t.Setenv(k, v)
+			}
+			if _, err := Load(); err == nil {
+				t.Error("accepted")
+			}
+		})
+	}
+
+	t.Run("worker with a sink URL", func(t *testing.T) {
+		t.Chdir(t.TempDir())
+		t.Setenv("DURAFLOW_ROLES", "worker")
+		t.Setenv("DURAFLOW_DATABASE_DRIVER", "postgres")
+		t.Setenv("DURAFLOW_TELEMETRY_SINKURL", "http://api:8000/api/internal/zigflow/events")
+		cfg, err := Load()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.Worker.Identity == "" {
+			t.Error("worker identity not derived")
+		}
+	})
 }
 
 func TestLoadEnvOverrides(t *testing.T) {

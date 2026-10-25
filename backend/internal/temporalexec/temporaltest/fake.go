@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"sort"
 	"sync"
 
 	enumspb "go.temporal.io/api/enums/v1"
@@ -16,6 +17,8 @@ import (
 	"go.temporal.io/api/workflowservice/v1"
 	"go.temporal.io/sdk/client"
 	"google.golang.org/grpc"
+
+	"duraflow/backend/internal/dslhash"
 )
 
 // Started records one ExecuteWorkflow call.
@@ -24,6 +27,18 @@ type Started struct {
 	TaskQueue    string
 	WorkflowType string
 	Input        any
+	// Hash is the DSL version the start was pinned to (dslhash.From of its context). The fake
+	// bypasses context propagators, so this is how a test sees the header a real client would send.
+	Hash string
+}
+
+// CreatedSchedule records one ScheduleClient().Create call.
+type CreatedSchedule struct {
+	ID           string
+	WorkflowType string
+	TaskQueue    string
+	// Hash is the DSL version the schedule's runs are pinned to.
+	Hash string
 }
 
 // Result is what GetWorkflow(...).Get returns for a workflow.
@@ -64,6 +79,8 @@ type Client struct {
 	terminated       []string
 	deletedHistories []string
 	deletedSchedules []string
+	createdSchedules []CreatedSchedule
+	liveSchedules    map[string]bool
 }
 
 func New() *Client {
@@ -71,7 +88,28 @@ func New() *Client {
 		Workflows: map[string]*workflowpb.WorkflowExecutionInfo{},
 		Histories: map[string][]*historypb.HistoryEvent{},
 		Results:   map[string]Result{},
+
+		liveSchedules: map[string]bool{},
 	}
+}
+
+// CreatedSchedules lists every schedule created, in order.
+func (c *Client) CreatedSchedules() []CreatedSchedule {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]CreatedSchedule(nil), c.createdSchedules...)
+}
+
+// LiveSchedules lists the ids of schedules created and not deleted since.
+func (c *Client) LiveSchedules() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	ids := make([]string, 0, len(c.liveSchedules))
+	for id := range c.liveSchedules {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids
 }
 
 func (c *Client) Started() []Started {
@@ -129,7 +167,7 @@ func (c *Client) GetWorkflowHistory(
 }
 
 func (c *Client) ExecuteWorkflow(
-	_ context.Context, options client.StartWorkflowOptions, workflow any, args ...any,
+	ctx context.Context, options client.StartWorkflowOptions, workflow any, args ...any,
 ) (client.WorkflowRun, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -143,6 +181,7 @@ func (c *Client) ExecuteWorkflow(
 	}
 	c.started = append(c.started, Started{
 		ID: options.ID, TaskQueue: options.TaskQueue, WorkflowType: workflowType, Input: input,
+		Hash: dslhash.From(ctx),
 	})
 	return &workflowRun{c: c, id: options.ID, runID: "run-" + options.ID}, nil
 }
@@ -255,6 +294,49 @@ func (s *scheduleClient) GetHandle(_ context.Context, scheduleID string) client.
 	return &scheduleHandle{c: s.c, id: scheduleID}
 }
 
+func (s *scheduleClient) Create(ctx context.Context, options client.ScheduleOptions) (client.ScheduleHandle, error) {
+	s.c.mu.Lock()
+	defer s.c.mu.Unlock()
+	if s.c.liveSchedules[options.ID] {
+		return nil, serviceerror.NewAlreadyExists("schedule already exists: " + options.ID)
+	}
+	created := CreatedSchedule{ID: options.ID, Hash: dslhash.From(ctx)}
+	if action, ok := options.Action.(*client.ScheduleWorkflowAction); ok {
+		created.WorkflowType, _ = action.Workflow.(string)
+		created.TaskQueue = action.TaskQueue
+	}
+	s.c.createdSchedules = append(s.c.createdSchedules, created)
+	s.c.liveSchedules[options.ID] = true
+	return &scheduleHandle{c: s.c, id: options.ID}, nil
+}
+
+func (s *scheduleClient) List(context.Context, client.ScheduleListOptions) (client.ScheduleListIterator, error) {
+	s.c.mu.Lock()
+	defer s.c.mu.Unlock()
+	ids := make([]string, 0, len(s.c.liveSchedules))
+	for id := range s.c.liveSchedules {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return &scheduleIterator{ids: ids}, nil
+}
+
+type scheduleIterator struct {
+	ids  []string
+	next int
+}
+
+func (it *scheduleIterator) HasNext() bool { return it.next < len(it.ids) }
+
+func (it *scheduleIterator) Next() (*client.ScheduleListEntry, error) {
+	if !it.HasNext() {
+		return nil, errors.New("no more schedules")
+	}
+	id := it.ids[it.next]
+	it.next++
+	return &client.ScheduleListEntry{ID: id}, nil
+}
+
 type scheduleHandle struct {
 	client.ScheduleHandle
 	c  *Client
@@ -270,5 +352,6 @@ func (h *scheduleHandle) Delete(context.Context) error {
 		return h.c.DeleteScheduleErr
 	}
 	h.c.deletedSchedules = append(h.c.deletedSchedules, h.id)
+	delete(h.c.liveSchedules, h.id)
 	return nil
 }

@@ -70,6 +70,11 @@ type Execution struct {
 	ParentTaskName  string `json:"parentTaskName,omitempty"`
 	ParentScopePath string `json:"parentScopePath,omitempty"`
 
+	// TaskQueue is the Temporal task queue the run executes on. The worker pool keeps polling
+	// every queue that still has a running execution, so a run is never stranded when its
+	// workflow moves to another queue or is deleted. Not part of the API shape.
+	TaskQueue string `gorm:"index" json:"-"`
+
 	// WorkflowName is computed via join at query time, never stored.
 	WorkflowName string `gorm:"-" json:"workflowName"`
 }

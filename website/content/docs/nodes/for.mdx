@@ -45,6 +45,8 @@ and the label tells you which iteration you're looking at.
 
 ## Notes
 
-- Zigflow runs **each iteration as a Temporal child workflow**. A loop over a very large
-  collection creates many child workflows, and Temporal's history limits apply.
+- Zigflow runs the loop **inside the parent workflow** (since Zigflow v0.17), so every iteration
+  adds to the parent's Temporal history. A loop over a very large collection can reach Temporal's
+  history limits; `document.metadata.canMaxHistoryLength` makes the workflow continue as new
+  before that happens.
 - `while` can't stop the first iteration: it is evaluated after each one.

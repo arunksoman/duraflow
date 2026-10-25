@@ -1,8 +1,8 @@
 import { defineConfig, devices } from '@playwright/test';
 
 /**
- * End-to-end tests against the whole running stack — Temporal, the Go backend (which spawns real
- * `zigflow run` workers) and this app — as `docker compose up` starts it from the repo root.
+ * End-to-end tests against the whole running stack — Temporal, the Go backend (whose worker pool
+ * runs workflows through zigflow) and this app — as `docker compose up` starts it from the repo root.
  * Nothing here starts a server: bring the stack up first, then `pnpm test:e2e`.
  *
  * Point at another deployment with E2E_BASE_URL; the seeded admin's credentials come from
@@ -20,7 +20,8 @@ export default defineConfig({
 	workers: 1,
 	forbidOnly: ci,
 	retries: ci ? 1 : 0,
-	// A run waits on a freshly spawned zigflow worker and Temporal, so allow for a slow first start.
+	// A run waits on the worker pool picking up a new task queue and on Temporal, so allow for a
+	// slow first start.
 	timeout: 120_000,
 	expect: { timeout: 15_000 },
 	reporter: [

@@ -4,7 +4,7 @@ description: Start a run from the builder, follow it live, and inspect every ste
 ---
 
 Runs are real Temporal workflow executions. Duraflow doesn't simulate anything: what you see is
-what the Zigflow worker actually did.
+what the workflow actually did.
 
 ## Starting a run
 
@@ -20,12 +20,13 @@ inside it.
 <Screenshot name="run-inputs" alt="The run inputs dialog, in JSON mode, over the run window" />
 
 Starting a run **saves the design first**, so you always run what is on screen. The backend then
-asks Temporal to start the workflow on its task queue. If Temporal is unreachable, or the
-workflow's worker hasn't registered yet, the run fails to start and the window says why.
+asks Temporal to start the workflow on its task queue, at the version just saved. If Temporal is
+unreachable, or the saved design doesn't pass Zigflow's checks, the run fails to start and the
+window says why.
 
 ## Following a run
 
-The run window shows a read-only copy of the canvas, coloured as events arrive from the worker:
+The run window shows a read-only copy of the canvas, coloured as events arrive from the run:
 
 | Colour             | Meaning                                                                    |
 | ------------------ | -------------------------------------------------------------------------- |

@@ -11,9 +11,10 @@ import (
 
 // Deleting a workflow removes everything that only exists because of it: its runs (each as a whole
 // tree, with its event log and Temporal history — see deleteExecutionTrees), the Temporal schedule
-// its DSL published, its worker process and DSL files, and its row on the Workers page. A run still
-// in progress is terminated rather than refused, since the worker it runs on is being stopped
-// anyway. Deleting a project does the same for every workflow in it.
+// its DSL published, and its registered workflow names. A run still in progress is terminated
+// rather than refused, since nothing could start its workflow again. Its DSL versions stay: they
+// are immutable, shared by content with any workflow that has the same DSL, and tiny. Deleting a
+// project does the same for every workflow in it.
 //
 // Child runs this workflow contributed to *another* workflow's run are left alone: they belong to
 // that root run's timeline and go when it does.
@@ -37,6 +38,9 @@ func deleteWorkflowCascade(ctx context.Context, deps *Deps, workflow models.Work
 	}
 
 	err := deps.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Where("workflow_id = ?", workflow.ID).Delete(&models.WorkflowRegistration{}).Error; err != nil {
+			return fmt.Errorf("deleting workflow registrations: %w", err)
+		}
 		if err := tx.Delete(&models.Workflow{}, "id = ?", workflow.ID).Error; err != nil {
 			return fmt.Errorf("deleting workflow: %w", err)
 		}
@@ -46,30 +50,9 @@ func deleteWorkflowCascade(ctx context.Context, deps *Deps, workflow models.Work
 		return err
 	}
 
-	// Stopping the worker does not retract the schedule it registered — Temporal would keep
-	// starting workflows nothing is left to run. See workflow_schedule.go.
+	// Nothing would ever run what the schedule starts, so retract it. See workflow_schedule.go.
 	dropWorkflowSchedule(ctx, deps, workflow.DSL)
-	removeWorkerRegistration(deps, ctx, workflow)
+	// Worker pools stop polling the workflow's task queue once nothing else uses it.
+	deps.workflowsChanged()
 	return nil
-}
-
-// removeWorkerRegistration stops a deleted workflow's worker and drops its Workers-page row — unlike
-// stopWorkerRegistration, which leaves an offline row for a workflow that still exists. Rows are
-// keyed by workflow name and task queue, so one still used by another workflow is kept.
-func removeWorkerRegistration(deps *Deps, ctx context.Context, workflow models.Workflow) {
-	deps.Workers.Stop(workflow.ID)
-
-	taskQueue, _, err := parseDSLHeader(workflow.DSL)
-	if err != nil || taskQueue == "" {
-		return
-	}
-	var sharing int64
-	deps.DB.WithContext(ctx).Model(&models.Workflow{}).
-		Where("name = ? AND task_queue = ?", workflow.Name, taskQueue).Count(&sharing)
-	if sharing > 0 {
-		return
-	}
-	_ = deps.DB.WithContext(ctx).
-		Where("identity = ? AND task_queue = ?", workflow.Name, taskQueue).
-		Delete(&models.Worker{}).Error
 }

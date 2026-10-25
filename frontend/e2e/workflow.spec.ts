@@ -3,7 +3,8 @@ import { createProject, deleteProject, runnableDsl, uniqueSuffix } from './helpe
 
 /**
  * The path a user takes through the whole product: a project, a workflow designed in the builder,
- * saved (which starts a real zigflow worker), run through Temporal, then inspected and cleaned up.
+ * saved (the worker pool starts polling its task queue), run through Temporal, then inspected and
+ * cleaned up.
  */
 test('design, run and inspect a workflow end to end', async ({ page }) => {
 	const id = uniqueSuffix();
@@ -25,7 +26,7 @@ test('design, run and inspect a workflow end to end', async ({ page }) => {
 	await expect(page.locator('.svelte-flow__node', { hasText: 'greet' })).toBeVisible();
 	await page.getByRole('button', { name: '✕' }).click();
 
-	// ── Save: the backend writes the DSL and starts a worker for it ────────
+	// ── Save: the backend stores the DSL as a new version ──────────────────
 	await page.getByRole('button', { name: 'Save' }).click();
 	await expect(page.getByRole('button', { name: 'Saved' })).toBeVisible();
 
@@ -40,10 +41,9 @@ test('design, run and inspect a workflow end to end', async ({ page }) => {
 	await expect(runWindow.getByText('"hello from e2e"').first()).toBeVisible();
 	await runWindow.getByRole('button', { name: 'Close run window' }).click();
 
-	// ── The worker is listed ───────────────────────────────────────────────
+	// ── A worker process polling the workflow's task queue is listed ───────
 	await page.goto('/workers');
-	const workerRow = page.getByRole('row', { name: new RegExp(workflowName) });
-	await expect(workerRow).toContainText(`e2e-${id}`);
+	const workerRow = page.getByRole('row', { name: new RegExp(`e2e-${id}`) }).first();
 	await expect(workerRow).toContainText('online');
 
 	// ── The run is in the executions list, and opens on its own page ───────
@@ -64,10 +64,13 @@ test('design, run and inspect a workflow end to end', async ({ page }) => {
 	await expect(page).toHaveURL(/\/executions$/);
 	await expect(page.getByRole('row', { name: new RegExp(workflowName) })).toHaveCount(0);
 
-	// ── Deleting the project takes the workflow and its worker with it ─────
+	// ── Deleting the project stops the pool polling the workflow's queue ───
 	await deleteProject(page, projectName);
-	await page.goto('/workers');
-	await expect(page.getByRole('row', { name: new RegExp(workflowName) })).toHaveCount(0);
+	await expect(async () => {
+		await page.goto('/workers');
+		const rows = page.getByRole('row', { name: new RegExp(`e2e-${id}`) });
+		await expect(rows.filter({ hasText: 'online' })).toHaveCount(0);
+	}).toPass({ timeout: 30_000 });
 });
 
 test('a failing run shows its error', async ({ page }) => {

@@ -17,11 +17,12 @@ import (
 	"duraflow/backend/internal/models"
 )
 
-// This endpoint is the reason the UI can say anything at all about a run. Each `zigflow run`
-// worker this server spawns is handed a CloudEvents config pointing here (see
-// temporalexec.WorkerManager.writeCloudEventsConfig), and then POSTs one event per task
-// lifecycle moment: started, retried, cancelled, faulted, completed — each carrying that task's
-// input, output, and the whole workflow state at that point.
+// This endpoint is the reason the UI can say anything at all about a run. Every workflow the
+// worker pool builds gets a CloudEvents emitter pointing here (see
+// dslruntime.WriteCloudEventsConfig), which POSTs one event per task lifecycle moment: started,
+// retried, cancelled, faulted, completed — each carrying that task's input, output, and the whole
+// workflow state at that point. Any API copy can receive any event: the insert is idempotent and
+// the resolution that follows works from shared state.
 //
 // Two properties of zigflow's emitter shape everything below:
 //
@@ -76,8 +77,8 @@ func registerTelemetryRoutes(api huma.API, deps *Deps, base string) {
 		Tags:          []string{"Internal"},
 		DefaultStatus: http.StatusNoContent,
 		Hidden:        true,
-		// Deliberately no Security: workers are local subprocesses with no user identity. The
-		// shared token below is what authenticates them.
+		// Deliberately no Security: workflows have no user identity. The shared token below is
+		// what authenticates them. Keep this path off the public load balancer where possible.
 	}, func(ctx context.Context, in *ingestEventInput) (*struct{}, error) {
 		if subtle.ConstantTimeCompare([]byte(in.Token), []byte(deps.Cfg.Telemetry.Token)) != 1 {
 			return nil, huma.Error401Unauthorized("invalid telemetry token")

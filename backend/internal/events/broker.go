@@ -105,3 +105,42 @@ func (b *Broker) Publish(executionID string, ev models.ExecutionEvent) {
 		}
 	}
 }
+
+// Bus is what the API publishes run events to and subscribes SSE streams on. A Broker serves a
+// single process; a Relay spreads it across copies.
+type Bus interface {
+	Publish(executionID string, ev models.ExecutionEvent)
+	Subscribe(executionID string) *Subscription
+}
+
+var _ Bus = (*Broker)(nil)
+
+// HasSubscribers reports whether anyone on this process is watching an execution.
+func (b *Broker) HasSubscribers(executionID string) bool {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return len(b.subs[executionID]) > 0
+}
+
+// MarkAllLagged flags every subscriber as having possibly missed events and wakes it with ev, so
+// each stream asks its client to re-read the log. Used after the cross-copy relay reconnects.
+func (b *Broker) MarkAllLagged(ev models.ExecutionEvent) {
+	b.mu.RLock()
+	targets := make([]*subscriber, 0)
+	for _, set := range b.subs {
+		for _, sub := range set {
+			targets = append(targets, sub)
+		}
+	}
+	b.mu.RUnlock()
+
+	for _, sub := range targets {
+		sub.mu.Lock()
+		sub.lagged = true
+		sub.mu.Unlock()
+		select {
+		case sub.ch <- ev:
+		default:
+		}
+	}
+}

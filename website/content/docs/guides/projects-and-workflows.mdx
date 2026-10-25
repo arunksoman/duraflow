@@ -30,9 +30,10 @@ A workflow is stored as its Zigflow DSL text, and the canvas is drawn from that 
 **Save** in the builder does three things:
 
 1. Stores the DSL.
-2. Starts (or restarts) a dedicated `zigflow run` worker process for the workflow. The worker
-   registers the workflow's `workflowType` on its `taskQueue` with Temporal, which is what makes it
-   runnable. It appears on the [Workers](/docs/guides/workers) page.
+2. Checks it with Zigflow and, if it builds, makes it the workflow's new **version**. The
+   [worker pool](/docs/guides/workers) runs new runs on it straight away; runs already in progress
+   keep the version they started on. If it doesn't build, the draft is still saved, and **Run**
+   tells you what Zigflow rejected.
 3. Publishes, changes or removes its [schedule](/docs/guides/schedules) in Temporal, if the DSL
    has one (or had one).
 
@@ -45,7 +46,7 @@ Deleting a workflow is permanent. It removes:
 - every run of it, including runs still in progress (they are terminated first), with their child
   runs, recorded events and Temporal history;
 - its Temporal schedule, if it had one;
-- its worker process, its DSL file and its row on the Workers page.
+- its registration with the worker pool.
 
 ## Workflow identity
 

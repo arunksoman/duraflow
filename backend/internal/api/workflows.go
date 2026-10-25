@@ -2,10 +2,20 @@ package api
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"log"
 	"net/http"
+	"time"
 
 	"github.com/danielgtaylor/huma/v2"
+	"github.com/zigflow/zigflow/pkg/zigflow"
+	"go.temporal.io/api/serviceerror"
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 
+	"duraflow/backend/internal/dslhash"
+	"duraflow/backend/internal/dslruntime"
 	"duraflow/backend/internal/models"
 )
 
@@ -43,9 +53,18 @@ type updateWorkflowInput struct {
 	}
 }
 
-// applyDSLHeader refreshes the columns denormalized from the DSL's `document` header. Call it on
-// every write that can change the DSL, before saving — the resolver matches Temporal child
-// workflows back to a Workflow row through these two columns.
+// Saving a DSL is what makes a workflow runnable. There is no worker to restart: the save compiles
+// the DSL with zigflow (exactly the validation `zigflow run` applied at startup), stores it as an
+// immutable version named by its hash, points the workflow at that version, and publishes its
+// schedule. The next run, on any worker in the pool, executes the new version; runs already in
+// progress keep the version they started on.
+//
+// A DSL that doesn't build is still saved — the builder saves drafts mid-edit — but the workflow
+// gets no current version, so a run is refused with zigflow's reason (Workflow.DSLError).
+
+// applyDSLHeader refreshes the columns denormalized from the DSL's `document` header. The resolver
+// matches Temporal child workflows back to a Workflow row through these two columns, so they are
+// kept even for a DSL that doesn't build.
 func applyDSLHeader(workflow *models.Workflow) {
 	taskQueue, workflowType, err := parseDSLHeader(workflow.DSL)
 	if err != nil {
@@ -57,28 +76,105 @@ func applyDSLHeader(workflow *models.Workflow) {
 	workflow.TaskQueue, workflow.WorkflowType = taskQueue, workflowType
 }
 
-// syncWorkerRegistration starts/updates the workflow's zigflow worker process and reflects its
-// presence in the `workers` table (best-effort — a workflow whose DSL doesn't yet have a valid
-// document.taskQueue just doesn't get a row), so the Workers page shows real spawned processes
-// rather than staying permanently empty.
-func syncWorkerRegistration(deps *Deps, ctx context.Context, workflow models.Workflow) {
-	deps.Workers.Sync(workflow.ID, workflow.Name, workflow.DSL)
+// compileWorkflowDSL sets the workflow's derived columns from its DSL and returns the build, or nil
+// when the DSL is blank or doesn't build.
+func compileWorkflowDSL(deps *Deps, workflow *models.Workflow) *dslruntime.Build {
+	applyDSLHeader(workflow)
+	workflow.CurrentHash, workflow.DSLError = "", ""
 
-	taskQueue, _, err := parseDSLHeader(workflow.DSL)
-	if err != nil || taskQueue == "" {
-		return
+	build, err := deps.Runtime.Compile(workflow.DSL)
+	switch {
+	case err == nil:
+		workflow.CurrentHash = build.Hash
+		workflow.TaskQueue = build.TaskQueue
+		workflow.WorkflowType = build.WorkflowType
+		return build
+	case errors.Is(err, dslruntime.ErrBlankDSL):
+		return nil
+	default:
+		workflow.DSLError = err.Error()
+		return nil
 	}
-	upsertWorker(deps, ctx, workflow.Name, taskQueue, models.WorkerOnline)
 }
 
-func stopWorkerRegistration(deps *Deps, ctx context.Context, workflow models.Workflow) {
-	deps.Workers.Stop(workflow.ID)
+// storeWorkflow writes the workflow row together with its DSL version and registered names, so a
+// worker that sees the new current hash can always load it.
+func storeWorkflow(tx *gorm.DB, workflow *models.Workflow, build *dslruntime.Build, create bool) error {
+	if build != nil {
+		version := models.DSLVersion{
+			Hash: build.Hash, DSL: workflow.DSL, TaskQueue: build.TaskQueue,
+			WorkflowType: build.WorkflowType, CreatedAt: time.Now(),
+		}
+		if err := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&version).Error; err != nil {
+			return fmt.Errorf("storing the DSL version: %w", err)
+		}
+	}
 
-	taskQueue, _, err := parseDSLHeader(workflow.DSL)
-	if err != nil || taskQueue == "" {
+	if create {
+		if err := tx.Create(workflow).Error; err != nil {
+			return err
+		}
+	} else if err := tx.Save(workflow).Error; err != nil {
+		return err
+	}
+
+	if err := tx.Where("workflow_id = ?", workflow.ID).Delete(&models.WorkflowRegistration{}).Error; err != nil {
+		return fmt.Errorf("clearing workflow registrations: %w", err)
+	}
+	if build == nil {
+		return nil
+	}
+	names := build.WorkflowNames()
+	registrations := make([]models.WorkflowRegistration, 0, len(names))
+	for _, name := range names {
+		registrations = append(registrations, models.WorkflowRegistration{
+			TaskQueue: build.TaskQueue, Name: name, WorkflowID: workflow.ID,
+		})
+	}
+	if len(registrations) > 0 {
+		if err := tx.Create(&registrations).Error; err != nil {
+			return fmt.Errorf("storing workflow registrations: %w", err)
+		}
+	}
+	return nil
+}
+
+// publishWorkflowSchedule brings the Temporal schedule in line with the saved DSL.
+//
+//   - A DSL that builds publishes its schedule (or deletes it when the `schedule:` block is gone)
+//     through zigflow's own UpdateSchedules. The schedule is created with the version's hash in
+//     its header, so every scheduled run starts on the version that was current when it was saved.
+//   - A blank DSL retracts the previous schedule: there is nothing left to run.
+//   - A DSL that doesn't build leaves the schedule alone; it keeps firing the last good version
+//     until the DSL is fixed.
+func publishWorkflowSchedule(ctx context.Context, deps *Deps, previousDSL string, workflow models.Workflow, build *dslruntime.Build) {
+	if build == nil {
+		if workflow.DSLError == "" {
+			dropWorkflowSchedule(ctx, deps, previousDSL)
+		}
 		return
 	}
-	upsertWorker(deps, ctx, workflow.Name, taskQueue, models.WorkerOffline)
+
+	// Order matters: retract a schedule whose id the save changed before publishing the new one,
+	// so a renamed schedule id can't leave two live schedules behind.
+	dropRenamedWorkflowSchedule(ctx, deps, previousDSL, workflow.DSL)
+
+	temporalClient, err := deps.Temporal.Get()
+	if err != nil {
+		log.Printf("[schedule] cannot reach Temporal to publish %s's schedule: %v", workflow.Name, err)
+		return
+	}
+	pinned := dslhash.With(ctx, build.Hash)
+	err = zigflow.UpdateSchedules(pinned, temporalClient, build.Doc, deps.Runtime.Env().Envvars)
+	var exists *serviceerror.AlreadyExists
+	if errors.As(err, &exists) {
+		// Another save of a workflow with the same schedule id won a race; republish ours, which
+		// deletes theirs first.
+		err = zigflow.UpdateSchedules(pinned, temporalClient, build.Doc, deps.Runtime.Env().Envvars)
+	}
+	if err != nil {
+		log.Printf("[schedule] publishing %s's schedule: %v", workflow.Name, err)
+	}
 }
 
 func registerWorkflowRoutes(api huma.API, deps *Deps, base string) {
@@ -120,11 +216,14 @@ func registerWorkflowRoutes(api huma.API, deps *Deps, base string) {
 			Version:     1,
 			DSL:         in.Body.DSL,
 		}
-		applyDSLHeader(&workflow)
-		if err := deps.DB.WithContext(ctx).Create(&workflow).Error; err != nil {
+		build := compileWorkflowDSL(deps, &workflow)
+		if err := deps.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+			return storeWorkflow(tx, &workflow, build, true)
+		}); err != nil {
 			return nil, huma.Error500InternalServerError("failed to create workflow", err)
 		}
-		syncWorkerRegistration(deps, ctx, workflow)
+		deps.workflowsChanged()
+		publishWorkflowSchedule(ctx, deps, "", workflow, build)
 		return &workflowOutput{Body: workflow}, nil
 	})
 
@@ -153,6 +252,14 @@ func registerWorkflowRoutes(api huma.API, deps *Deps, base string) {
 		Security:    authSecurity(),
 		Errors:      []int{404},
 	}, func(ctx context.Context, in *updateWorkflowInput) (*workflowOutput, error) {
+		// Two copies saving the same workflow at once would otherwise interleave their version
+		// bumps and schedule publishes.
+		unlock, err := deps.locker().Lock(ctx, "workflow:"+in.ID)
+		if err != nil {
+			return nil, huma.Error503ServiceUnavailable("could not lock the workflow for saving", err)
+		}
+		defer unlock()
+
 		var workflow models.Workflow
 		if err := deps.DB.WithContext(ctx).First(&workflow, "id = ?", in.ID).Error; err != nil {
 			return nil, huma.Error404NotFound("workflow not found")
@@ -164,18 +271,31 @@ func registerWorkflowRoutes(api huma.API, deps *Deps, base string) {
 			workflow.Description = *in.Body.Description
 		}
 		previousDSL := workflow.DSL
-		if in.Body.DSL != nil && *in.Body.DSL != workflow.DSL {
+		dslChanged := in.Body.DSL != nil && *in.Body.DSL != workflow.DSL
+		if dslChanged {
 			workflow.DSL = *in.Body.DSL
 			workflow.Version++
 		}
-		applyDSLHeader(&workflow)
-		if err := deps.DB.WithContext(ctx).Save(&workflow).Error; err != nil {
+
+		// Recompile when the DSL changed, and also when an unchanged DSL has no current version
+		// yet — a save is how a workflow that failed to build under an older zigflow is retried.
+		var build *dslruntime.Build
+		recompile := dslChanged || (workflow.CurrentHash == "" && workflow.DSL != "")
+		if recompile {
+			build = compileWorkflowDSL(deps, &workflow)
+		}
+		if err := deps.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+			if !recompile {
+				return tx.Save(&workflow).Error
+			}
+			return storeWorkflow(tx, &workflow, build, false)
+		}); err != nil {
 			return nil, huma.Error500InternalServerError("failed to update workflow", err)
 		}
-		// Order matters: retract the old schedule before the restarted worker publishes the new
-		// one, so a renamed schedule id can't leave two live schedules behind.
-		dropRenamedWorkflowSchedule(ctx, deps, previousDSL, workflow.DSL)
-		syncWorkerRegistration(deps, ctx, workflow)
+		if recompile {
+			deps.workflowsChanged()
+			publishWorkflowSchedule(ctx, deps, previousDSL, workflow, build)
+		}
 		return &workflowOutput{Body: workflow}, nil
 	})
 
@@ -183,7 +303,7 @@ func registerWorkflowRoutes(api huma.API, deps *Deps, base string) {
 		OperationID:   "delete-workflow",
 		Method:        http.MethodDelete,
 		Path:          base + "/workflows/{id}",
-		Summary:       "Delete a workflow with its runs, schedule and worker",
+		Summary:       "Delete a workflow with its runs and schedule",
 		Tags:          []string{"Workflows"},
 		Security:      authSecurity(),
 		DefaultStatus: http.StatusNoContent,

@@ -17,6 +17,7 @@ import (
 	"duraflow/backend/internal/auth"
 	"duraflow/backend/internal/config"
 	"duraflow/backend/internal/db"
+	"duraflow/backend/internal/dslruntime"
 	"duraflow/backend/internal/events"
 	"duraflow/backend/internal/models"
 	"duraflow/backend/internal/temporalexec"
@@ -24,7 +25,7 @@ import (
 )
 
 // testEnv is the whole API served over real HTTP — router, auth middleware and all — against a
-// temp SQLite database, a fake Temporal and a worker manager with no zigflow binary to spawn.
+// temp SQLite database and a fake Temporal. DSLs are compiled with the real zigflow library.
 type testEnv struct {
 	t        *testing.T
 	deps     *Deps
@@ -64,14 +65,15 @@ func newTestEnvWith(t *testing.T, lazy *temporalexec.LazyClient) *testEnv {
 		},
 	}
 	bus := events.NewBroker()
+	dslEnv, err := dslruntime.NewEnv()
+	if err != nil {
+		t.Fatal(err)
+	}
 	deps := &Deps{
 		Cfg:      cfg,
 		DB:       conn,
 		Temporal: lazy,
-		Workers: temporalexec.NewWorkerManager(
-			config.TemporalConfig{ZigflowBinary: "zigflow-not-installed", WorkflowsDir: t.TempDir()},
-			config.TelemetryConfig{},
-		),
+		Runtime:  dslruntime.NewCache(dslEnv, dslruntime.DBStore{DB: conn}, 0),
 		Bus:      bus,
 		Resolver: temporalexec.NewResolver(conn, lazy, bus, 0),
 	}
@@ -186,11 +188,15 @@ func (e *testEnv) seedProject(name string) models.Project {
 	return p
 }
 
+// seedWorkflowRow stores a workflow the way a save does — compiled, with its DSL version and
+// registrations — but without publishing a schedule.
 func (e *testEnv) seedWorkflowRow(projectID, name, dsl string) models.Workflow {
 	e.t.Helper()
 	wf := models.Workflow{ProjectID: projectID, Name: name, Version: 1, DSL: dsl}
-	applyDSLHeader(&wf)
-	e.mustCreate(&wf)
+	build := compileWorkflowDSL(e.deps, &wf)
+	if err := storeWorkflow(e.deps.DB, &wf, build, true); err != nil {
+		e.t.Fatal(err)
+	}
 	return wf
 }
 
@@ -257,10 +263,20 @@ func eventually(t *testing.T, what string, cond func() bool) {
 	}
 }
 
+// testDSL is a minimal DSL that zigflow builds. extra goes between the document and the tasks, e.g.
+// a schedule block.
 func testDSL(workflowType, taskQueue string, extra string) string {
-	return "document:\n  dsl: 1.0.0\n  namespace: default\n  name: " + workflowType +
-		"\n  version: 0.0.1\n  taskQueue: " + taskQueue + "\n  workflowType: " + workflowType + "\n" + extra +
-		"do:\n  - noop:\n      set:\n        a: 1\n"
+	return testDSLWithMetadata(workflowType, taskQueue, "", extra)
+}
+
+// testDSLWithMetadata adds a document.metadata block (indented YAML lines, each ending in \n).
+func testDSLWithMetadata(workflowType, taskQueue, metadata, extra string) string {
+	doc := "document:\n  dsl: 1.0.0\n  version: 0.0.1\n  taskQueue: " + taskQueue +
+		"\n  workflowType: " + workflowType + "\n"
+	if metadata != "" {
+		doc += "  metadata:\n" + metadata
+	}
+	return doc + extra + "do:\n  - noop:\n      set:\n        a: 1\n"
 }
 
 type sseMessage struct {

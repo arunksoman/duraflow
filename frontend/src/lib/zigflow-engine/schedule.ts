@@ -15,9 +15,9 @@
  *   cron: "0 0 * * *"
  * ```
  *
- * Turning a schedule **off** means removing `schedule:` entirely: `zigflow run` deletes the
- * matching Temporal schedule on every worker start and only recreates it when the block is
- * present, so an `enabled: false` flag in the DSL would do nothing. To avoid silently discarding
+ * Turning a schedule **off** means removing `schedule:` entirely: every save deletes the matching
+ * Temporal schedule and only recreates it when the block is present (zigflow's UpdateSchedules,
+ * called by the backend), so an `enabled: false` flag in the DSL would do nothing. To avoid silently discarding
  * the user's cron/interval when they flick the toggle, the whole configuration is parked under our
  * own `document.metadata.duraflow.disabledSchedule` key instead — exactly one of the two
  * representations exists at a time, so there is never a second source of truth to disagree with.

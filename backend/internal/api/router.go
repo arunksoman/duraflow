@@ -15,6 +15,8 @@ import (
 
 	"duraflow/backend/internal/auth"
 	"duraflow/backend/internal/config"
+	"duraflow/backend/internal/coord"
+	"duraflow/backend/internal/dslruntime"
 	"duraflow/backend/internal/events"
 	"duraflow/backend/internal/temporalexec"
 )
@@ -23,11 +25,18 @@ type Deps struct {
 	Cfg      *config.Config
 	DB       *gorm.DB
 	Temporal *temporalexec.LazyClient
-	Workers  *temporalexec.WorkerManager
-	// Bus fans live run events out to everyone watching an execution.
-	Bus *events.Broker
+	// Runtime compiles saved DSLs with zigflow. In a process that also runs the worker pool it is
+	// the pool's cache, so the first run after a save doesn't compile the DSL again.
+	Runtime *dslruntime.Cache
+	// Bus fans live run events out to everyone watching an execution, on every copy.
+	Bus events.Bus
 	// Resolver maps the Temporal workflow executions those events come from back to runs.
 	Resolver *temporalexec.Resolver
+	// Locks serialises saves of one workflow across copies. Nil means in-process locks.
+	Locks coord.Locker
+	// Notifier reaches the other copies: worker pools after a save, the jobs leader for
+	// completion watchers, every copy's resolver cache after a deletion. Nil means act locally.
+	Notifier coord.Notifier
 }
 
 type ctxKey string
