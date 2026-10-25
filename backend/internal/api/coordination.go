@@ -52,12 +52,18 @@ func (d *Deps) forgetRuns(rootExecutionIDs []string) {
 		d.Resolver.Forget(rootExecutionIDs...)
 		return
 	}
-	payload, err := json.Marshal(rootExecutionIDs)
-	if err != nil {
-		return
+	// Postgres refuses a NOTIFY payload of 8000 bytes or more; 100 UUIDs is about 3.9 KB.
+	for start := 0; start < len(rootExecutionIDs); start += forgetChunk {
+		chunk := rootExecutionIDs[start:min(start+forgetChunk, len(rootExecutionIDs))]
+		payload, err := json.Marshal(chunk)
+		if err != nil {
+			return
+		}
+		d.notify(coord.ChannelForget, string(payload))
 	}
-	d.notify(coord.ChannelForget, string(payload))
 }
+
+const forgetChunk = 100
 
 func (d *Deps) notify(channel, payload string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

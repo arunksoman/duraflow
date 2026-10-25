@@ -242,6 +242,12 @@ func (p *Pool) prewarm() {
 		return
 	}
 	hashes := p.opts.Dispatcher.Directory.CurrentHashes()
+	if len(hashes) > p.opts.Dispatcher.Cache.max {
+		// They can't all stay cached, so each pass would evict what it just built and recompile
+		// everything every refresh; leave compiling to the runs themselves.
+		p.prewarming.Store(false)
+		return
+	}
 	go func() {
 		defer p.prewarming.Store(false)
 		for _, hash := range hashes {
