@@ -262,9 +262,9 @@ export interface ZigflowDocument {
 	/** Declares the JSON Schema of data a caller must supply when starting/triggering the workflow. */
 	input?: InputConfig;
 	/**
-	 * Present only while the workflow is scheduled. `zigflow run` deletes the matching Temporal
-	 * schedule and recreates it from this block on every worker start, so removing the key is what
-	 * turns a schedule off — see `schedule.ts`.
+	 * Present only while the workflow is scheduled. Every save deletes the matching Temporal
+	 * schedule and recreates it from this block (zigflow's UpdateSchedules), so removing the key is
+	 * what turns a schedule off — see `schedule.ts`.
 	 */
 	schedule?: ScheduleSpec;
 	do: TaskList;

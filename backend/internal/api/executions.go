@@ -16,6 +16,8 @@ import (
 	"gopkg.in/yaml.v3"
 	"gorm.io/gorm"
 
+	"duraflow/backend/internal/dslhash"
+	"duraflow/backend/internal/events"
 	"duraflow/backend/internal/models"
 	"duraflow/backend/internal/temporalexec"
 )
@@ -281,12 +283,27 @@ func watchTerminal(deps *Deps, executionID string) {
 	// CONTINUED_AS_NEW long before the result arrives. Describing it would record the chain as
 	// still running, with the first run's close time. Execution ids are unique workflow ids, so
 	// the latest run is always this execution's.
-	if desc, err := temporalClient.DescribeWorkflowExecution(ctx, execution.ID, ""); err == nil {
+	desc, err := temporalClient.DescribeWorkflowExecution(ctx, execution.ID, "")
+	switch {
+	case err == nil:
 		info := desc.GetWorkflowExecutionInfo()
 		status = temporalexec.MapWorkflowStatus(info.GetStatus())
+		if status == models.ExecutionRunning {
+			// Get gave up without the run closing — the connection dropped or this copy is
+			// shutting down. Leave the run to the next watcher instead of recording a guess.
+			return
+		}
 		if closeTime := info.GetCloseTime(); closeTime != nil {
 			completedAt = closeTime.AsTime()
 		}
+	case isNotFound(err):
+		// Temporal no longer knows the run (its history was deleted): all that's left is the
+		// error Get returned.
+	default:
+		// Temporal is unreachable, or this copy is shutting down. A failure inferred from a
+		// broken connection would be wrong, so leave the run running; the jobs leader re-attaches
+		// a watcher on its next sweep.
+		return
 	}
 
 	// Re-read: the resolver may have filled in fields while the workflow was running.
@@ -357,11 +374,6 @@ func parseDSLHeader(dsl string) (taskQueue, workflowType string, err error) {
 		return "", "", err
 	}
 	return doc.Document.TaskQueue, doc.Document.WorkflowType, nil
-}
-
-// ParseDSLHeader exposes parseDSLHeader for startup-time backfills in cmd/server.
-func ParseDSLHeader(dsl string) (taskQueue, workflowType string, err error) {
-	return parseDSLHeader(dsl)
 }
 
 // WatchExecutionUntilClosed blocks until the given execution's Temporal workflow closes, then
@@ -575,8 +587,13 @@ func registerExecutionRoutes(api huma.API, deps *Deps, base string) {
 			return nil, huma.Error404NotFound("workflow not found")
 		}
 
-		taskQueue, workflowType, err := parseDSLHeader(wf.DSL)
-		if err != nil || taskQueue == "" || workflowType == "" {
+		// A run always starts on the workflow's current DSL version and carries its hash, so every
+		// task of the run — on whichever worker picks it up, after any later save — executes that
+		// same DSL.
+		if wf.CurrentHash == "" || wf.TaskQueue == "" || wf.WorkflowType == "" {
+			if wf.DSLError != "" {
+				return nil, huma.Error422UnprocessableEntity("the workflow's DSL can't be run: " + wf.DSLError)
+			}
 			return nil, huma.Error422UnprocessableEntity(
 				"workflow has no valid document.taskQueue/document.workflowType to run — save a DSL first",
 			)
@@ -610,19 +627,17 @@ func registerExecutionRoutes(api huma.API, deps *Deps, base string) {
 			Trigger:    trigger,
 			StartedAt:  time.Now(),
 			Input:      inputJSON,
+			TaskQueue:  wf.TaskQueue,
 		}
 
 		run, err := temporalClient.ExecuteWorkflow(
-			ctx,
-			client.StartWorkflowOptions{ID: execution.ID, TaskQueue: taskQueue},
-			workflowType,
+			dslhash.With(ctx, wf.CurrentHash),
+			client.StartWorkflowOptions{ID: execution.ID, TaskQueue: wf.TaskQueue},
+			wf.WorkflowType,
 			workflowInput,
 		)
 		if err != nil {
-			return nil, huma.Error502BadGateway(
-				"failed to start the Temporal execution — is a zigflow worker running for this workflow?",
-				err,
-			)
+			return nil, huma.Error502BadGateway("failed to start the Temporal execution", err)
 		}
 		execution.TemporalRunID = run.GetRunID()
 
@@ -631,7 +646,7 @@ func registerExecutionRoutes(api huma.API, deps *Deps, base string) {
 			return nil, huma.Error500InternalServerError("failed to create execution", err)
 		}
 
-		go watchTerminal(deps, execution.ID)
+		deps.WatchExecution(execution.ID)
 		return &executionOutput{Body: toExecutionDTO(execution, wf.Name)}, nil
 	})
 
@@ -704,9 +719,9 @@ func registerExecutionRoutes(api huma.API, deps *Deps, base string) {
 			return
 		}
 
-		// Nothing else in this process learns that a workflow closed, so make sure something is
-		// waiting on it — watchTerminal is a no-op for an execution already being watched out.
-		go watchTerminal(deps, in.ID)
+		// Nothing else learns that a workflow closed, so make sure something is waiting on it —
+		// watching is a no-op for an execution that is already being watched.
+		deps.WatchExecution(in.ID)
 
 		heartbeat := time.NewTicker(watchHeartbeat)
 		defer heartbeat.Stop()
@@ -720,6 +735,9 @@ func registerExecutionRoutes(api huma.API, deps *Deps, base string) {
 				if subscription.Lagged() {
 					subscription.ResetLagged()
 					_ = send.Data(refetchEvent{AfterSeq: maxSeq})
+				}
+				if ev.EventType == events.ResyncEventType {
+					continue // only a wake-up for the refetch above
 				}
 				if ev.EventType == terminalMarkerEventType {
 					var latest models.Execution

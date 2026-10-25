@@ -40,8 +40,8 @@ With both `cron` and `every`, Temporal fires on either. Zigflow does not support
 
 ## Turning a schedule off
 
-Zigflow only looks at whether `schedule:` is present: on every worker start it deletes the
-schedule with this id and recreates it if the block is there. An `enabled: false` flag would do
+Zigflow only looks at whether `schedule:` is present: on every save it deletes the schedule with
+this id and recreates it if the block is there. An `enabled: false` flag would do
 nothing, so turning a schedule off in the builder **removes** `schedule:` and the three metadata
 keys, and parks the settings in Duraflow's own metadata so turning it back on restores them:
 

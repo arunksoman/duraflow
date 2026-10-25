@@ -37,18 +37,19 @@ This starts three services:
 | Backend API (docs at `/docs`) | http://localhost:8000 |
 | Temporal (gRPC / web UI) | `localhost:7233` / http://localhost:8233 |
 
-Log in with the seeded admin from `docker-compose.yml` (`DURAFLOW_SEEDADMIN_EMAIL` / `DURAFLOW_SEEDADMIN_PASSWORD`). The SQLite database and per-workflow DSL files persist in `backend/data/`. To reset everything, stop the stack and delete `backend/data/duraflow.db`.
+Log in with the seeded admin from `docker-compose.yml` (`DURAFLOW_SEEDADMIN_EMAIL` / `DURAFLOW_SEEDADMIN_PASSWORD`). The SQLite database persists in `backend/data/`. To reset everything, stop the stack and delete `backend/data/duraflow.db`.
+
+The backend runs as a single process here, serving the API and running the worker pool. To try the scaled-out shape — Postgres, two API copies behind nginx and two worker copies — layer the scale file on top:
+
+```sh
+docker compose -f docker-compose.yml -f docker-compose.scale.yml up --build
+```
 
 If you open the frontend from any address other than `http://localhost:5173`, update `ORIGIN` in `docker-compose.yml` to match, or form submissions will fail with a CSRF error.
 
 ### Without Docker
 
-You need Go (see `backend/go.mod` for the version), Node 20+ with pnpm, the [Temporal CLI](https://github.com/temporalio/cli/releases) and the [Zigflow CLI](https://github.com/zigflow/zigflow) on your `PATH`. Zigflow's `go.mod` has a `replace` directive, so `go install github.com/zigflow/zigflow@latest` fails; build it from a clone instead (same version as `backend/Dockerfile`):
-
-```sh
-git clone --depth 1 --branch v0.17.1 https://github.com/zigflow/zigflow.git
-cd zigflow && go install .                # installs to $(go env GOPATH)/bin
-```
+You need Go (see `backend/go.mod` for the version), Node 20+ with pnpm, and the [Temporal CLI](https://github.com/temporalio/cli/releases) on your `PATH`. Zigflow is not a separate install: the backend uses it as a Go library, pinned in `backend/go.mod`.
 
 Then, in three terminals:
 
@@ -65,6 +66,8 @@ The frontend reaches the backend at `http://localhost:8000/api` by default (over
 The backend reads built-in defaults, then an optional `backend/config/config.yaml`, then `DURAFLOW_*` environment variables, in increasing order of precedence. A YAML key maps to an env var by uppercasing it and replacing dots with underscores: `temporal.address` becomes `DURAFLOW_TEMPORAL_ADDRESS`.
 
 The database is SQLite by default, and the schema migrates automatically on startup. To use Postgres, set `DURAFLOW_DATABASE_DRIVER=postgres` and `DURAFLOW_DATABASE_DSN`.
+
+`DURAFLOW_ROLES` picks what a backend process runs: `api` (REST, live run streams, CloudEvents ingest), `worker` (the worker pool that executes workflows), or both (the default). Running them as separate processes, or running more than one copy, requires Postgres. A worker-only process also needs `DURAFLOW_TELEMETRY_SINKURL` pointing at an API copy's `/api/internal/zigflow/events`. Every copy must share the same `DURAFLOW_AUTH_JWTSECRET` and `ZIGGY_*` variables.
 
 ## Checks before you open a pull request
 
@@ -93,7 +96,16 @@ go test ./...   # add -cover for a per-package coverage figure
 gofmt -l .   # should print nothing
 ```
 
-Backend tests need neither Temporal nor the Zigflow CLI: they use a temp-file SQLite database and an in-memory Temporal client (`internal/temporalexec/temporaltest`).
+Backend tests need no services: they use a temp-file SQLite database and an in-memory Temporal client (`internal/temporalexec/temporaltest`). Two suites run against real services when you point them at some, and skip otherwise:
+
+```sh
+temporal server start-dev --headless --port 7299
+DURAFLOW_E2E_TEMPORAL=localhost:7299 \
+DURAFLOW_TEST_POSTGRES='postgres://postgres:pg@localhost:5432/duraflow?sslmode=disable' \
+  go test ./internal/e2e/ ./internal/coord/
+```
+
+`internal/e2e` runs workflows on the real worker pool (version pinning across saves, failover to another worker, schedules) and, with Postgres, a scaled-out deployment of two API and two worker copies. `internal/coord` checks LISTEN/NOTIFY, leader failover and locks.
 
 ## Guidelines
 

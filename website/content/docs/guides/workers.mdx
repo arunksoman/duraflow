@@ -1,56 +1,45 @@
 ---
 title: Workers
-description: The Zigflow worker process behind each workflow, and the Workers page.
+description: The worker processes that run every workflow, and the Workers page.
 ---
 
-A Temporal workflow only runs if a **worker** is polling its task queue. With Zigflow you don't
-write worker code: the `zigflow run` command reads a workflow's DSL and becomes that worker.
-Duraflow starts and supervises one of these processes for every saved workflow, so saving is all
-it takes to make a workflow runnable.
+A Temporal workflow only runs if a **worker** is polling its task queue. Duraflow runs a pool of
+identical worker processes that execute every saved workflow through Zigflow, so you never write
+worker code and never start a worker per workflow. Saving is all it takes to make a workflow
+runnable.
 
 ## The Workers page
 
-**Workers** in the sidebar lists the worker registered for each workflow.
+**Workers** in the sidebar lists each worker process and the task queues it polls.
 
-<Screenshot name="workers" alt="The Workers page listing each workflow's worker, task queue, status and last heartbeat" />
+<Screenshot name="workers" alt="The Workers page listing each worker process, its task queue, status and last heartbeat" />
 
-| Column         | Meaning                                                                       |
-| -------------- | ----------------------------------------------------------------------------- |
-| Identity       | The workflow the worker runs.                                                 |
-| Task queue     | The `taskQueue` from the workflow's DSL header.                               |
-| Status         | `online` once the backend has started the worker; `offline` once it stopped it. |
-| Last heartbeat | When the backend last (re)started or stopped it.                              |
+| Column         | Meaning                                                                                  |
+| -------------- | ---------------------------------------------------------------------------------------- |
+| Identity       | The worker process: `worker.identity`, by default `<hostname>:<pid>`.                    |
+| Task queue     | A `taskQueue` the process polls. A process has one row per queue.                        |
+| Status         | `online` while the process reports in; `offline` once it stops cleanly or misses three heartbeats. |
+| Last heartbeat | When the process last reported in (every 10 seconds by default).                         |
 
-The page records what the backend did to each worker. It is not a live health check of the
-process. If a run fails to start with a "no worker" error, check the backend's logs, where every
-worker's output is printed with a `[worker:<name>]` prefix.
+A process that crashed or lost its host shows as `offline` within about half a minute. Rows of
+processes gone for a day are removed.
 
-## Lifecycle
+## How the pool works
 
-| Event                         | What happens to the worker                                                    |
-| ----------------------------- | ----------------------------------------------------------------------------- |
-| A workflow is saved with steps | The backend writes the DSL to `<workflowsDir>/<id>.yaml` and (re)starts `zigflow run` on it. `zigflow run` has no hot reload, so every save restarts it. |
-| The backend starts            | It starts a worker for every stored workflow with a DSL.                      |
-| A workflow is deleted         | Its worker is stopped and its files and Workers row removed.                  |
+| Event                           | What happens                                                                 |
+| ------------------------------- | ---------------------------------------------------------------------------- |
+| A workflow is saved with steps  | Its DSL is stored as a new version. Every worker process starts polling the workflow's task queue within moments, if it wasn't already. Nothing restarts. |
+| A run starts                    | Any worker polling the queue can pick it up. It loads the run's version, compiling it once and keeping it in memory. |
+| A workflow is saved mid-run     | The run carries on with the version it started on; the next run uses the new one. |
+| A worker process stops or dies  | Temporal gives its unfinished work to another worker once the task's timeout passes. |
+| A workflow is deleted           | Its runs are terminated, and workers stop polling its queue once nothing else uses it. |
 
-The backend waits for a freshly started worker to report ready (up to 15 seconds) before the save
-returns, so clicking **Run** right after a change doesn't race the worker's registration with
-Temporal.
+Each worker process runs one Temporal worker per task queue, not per workflow, so the number of
+processes is up to you and doesn't grow with the number of workflows. Run more of them, on more
+hosts, for more capacity or to survive losing a host; see
+[Scaling](/docs/architecture/backend#scaling).
 
-Each worker is started like this:
-
-```sh
-zigflow run -f data/workflows/<id>.yaml \
-  --temporal-address <temporal.address> \
-  --metrics-listen-address 127.0.0.1:<free port> \
-  --health-listen-address 127.0.0.1:<free port> \
-  --cloudevents-config data/workflows/<id>.cloudevents.yaml
-```
-
-Every worker gets its own metrics and health ports, so any number of them can run on one host.
-The CloudEvents config points the worker at the backend, which is how run events reach the UI; see
+Workflow steps run inside the worker processes, so every worker host needs whatever those steps
+need at run time, such as Python or Node.js for a BYOC script, or Docker for a container step.
+Run task events reach the UI through the API; see
 [Run observability](/docs/architecture/observability).
-
-Because the workers are child processes of the backend, the backend's host needs the `zigflow`
-binary (the Docker image includes it), and anything a workflow's steps need at run time, such as
-Python or Node.js for a BYOC script, or Docker for a container step.

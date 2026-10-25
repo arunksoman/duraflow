@@ -124,7 +124,7 @@ func deleteExecutionTrees(ctx context.Context, deps *Deps, ids []string, force b
 		return 0, err
 	}
 
-	deps.Resolver.Forget(rootIDs...)
+	deps.forgetRuns(rootIDs)
 
 	// Wake any open watch stream so it closes instead of waiting on a run that's gone.
 	for _, id := range treeIDs {

@@ -4,12 +4,12 @@ description: How every task's start, finish and failure reaches the canvas.
 ---
 
 Temporal's history alone can't describe a Zigflow run: `set` and `switch` leave no events to
-correlate, and loop iterations, fork branches and try blocks run as separate child workflows
-whose activities never appear in the parent's history. So Duraflow asks the worker itself.
+correlate, and fork branches and named workflows run as separate child workflows whose activities
+never appear in the parent's history. So Duraflow asks the workflow itself.
 
 <Mermaid
   chart={`sequenceDiagram
-  participant W as zigflow worker
+  participant W as Workflow (worker pool)
   participant I as Backend: ingest
   participant R as Backend: resolver
   participant DB as Database
@@ -26,10 +26,10 @@ whose activities never appear in the parent's history. So Duraflow asks the work
   B->>B: reduce onto the canvas`}
 />
 
-## 1. The worker reports every task
+## 1. The workflow reports every task
 
-Each worker is started with a CloudEvents config pointing at the backend. Zigflow then posts one
-CloudEvent per lifecycle moment of every task:
+Every workflow the worker pool builds gets a CloudEvents emitter pointing at the API. Zigflow then
+posts one CloudEvent per lifecycle moment of every task:
 
 | Event | Carries |
 | --- | --- |
@@ -42,9 +42,10 @@ CloudEvent per lifecycle moment of every task:
 
 ## 2. Ingest stores it, fast
 
-`POST /api/internal/zigflow/events` is authenticated with a token the backend generates on boot
-and writes into each worker's config. Zigflow waits for the response while the workflow runs, so
-this handler does one indexed insert and nothing else. Zigflow re-sends events when Temporal
+`POST /api/internal/zigflow/events` is authenticated with a shared token, derived from the JWT
+secret unless configured, so every copy of the backend accepts it. Zigflow waits for the response
+while the workflow runs, so this handler does one indexed insert and nothing else. Any API copy can
+receive any event. Zigflow re-sends events when Temporal
 replays a workflow; a content hash collapses those duplicates. Payloads larger than
 `telemetry.maxEventBytes` are stored truncated, and only the newest `telemetry.retentionPerExecution`
 events are kept per run.

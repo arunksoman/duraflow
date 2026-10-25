@@ -1,38 +1,62 @@
 ---
 title: Execution
-description: How a saved workflow becomes a Temporal worker, and how runs and schedules start.
+description: How a saved workflow runs on the worker pool, how a run keeps its DSL version, and how runs and schedules start.
 ---
 
-Duraflow doesn't run workflows itself. Every workflow is executed by a Zigflow worker on Temporal,
-exactly as it would be outside Duraflow. The backend's job is to keep the right workers running
-and to talk to Temporal.
+Duraflow runs every workflow through [Zigflow](https://github.com/zigflow/zigflow) on Temporal.
+Zigflow is used as a Go library inside the backend binary, not as a separate `zigflow run`
+process per workflow. A pool of identical worker processes runs every saved workflow, and each
+run carries the version of the DSL it started on.
 
-## One worker per workflow
+## Saving a workflow creates a version
 
-The backend's `WorkerManager` (`internal/temporalexec/manager.go`) keeps one `zigflow run`
-subprocess for every workflow with a DSL:
+When a workflow is saved, the backend:
 
-1. On save, the DSL is written to `<workflowsDir>/<workflow id>.yaml`.
-2. Any running worker for that workflow is stopped, and a new one is started on the file. Zigflow
-   has no hot reload, so this happens on every change.
-3. The worker registers the document's `workflowType` (and any
-   [named workflows](/docs/dsl/named-workflows)) on its `taskQueue`, and polls Temporal.
-4. The save waits (up to 15 seconds) until the worker's health endpoint reports ready, so a run
-   started right after doesn't find the task queue empty.
+1. Validates the DSL with Zigflow exactly as `zigflow run --validate` would: the JSON Schema, the
+   loader, the required `workflowType` and `taskQueue`, struct validation, and Zigflow's own
+   builder, which rejects duplicate workflow names and non-deterministic expressions.
+2. Stores the DSL as an immutable **version**, named by the SHA-256 of its text, and makes it the
+   workflow's current version.
+3. Records every Temporal workflow name the DSL registers on its task queue: the document's
+   `workflowType` plus each [named workflow](/docs/dsl/named-workflows).
+4. Publishes the workflow's [schedule](#schedules).
 
-Each worker gets free loopback ports for its metrics and health servers, instead of Zigflow's
-fixed defaults, so any number of them can run side by side. Its output goes to the backend's log,
-prefixed with `[worker:<name>]`. On boot, the backend starts a worker for every stored workflow.
+Nothing restarts. The next run uses the new version, and runs already in progress keep theirs.
+
+A DSL that doesn't build is still saved, because the builder saves drafts while you edit. The
+workflow then has no current version, and starting a run is refused with Zigflow's reason.
+
+## The worker pool
+
+Worker processes (the backend's `worker` role) run one Temporal worker per task queue that any
+saved workflow, or any still-running execution, uses. Each Temporal worker registers Zigflow's
+shared activities and a single dynamic workflow and activity handler. When a task arrives, the
+handler:
+
+1. reads the run's DSL version from the task's Temporal header;
+2. loads that version's compiled build from its cache, compiling it from the database on a miss;
+3. calls the Zigflow function registered under the task's workflow type.
+
+Child workflows, activities and continue-as-new inherit the header, so every part of a run executes
+the same version, on whichever worker picks it up, however many times the workflow is saved in the
+meantime. Any worker can run any workflow, so the pool scales by adding processes, and losing one
+only delays the tasks it held until Temporal's timeouts hand them to another.
+
+A `run: workflow` task that starts another stored workflow starts it on that workflow's current
+version. A run without a version header (one started by another Temporal client, or before
+versions existed) uses the current version of the workflow that registers its name.
 
 ## Starting a run
 
 `POST /api/workflows/{id}/executions` creates an `Execution` row and calls Temporal's
-`ExecuteWorkflow` with the workflow's type, task queue and input. If Temporal is unreachable, or no
-worker is polling the task queue, it fails rather than pretending.
+`ExecuteWorkflow` with the workflow's type, task queue, input and current version. If the workflow
+has no current version, it fails with the reason. If Temporal is unreachable, it fails rather than
+pretending.
 
-Temporal doesn't announce that a run has finished, so the backend watches each running execution
-in a goroutine and records its final status, output and error when Temporal reports it. Running
-executions are picked up again after a restart.
+Temporal doesn't announce that a run has finished, so one API process (the jobs leader, see
+[Scaling](/docs/architecture/backend#scaling)) watches each running execution and records its
+final status, output and error when Temporal reports it. Running executions are picked up again
+after a restart or a leader change.
 
 ## How Zigflow runs a document
 
@@ -40,29 +64,31 @@ Some tasks run as **separate Temporal workflows**, not inside the parent's histo
 
 | Task | Runs as |
 | --- | --- |
-| each `for` iteration | a child workflow |
 | each `fork` branch | a child workflow |
-| a `try` block (and its catch) | a child workflow |
 | `run: workflow` | a child workflow of the given type, with its own Execution row |
 | a switch case starting a named workflow | a child workflow of that name |
+| a `for` loop, a `try` block and its `catch` | inside the parent workflow (since Zigflow v0.17) |
 | `call`, `run` (script, shell, container) | activities |
 | `set`, `switch`, `wait`, `listen`, `raise` | inside the workflow itself |
 
 This is why Temporal's own history of a run is a poor picture of it, and why Duraflow collects
-events from the worker instead; see [Run observability](/docs/architecture/observability).
+events from the workflow instead; see [Run observability](/docs/architecture/observability).
 
 A workflow with `document.metadata.canMaxHistoryLength` continues-as-new when its history grows
-past that length. The backend always follows the latest run in the chain, so such a run is
-reported correctly.
+past that length. The new run keeps the same version, and the backend always follows the latest
+run in the chain, so such a run is reported correctly.
 
 ## Schedules
 
-There is no schedule table. On every start, `zigflow run` deletes the Temporal schedule matching
-the document's schedule id and recreates it if the document has a `schedule:` block. So saving
-creates, updates or removes the schedule. The backend only handles what Zigflow can't see:
+There is no schedule table. Saving a DSL that builds calls Zigflow's own schedule publisher, which
+deletes the Temporal schedule matching the document's schedule id and recreates it if the document
+has a `schedule:` block. The schedule carries the saved version, so every scheduled run starts on
+the version that was current when it was saved. The backend also handles what that publisher
+can't see:
 
-- deleting a workflow also deletes its schedule;
-- changing the schedule id deletes the schedule under the old id.
+- deleting a workflow, or blanking its DSL, deletes its schedule;
+- changing the schedule id deletes the schedule under the old id;
+- saving a DSL that doesn't build leaves the last good schedule running.
 
 When Temporal starts a scheduled run, there is no Execution row yet. The backend creates one when
 the run's first event arrives, recognising it by Temporal's `TemporalScheduledById` search

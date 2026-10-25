@@ -12,10 +12,21 @@ import (
 	"duraflow/backend/internal/models"
 )
 
-// Open connects to the database driver named in cfg and runs AutoMigrate for
-// every model. This is the entire migration story for now — swapping to
-// Postgres later is just DURAFLOW_DATABASE_DRIVER=postgres + a DSN.
+// Open connects and migrates in one step. Tests and single-process tools use it; the server
+// connects and migrates separately so that, on Postgres, only one copy migrates at a time.
 func Open(cfg config.DatabaseConfig) (*gorm.DB, error) {
+	conn, err := Connect(cfg)
+	if err != nil {
+		return nil, err
+	}
+	if err := Migrate(conn); err != nil {
+		return nil, err
+	}
+	return conn, nil
+}
+
+// Connect opens the database named in cfg without touching its schema.
+func Connect(cfg config.DatabaseConfig) (*gorm.DB, error) {
 	var dialector gorm.Dialector
 	switch cfg.Driver {
 	case "postgres":
@@ -30,7 +41,12 @@ func Open(cfg config.DatabaseConfig) (*gorm.DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("opening database: %w", err)
 	}
+	return conn, nil
+}
 
+// Migrate runs AutoMigrate for every model. This is the entire migration story: adding a field to
+// a model is enough for GORM to add the column.
+func Migrate(conn *gorm.DB) error {
 	if err := conn.AutoMigrate(
 		&models.User{},
 		&models.Project{},
@@ -39,9 +55,10 @@ func Open(cfg config.DatabaseConfig) (*gorm.DB, error) {
 		&models.Worker{},
 		&models.ExecutionEvent{},
 		&models.WorkflowExecutionRef{},
+		&models.DSLVersion{},
+		&models.WorkflowRegistration{},
 	); err != nil {
-		return nil, fmt.Errorf("running migrations: %w", err)
+		return fmt.Errorf("running migrations: %w", err)
 	}
-
-	return conn, nil
+	return nil
 }

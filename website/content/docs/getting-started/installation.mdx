@@ -54,17 +54,11 @@ You need:
 - Go (the version in `backend/go.mod`)
 - Node.js 20 or later, with pnpm
 - The [Temporal CLI](https://github.com/temporalio/cli/releases)
-- The [Zigflow CLI](https://github.com/zigflow/zigflow) on your `PATH`
 
-Zigflow's `go.mod` has a `replace` directive, so `go install github.com/zigflow/zigflow@latest`
-fails. Build it from a clone instead, at the version `backend/Dockerfile` uses:
+Zigflow needs no separate install: the backend uses it as a Go library, at the version pinned in
+`backend/go.mod`.
 
-```sh
-git clone --depth 1 --branch v0.17.1 https://github.com/zigflow/zigflow.git
-cd zigflow && go install .   # installs to $(go env GOPATH)/bin
-```
-
-Then start the three parts, each in its own terminal:
+Start the three parts, each in its own terminal:
 
 ```sh
 temporal server start-dev                 # localhost:7233, web UI at :8233
@@ -76,5 +70,5 @@ The frontend finds the backend at `http://localhost:8000/api` and the backend fi
 `localhost:7233` by default. Change either with the settings in
 [Configuration](/docs/getting-started/configuration).
 
-The backend still starts without Temporal or the `zigflow` binary. It serves the API, but it
-can't start workers or run anything until both are available.
+The backend still starts without Temporal. It serves the API, and its worker pool keeps retrying
+until Temporal is available.

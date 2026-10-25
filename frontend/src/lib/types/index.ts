@@ -55,6 +55,16 @@ export interface Workflow {
 	/** The persisted Zigflow DSL (YAML) — the canvas is derived from this, not the other way round. */
 	dsl: string;
 	parentWorkflowId?: string;
+	/** Denormalized from the DSL's `document` header on every save. */
+	workflowType?: string;
+	taskQueue?: string;
+	/**
+	 * SHA-256 of the DSL new runs start on. Set by every save whose DSL zigflow builds; absent when
+	 * the DSL is blank or doesn't build, in which case the workflow can't be run.
+	 */
+	currentHash?: string;
+	/** zigflow's reason for rejecting the saved DSL — why a run would be refused. */
+	dslError?: string;
 	createdAt: string;
 	updatedAt: string;
 }

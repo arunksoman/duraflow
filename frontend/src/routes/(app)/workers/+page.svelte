@@ -20,7 +20,8 @@
 	<div>
 		<h1 class="text-xl font-semibold">Workers</h1>
 		<p class="text-base-content/60 mt-1 text-sm">
-			Zigflow worker processes registered against Temporal — one per workflow with a saved DSL.
+			Worker-pool processes and the task queues each one polls. Every process can run every saved
+			workflow on its queues; a process that stops sending heartbeats is shown offline.
 		</p>
 	</div>
 
@@ -33,7 +34,10 @@
 	{#if data.workers.length === 0}
 		<div class="text-base-content/50 flex flex-col items-center gap-2 py-20">
 			<Server size={40} />
-			<p>No workers registered yet — save a workflow with a valid DSL to start one.</p>
+			<p>
+				No workers yet — a worker process starts polling a task queue once a workflow on it is
+				saved.
+			</p>
 		</div>
 	{:else}
 		<div class="overflow-x-auto">
@@ -51,7 +55,10 @@
 						<tr>
 							<td class="font-medium">{worker.identity}</td>
 							<td class="font-mono text-xs">{worker.taskQueue}</td>
-							<td><span class="badge {statusClass[worker.status]} badge-sm">{worker.status}</span></td>
+							<td
+								><span class="badge {statusClass[worker.status]} badge-sm">{worker.status}</span
+								></td
+							>
 							<td class="text-base-content/60 text-xs"
 								>{new Date(worker.lastHeartbeatAt).toLocaleString()}</td
 							>

@@ -128,6 +128,6 @@ describe('workers page', () => {
 	it('explains an empty list and an unreachable API', async () => {
 		const screen = render(Workers, { data: { workers: [], apiError: true }, params: {} } as never);
 		await expect.element(screen.getByText("Couldn't reach the workers API.")).toBeVisible();
-		await expect.element(screen.getByText(/No workers registered yet/)).toBeVisible();
+		await expect.element(screen.getByText(/No workers yet/)).toBeVisible();
 	});
 });

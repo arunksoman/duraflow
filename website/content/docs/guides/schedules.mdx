@@ -40,11 +40,13 @@ Further options:
 
 ## How it works
 
-Saving restarts the workflow's Zigflow worker. On every start, `zigflow run` deletes the Temporal
-schedule with this schedule's id and creates it again if the DSL still has a `schedule:` block.
-So saving with a schedule creates or updates it, and saving without one removes it.
+Every save deletes the Temporal schedule with this schedule's id and creates it again if the DSL
+still has a `schedule:` block, using Zigflow's own schedule publisher. So saving with a schedule
+creates or updates it, and saving without one removes it. Each scheduled run starts on the version
+of the workflow that was saved last, even if you save again while it runs. Saving a draft that
+doesn't build leaves the previous schedule running.
 
-Duraflow handles the two cases Zigflow can't see:
+Duraflow also handles the two cases that publisher can't see:
 
 - **Deleting the workflow** deletes its schedule. Otherwise it would keep firing at a task queue
   nothing polls any more.

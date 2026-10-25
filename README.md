@@ -31,7 +31,7 @@ Values are built from chips: pick `$input.userId`, add a `tostring` transform, j
 Hit Run and the workflow executes for real, on Temporal. The canvas colours each step as it starts and finishes. The path not taken is visibly skipped, loop iterations and retries are kept as separate attempts, and you can inspect any step's input, output and the variables it changed. Child workflows link straight to their own runs. A finished run replays exactly the same way later, from the executions list.
 
 **Run it like a platform.**
-Organise workflows into projects, see every run across projects with filters for status, workflow and date, and see the worker behind each workflow. Duraflow starts and supervises one Zigflow worker per workflow for you, so saving a workflow is all it takes to make it runnable.
+Organise workflows into projects, see every run across projects with filters for status, workflow and date, and see the workers running them. Saving a workflow is all it takes to make it runnable: a pool of identical workers runs every saved workflow, and you scale the API and the workers independently by adding copies.
 
 ## How it works
 
@@ -39,16 +39,17 @@ Organise workflows into projects, see every run across projects with filters for
 flowchart LR
     UI["Frontend<br/>canvas + run console"] -- "workflow DSL" --> API["Backend<br/>API, projects, runs"]
     API -- "live run stream" --> UI
-    API -- "starts and supervises" --> W["zigflow run<br/>one worker per workflow"]
+    API -- "saves versions" --> DB[("Postgres / SQLite")]
+    DB -- "DSL versions" --> W["Worker pool<br/>zigflow as a library"]
     API -- "starts runs" --> T[("Temporal")]
     T <--> W
     W -- "task events (CloudEvents)" --> API
 ```
 
 1. **Design.** The frontend's Zigflow engine converts between the canvas and the DSL, validating against the published Zigflow JSON Schema.
-2. **Deploy.** Saving a workflow stores its DSL, and the backend (re)starts a dedicated `zigflow run` worker that registers the workflow with Temporal.
+2. **Deploy.** Saving a workflow validates it with zigflow and stores it as an immutable version named by its content hash. Nothing restarts: the next run starts on the new version, and runs already in progress keep the version they started on.
 3. **Execute.** Starting a run is a real Temporal workflow execution. Temporal provides durability, retries and timers.
-4. **Observe.** Each worker reports every task's start, completion and failure, with inputs and outputs, as CloudEvents to the backend. The backend records them against the run, works out which loop, branch or child workflow each one belongs to, and streams them to the browser, which replays them onto the canvas.
+4. **Observe.** Each workflow reports every task's start, completion and failure, with inputs and outputs, as CloudEvents to the backend. The backend records them against the run, works out which loop, branch or child workflow each one belongs to, and streams them to the browser, which replays them onto the canvas.
 
 The backend exposes a full REST API with generated OpenAPI docs, so everything the UI does can be automated.
 

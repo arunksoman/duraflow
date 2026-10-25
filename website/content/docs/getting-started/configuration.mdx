@@ -16,6 +16,7 @@ adding the `DURAFLOW_` prefix: `temporal.address` becomes `DURAFLOW_TEMPORAL_ADD
 
 | Key                              | Default                                  | What it does                                                                                     |
 | -------------------------------- | ---------------------------------------- | ------------------------------------------------------------------------------------------------ |
+| `roles` (`DURAFLOW_ROLES`)       | `api,worker`                             | What this process runs: `api`, `worker`, or both. See [Scaling](/docs/architecture/backend#scaling). |
 | `server.host`                    | `0.0.0.0`                                | Interface to listen on.                                                                          |
 | `server.port`                    | `8000`                                   | Port to listen on.                                                                               |
 | `server.basePath`                | `/api`                                   | Prefix for every API route.                                                                      |
@@ -28,13 +29,25 @@ adding the `DURAFLOW_` prefix: `temporal.address` becomes `DURAFLOW_TEMPORAL_ADD
 | `seedAdmin.password`             | `changeme123`                            | That admin's password. **Change it.**                                                            |
 | `seedAdmin.name`                 | `Admin`                                  | That admin's display name.                                                                       |
 | `temporal.address`               | `localhost:7233`                         | Temporal frontend gRPC address.                                                                  |
-| `temporal.zigflowBinary`         | `zigflow`                                | The Zigflow CLI the backend starts workers with.                                                 |
-| `temporal.workflowsDir`          | `./data/workflows`                       | Where each workflow's DSL file (and its worker's CloudEvents config) is written.                 |
-| `telemetry.sinkURL`              | derived from the server address          | Where workers send run events. Set it when workers can't reach the backend at its own address.  |
-| `telemetry.token`                | generated on each boot                   | Shared secret workers send with each event.                                                      |
-| `telemetry.timeout`              | `1s`                                     | How long a worker waits for the backend to accept an event.                                      |
+| `temporal.namespace`             | `default`                                | Temporal namespace every workflow runs in.                                                       |
+| `telemetry.sinkURL`              | derived from the server address          | Where workflows send run events. **Required** on a worker-only process: an API copy's `/api/internal/zigflow/events`. |
+| `telemetry.token`                | derived from `auth.jwtSecret`            | Shared secret workflows send with each event. The same on every copy that shares the JWT secret. |
+| `telemetry.timeout`              | `1s`                                     | How long a workflow waits for the API to accept an event.                                        |
 | `telemetry.maxEventBytes`        | `65536`                                  | Larger event payloads are stored truncated (the UI says so).                                     |
 | `telemetry.retentionPerExecution`| `2000`                                   | Maximum number of events kept per run.                                                           |
+| `worker.identity`                | `<hostname>:<pid>`                       | This worker process's name on the Workers page and in Temporal.                                  |
+| `worker.refreshInterval`         | `5s`                                     | How often the pool re-reads which task queues to poll (a save also triggers it).                 |
+| `worker.heartbeatInterval`       | `10s`                                    | How often a worker process reports itself on the Workers page; three missed means offline.       |
+| `worker.deadlockDetectionTimeout`| `10s`                                    | Longest a workflow task may run: a version compile plus one run event delivery.                  |
+| `worker.stopTimeout`             | `10s`                                    | How long in-flight activities get to finish on shutdown.                                         |
+| `worker.maxConcurrentActivities` | `0` (Temporal's default)                 | Activities each process runs at once, per task queue.                                            |
+| `worker.maxConcurrentWorkflowTasks` | `0` (Temporal's default)              | Workflow tasks each process runs at once, per task queue.                                        |
+| `worker.cacheSize`               | `512`                                    | Compiled DSL versions each process keeps in memory.                                              |
+| `worker.envPrefix`               | `ZIGGY`                                  | Environment variables with this prefix are available to workflows as `$env`. Keep them the same on every copy. |
+| `worker.containerRuntime`        | `docker`                                 | Runtime for `run: container` steps: `docker` or `kubernetes`.                                    |
+| `worker.containerNamespace`      | (empty)                                  | Kubernetes namespace for `run: container` steps.                                                 |
+| `worker.containerServiceAccount` | (empty)                                  | Kubernetes service account for `run: container` steps.                                           |
+| `worker.logLevel`                | `warn`                                   | Zigflow's own log level.                                                                         |
 
 ### Postgres
 
@@ -46,7 +59,8 @@ DURAFLOW_DATABASE_DSN="host=db user=duraflow password=… dbname=duraflow sslmod
 ```
 
 The schema is created and migrated automatically on every start. There are no migration files to
-run.
+run. Postgres is required to run the `api` and `worker` roles as separate processes, or to run more
+than one copy of either.
 
 ## Frontend
 
@@ -62,3 +76,10 @@ run.
 service, points the frontend at the `backend` service, mounts `backend/data` for persistence and
 sets the development admin and JWT secret. Edit the `environment:` blocks to change any of the
 settings above, without rebuilding the images.
+
+`docker-compose.scale.yml`, layered on top, runs the scaled-out shape: Postgres, two `api` copies
+behind nginx and two `worker` copies.
+
+```sh
+docker compose -f docker-compose.yml -f docker-compose.scale.yml up --build
+```

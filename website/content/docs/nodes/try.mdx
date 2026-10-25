@@ -48,4 +48,4 @@ carries on after the Try node.
 - The catch block catches every error; there is no filtering by type. Inspect the error inside the
   catch block if you need to handle types differently.
 - A step's [retry policy](/docs/nodes#activity-options) is used up before the catch block runs.
-- Zigflow runs the try block as a Temporal child workflow.
+- Zigflow runs the try block and its catch inside the parent workflow (since Zigflow v0.17).

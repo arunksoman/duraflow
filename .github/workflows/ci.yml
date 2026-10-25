@@ -74,6 +74,52 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
+  backend-integration:
+    name: Backend integration tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: backend
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: pg
+          POSTGRES_DB: duraflow
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+
+      # The worker pool against a real Temporal dev server, and the scaled-out deployment (two
+      # api and two worker copies) against that plus Postgres. See internal/e2e.
+      - name: Start Temporal
+        run: |
+          curl -sSf https://temporal.download/cli.sh | sh -s -- --dir "$HOME/.temporalio"
+          "$HOME/.temporalio/bin/temporal" server start-dev --headless --port 7299 --log-level warn &
+          for i in $(seq 1 60); do
+            if "$HOME/.temporalio/bin/temporal" operator cluster health --address localhost:7299 >/dev/null 2>&1; then exit 0; fi
+            sleep 1
+          done
+          echo "::error::Temporal never became healthy"; exit 1
+
+      - name: Test
+        env:
+          DURAFLOW_E2E_TEMPORAL: localhost:7299
+          DURAFLOW_TEST_POSTGRES: postgres://postgres:pg@localhost:5432/duraflow?sslmode=disable
+        run: go test -count=1 -v ./internal/e2e/ ./internal/coord/
+
   frontend:
     name: Frontend tests
     runs-on: ubuntu-latest
@@ -149,8 +195,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # The whole product as users get it: Temporal, the backend (spawning real zigflow
-      # workers) and the frontend, built from this commit.
+      # The whole product as users get it: Temporal, the backend (API and worker pool in one
+      # process) and the frontend, built from this commit.
       - name: Start the stack
         run: docker compose up --build --detach --wait --wait-timeout 600
 

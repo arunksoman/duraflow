@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -44,6 +45,13 @@ func TestCreateExecution(t *testing.T) {
 	if len(started) != 1 || started[0].ID != created.ID || started[0].TaskQueue != "orders-q" || started[0].WorkflowType != "ordersType" {
 		t.Fatalf("temporal start: %+v", started)
 	}
+	// The run is pinned to the version current when it started, through the dslhash header.
+	if started[0].Hash != wf.CurrentHash || wf.CurrentHash == "" {
+		t.Errorf("run pinned to %q, want the current version %q", started[0].Hash, wf.CurrentHash)
+	}
+	if row, _ := env.execution(created.ID); row.TaskQueue != "orders-q" {
+		t.Errorf("execution task queue %q: the pool needs it to keep polling the queue", row.TaskQueue)
+	}
 	// No input means {} — never null, which fails a schema requiring an object.
 	if input, ok := started[0].Input.(map[string]any); !ok || input == nil || len(input) != 0 {
 		t.Errorf("default input: %#v", started[0].Input)
@@ -77,6 +85,8 @@ func TestCreateExecutionErrors(t *testing.T) {
 	headerless := env.seedWorkflowRow(project.ID, "headerless", "document:\n  dsl: 1.0.0\ndo: []\n")
 	ready := env.seedWorkflowRow(project.ID, "ready", testDSL("t", "q", ""))
 
+	invalid := env.seedWorkflowRow(project.ID, "invalid", "document:\n  dsl: 1.0.0\n  taskQueue: q\n  workflowType: bad\ndo: []\n")
+
 	cases := []struct {
 		name   string
 		id     string
@@ -85,11 +95,18 @@ func TestCreateExecutionErrors(t *testing.T) {
 		{"missing workflow", "missing", http.StatusNotFound},
 		{"no DSL", draft.ID, http.StatusUnprocessableEntity},
 		{"no task queue", headerless.ID, http.StatusUnprocessableEntity},
+		{"DSL zigflow rejects", invalid.ID, http.StatusUnprocessableEntity},
 	}
 	for _, c := range cases {
 		if resp := env.request(http.MethodPost, "/api/workflows/"+c.id+"/executions", map[string]any{}); resp.Status != c.status {
 			t.Errorf("%s: %d, want %d", c.name, resp.Status, c.status)
 		}
+	}
+
+	// The refusal carries zigflow's reason, which the builder shows next to the Run button.
+	resp := env.request(http.MethodPost, "/api/workflows/"+invalid.ID+"/executions", map[string]any{})
+	if !strings.Contains(string(resp.Body), "can't be run") {
+		t.Errorf("refusal should explain why: %s", resp.Body)
 	}
 
 	env.temporal.ExecuteErr = errors.New("no worker polling")
@@ -562,11 +579,11 @@ func TestExecutionDTO(t *testing.T) {
 }
 
 func TestParseDSLHeader(t *testing.T) {
-	q, wt, err := ParseDSLHeader(testDSL("t", "q", ""))
+	q, wt, err := parseDSLHeader(testDSL("t", "q", ""))
 	if err != nil || q != "q" || wt != "t" {
 		t.Errorf("got (%q, %q, %v)", q, wt, err)
 	}
-	if _, _, err := ParseDSLHeader("document: ["); err == nil {
+	if _, _, err := parseDSLHeader("document: ["); err == nil {
 		t.Error("invalid YAML accepted")
 	}
 }

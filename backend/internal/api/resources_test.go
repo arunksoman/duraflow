@@ -4,7 +4,9 @@ import (
 	"errors"
 	"net/http"
 	"testing"
+	"time"
 
+	"duraflow/backend/internal/dslhash"
 	"duraflow/backend/internal/models"
 	"duraflow/backend/internal/temporalexec"
 )
@@ -81,20 +83,23 @@ func TestWorkflowCRUD(t *testing.T) {
 	if wf.WorkflowType != "ordersType" || wf.TaskQueue != "orders-q" || wf.Version != 1 {
 		t.Fatalf("created: %+v", wf)
 	}
-	var worker models.Worker
-	if err := env.deps.DB.First(&worker, "identity = ? AND task_queue = ?", "orders", "orders-q").Error; err != nil {
-		t.Fatalf("worker row not registered: %v", err)
+	if wf.CurrentHash != dslhash.Of(wf.DSL) || wf.DSLError != "" {
+		t.Fatalf("a DSL that builds should become the current version: %+v", wf)
 	}
-	if worker.Status != models.WorkerOnline {
-		t.Errorf("worker status %q", worker.Status)
+	var version models.DSLVersion
+	if err := env.deps.DB.First(&version, "hash = ?", wf.CurrentHash).Error; err != nil || version.DSL != wf.DSL {
+		t.Fatalf("DSL version not stored: %v %+v", err, version)
+	}
+	var names []string
+	env.deps.DB.Model(&models.WorkflowRegistration{}).Where("workflow_id = ?", wf.ID).Pluck("name", &names)
+	if len(names) != 1 || names[0] != "ordersType" {
+		t.Errorf("registered names: %v", names)
 	}
 
 	var draft models.Workflow
 	env.expect(http.MethodPost, "/api/projects/"+project.ID+"/workflows", map[string]string{"name": "draft"}, http.StatusCreated, &draft)
-	var n int64
-	env.deps.DB.Model(&models.Worker{}).Where("identity = ?", "draft").Count(&n)
-	if n != 0 {
-		t.Error("a workflow without a DSL should not get a worker row")
+	if draft.CurrentHash != "" || draft.DSLError != "" {
+		t.Errorf("a workflow without a DSL has no version and no error: %+v", draft)
 	}
 
 	var list []models.Workflow
@@ -125,14 +130,38 @@ func TestWorkflowCRUD(t *testing.T) {
 		t.Errorf("unchanged DSL bumped the version to %d", updated.Version)
 	}
 	env.expect(http.MethodPatch, "/api/workflows/"+wf.ID, map[string]string{"dsl": testDSL("v2Type", "v2-q", "")}, http.StatusOK, &updated)
-	if updated.Version != 2 || updated.WorkflowType != "v2Type" || updated.TaskQueue != "v2-q" {
+	if updated.Version != 2 || updated.WorkflowType != "v2Type" || updated.TaskQueue != "v2-q" ||
+		updated.CurrentHash == wf.CurrentHash || updated.CurrentHash == "" {
 		t.Errorf("DSL change: %+v", updated)
 	}
-	// A DSL that doesn't parse (normal mid-edit) clears the derived columns.
+	env.deps.DB.Model(&models.WorkflowRegistration{}).Where("workflow_id = ?", wf.ID).Pluck("name", &names)
+	if len(names) != 1 || names[0] != "v2Type" {
+		t.Errorf("registrations should follow the current version: %v", names)
+	}
+	var versions int64
+	env.deps.DB.Model(&models.DSLVersion{}).Count(&versions)
+	if versions != 2 {
+		t.Errorf("the previous version must be kept for runs still on it: %d versions", versions)
+	}
+	// A DSL that doesn't parse (normal mid-edit) is saved, clears the derived columns and leaves
+	// the workflow without a runnable version.
 	var broken models.Workflow
 	env.expect(http.MethodPatch, "/api/workflows/"+wf.ID, map[string]string{"dsl": "document: [broken"}, http.StatusOK, &broken)
-	if broken.Version != 3 || broken.WorkflowType != "" || broken.TaskQueue != "" {
+	if broken.Version != 3 || broken.WorkflowType != "" || broken.TaskQueue != "" ||
+		broken.CurrentHash != "" || broken.DSLError == "" {
 		t.Errorf("broken DSL: %+v", broken)
+	}
+	// One that parses but zigflow rejects keeps its header columns, so old runs still resolve.
+	var invalid models.Workflow
+	env.expect(http.MethodPatch, "/api/workflows/"+wf.ID,
+		map[string]string{"dsl": "document:\n  dsl: 1.0.0\n  taskQueue: v2-q\n  workflowType: v2Type\ndo: []\n"},
+		http.StatusOK, &invalid)
+	if invalid.CurrentHash != "" || invalid.DSLError == "" || invalid.WorkflowType != "v2Type" {
+		t.Errorf("invalid DSL: %+v", invalid)
+	}
+	env.deps.DB.Model(&models.WorkflowRegistration{}).Where("workflow_id = ?", wf.ID).Pluck("name", &names)
+	if len(names) != 0 {
+		t.Errorf("a workflow without a version registers nothing: %v", names)
 	}
 
 	for _, method := range []string{http.MethodGet, http.MethodPatch, http.MethodDelete} {
@@ -143,29 +172,6 @@ func TestWorkflowCRUD(t *testing.T) {
 		if resp := env.request(method, "/api/workflows/missing", body); resp.Status != http.StatusNotFound {
 			t.Errorf("%s missing workflow: %d", method, resp.Status)
 		}
-	}
-}
-
-func TestStopWorkerRegistrationMarksOffline(t *testing.T) {
-	env := newTestEnv(t)
-	wf := env.seedWorkflowRow("p", "w", testDSL("t", "q", ""))
-	syncWorkerRegistration(env.deps, t.Context(), wf)
-	stopWorkerRegistration(env.deps, t.Context(), wf)
-
-	var worker models.Worker
-	if err := env.deps.DB.First(&worker, "identity = ?", "w").Error; err != nil {
-		t.Fatal(err)
-	}
-	if worker.Status != models.WorkerOffline {
-		t.Errorf("status %q", worker.Status)
-	}
-
-	// No task queue, nothing to record.
-	stopWorkerRegistration(env.deps, t.Context(), models.Workflow{Base: models.Base{ID: "x"}, Name: "x", DSL: "nope: ["})
-	var n int64
-	env.deps.DB.Model(&models.Worker{}).Count(&n)
-	if n != 1 {
-		t.Errorf("worker rows: %d", n)
 	}
 }
 
@@ -191,6 +197,16 @@ func TestWorkers(t *testing.T) {
 		t.Errorf("list should be newest heartbeat first: %+v", list)
 	}
 
+	// A row whose heartbeat stopped is reported offline, and one gone for a day is removed.
+	env.deps.DB.Model(&models.Worker{}).Where("identity = ?", "w1").
+		Update("last_heartbeat_at", time.Now().Add(-time.Hour))
+	env.mustCreate(&models.Worker{Identity: "old", TaskQueue: "q", Status: models.WorkerOnline,
+		LastHeartbeatAt: time.Now().Add(-48 * time.Hour)})
+	env.expect(http.MethodGet, "/api/workers", nil, http.StatusOK, &list)
+	if len(list) != 2 || list[1].Identity != "w1" || list[1].Status != models.WorkerOffline {
+		t.Errorf("stale heartbeat: %+v", list)
+	}
+
 	upsertWorker(env.deps, t.Context(), "", "q", models.WorkerOnline)
 	upsertWorker(env.deps, t.Context(), "w", "", models.WorkerOnline)
 	env.expect(http.MethodGet, "/api/workers", nil, http.StatusOK, &list)
@@ -204,29 +220,106 @@ func TestWorkers(t *testing.T) {
 
 const scheduledBlock = "schedule:\n  every:\n    minutes: 5\n"
 
-func TestUpdateWorkflowDropsRenamedSchedule(t *testing.T) {
+// scheduledDSL is a DSL on queue "q" with a five-minute schedule that starts its own workflow type.
+// metadata adds lines to document.metadata.
+func scheduledDSL(workflowType, metadata string) string {
+	return testDSLWithMetadata(workflowType, "q", "    scheduleWorkflowName: "+workflowType+"\n"+metadata, scheduledBlock)
+}
+
+func TestSavingPublishesSchedulesPinnedToTheVersion(t *testing.T) {
 	env := newTestEnv(t)
 	project := env.seedProject("p")
-	original := testDSL("nightly", "q", "") + scheduledBlock
-	wf := env.seedWorkflowRow(project.ID, "nightly", original)
 
-	renamed := "document:\n  workflowType: nightly\n  taskQueue: q\n  metadata:\n    scheduleId: custom\n" + scheduledBlock + "do: []\n"
-	env.expect(http.MethodPatch, "/api/workflows/"+wf.ID, map[string]string{"dsl": renamed}, http.StatusOK, nil)
-	if got := env.temporal.DeletedSchedules(); len(got) != 1 || got[0] != "zigflow_nightly" {
-		t.Fatalf("renaming the schedule id should drop the old one, deleted %v", got)
+	var wf models.Workflow
+	env.expect(http.MethodPost, "/api/projects/"+project.ID+"/workflows",
+		map[string]string{"name": "nightly", "dsl": scheduledDSL("nightly", "")}, http.StatusCreated, &wf)
+	created := env.temporal.CreatedSchedules()
+	if len(created) != 1 || created[0].ID != "zigflow_nightly" || created[0].WorkflowType != "nightly" ||
+		created[0].TaskQueue != "q" || created[0].Hash != wf.CurrentHash {
+		t.Fatalf("saving a scheduled DSL should publish its schedule pinned to the version: %+v (hash %s)",
+			created, wf.CurrentHash)
 	}
 
-	// Same id, new cadence: zigflow replaces it itself.
-	sameID := "document:\n  workflowType: nightly\n  taskQueue: q\n  metadata:\n    scheduleId: custom\nschedule:\n  cron: \"0 0 * * *\"\ndo: []\n"
-	env.expect(http.MethodPatch, "/api/workflows/"+wf.ID, map[string]string{"dsl": sameID}, http.StatusOK, nil)
-	if got := env.temporal.DeletedSchedules(); len(got) != 1 {
-		t.Errorf("unchanged id should not be deleted here, deleted %v", got)
+	// Renaming the schedule id drops the old schedule before publishing the new one.
+	renamed := scheduledDSL("nightly", "    scheduleId: custom\n")
+	env.expect(http.MethodPatch, "/api/workflows/"+wf.ID, map[string]string{"dsl": renamed}, http.StatusOK, &wf)
+	if got := env.temporal.LiveSchedules(); len(got) != 1 || got[0] != "custom" {
+		t.Fatalf("after renaming the schedule id, live schedules = %v", got)
+	}
+
+	// Same id, new cadence: zigflow replaces it, pinned to the new version.
+	sameID := testDSLWithMetadata("nightly", "q", "    scheduleWorkflowName: nightly\n    scheduleId: custom\n", "schedule:\n  cron: \"0 0 * * *\"\n")
+	env.expect(http.MethodPatch, "/api/workflows/"+wf.ID, map[string]string{"dsl": sameID}, http.StatusOK, &wf)
+	created = env.temporal.CreatedSchedules()
+	if last := created[len(created)-1]; last.ID != "custom" || last.Hash != wf.CurrentHash {
+		t.Errorf("republished schedule: %+v, want pinned to %s", last, wf.CurrentHash)
+	}
+
+	// A DSL that doesn't build leaves the last good schedule running.
+	env.expect(http.MethodPatch, "/api/workflows/"+wf.ID, map[string]string{"dsl": "document: [broken"}, http.StatusOK, nil)
+	if got := env.temporal.LiveSchedules(); len(got) != 1 {
+		t.Errorf("a broken draft should not touch the schedule, live = %v", got)
+	}
+	// Removing the schedule block retracts it.
+	env.expect(http.MethodPatch, "/api/workflows/"+wf.ID,
+		map[string]string{"dsl": testDSLWithMetadata("nightly", "q", "    scheduleId: custom\n", "")}, http.StatusOK, nil)
+	if got := env.temporal.LiveSchedules(); len(got) != 0 {
+		t.Errorf("removing the schedule block should cancel it, live = %v", got)
 	}
 
 	// Deleting the workflow cancels its schedule.
+	env.expect(http.MethodPatch, "/api/workflows/"+wf.ID, map[string]string{"dsl": sameID}, http.StatusOK, nil)
 	env.expect(http.MethodDelete, "/api/workflows/"+wf.ID, nil, http.StatusNoContent, nil)
-	if got := env.temporal.DeletedSchedules(); len(got) != 2 || got[1] != "custom" {
-		t.Errorf("deleting the workflow should drop its schedule, deleted %v", got)
+	if got := env.temporal.LiveSchedules(); len(got) != 0 {
+		t.Errorf("deleting the workflow should drop its schedule, live = %v", got)
+	}
+}
+
+func TestBlankingTheDSLRetractsTheSchedule(t *testing.T) {
+	env := newTestEnv(t)
+	project := env.seedProject("p")
+	var wf models.Workflow
+	env.expect(http.MethodPost, "/api/projects/"+project.ID+"/workflows",
+		map[string]string{"name": "blanked", "dsl": scheduledDSL("blanked", "")}, http.StatusCreated, &wf)
+	var blanked models.Workflow
+	env.expect(http.MethodPatch, "/api/workflows/"+wf.ID, map[string]string{"dsl": ""}, http.StatusOK, &blanked)
+	if got := env.temporal.LiveSchedules(); len(got) != 0 {
+		t.Errorf("a blank DSL should cancel the schedule, live = %v", got)
+	}
+	if blanked.CurrentHash != "" || blanked.DSLError != "" {
+		t.Errorf("blank DSL: %+v", blanked)
+	}
+}
+
+func TestBackfillDSLVersions(t *testing.T) {
+	env := newTestEnv(t)
+	project := env.seedProject("p")
+	legacy := models.Workflow{ProjectID: project.ID, Name: "legacy", DSL: scheduledDSL("legacyType", "")}
+	broken := models.Workflow{ProjectID: project.ID, Name: "broken", DSL: "document: ["}
+	empty := models.Workflow{ProjectID: project.ID, Name: "empty"}
+	for _, wf := range []*models.Workflow{&legacy, &broken, &empty} {
+		env.mustCreate(wf)
+	}
+
+	BackfillDSLVersions(t.Context(), env.deps)
+
+	get := func(id string) models.Workflow {
+		var wf models.Workflow
+		env.deps.DB.First(&wf, "id = ?", id)
+		return wf
+	}
+	got := get(legacy.ID)
+	if got.CurrentHash != dslhash.Of(legacy.DSL) || got.WorkflowType != "legacyType" || got.TaskQueue != "q" {
+		t.Errorf("legacy workflow not given a version: %+v", got)
+	}
+	if created := env.temporal.CreatedSchedules(); len(created) != 1 || created[0].Hash != got.CurrentHash {
+		t.Errorf("legacy schedule should be republished pinned: %+v", created)
+	}
+	if got := get(broken.ID); got.CurrentHash != "" || got.DSLError == "" {
+		t.Errorf("broken workflow: %+v", got)
+	}
+	if got := get(empty.ID); got.CurrentHash != "" || got.DSLError != "" {
+		t.Errorf("empty workflow touched: %+v", got)
 	}
 }
 

@@ -19,12 +19,14 @@ import (
 )
 
 // A CloudEvent's `id` is the Temporal workflow execution it came from, which is only sometimes
-// the execution the user started. zigflow runs `for`/`fork`/`try`/`catch` bodies as synthetic
-// child workflows of these types, and `run: workflow` tasks as real ones:
+// the execution the user started. zigflow runs fork branches as synthetic child workflows of these
+// types, and `run: workflow` tasks as real ones. (Since zigflow v0.17 `for`, `try` and `catch`
+// bodies run inline in their parent, so their events carry the parent's id; the `for`/`try`/`catch`
+// patterns are kept for runs recorded by older versions.)
 //
 //	<root>                        the Execution row's own id
-//	<root>_for_0                  type workflow_for_<task>    — a scope within <root>
-//	<root>_for_0_try              type workflow_try_<task>    — a scope within a scope
+//	<root>_fork_<branch>          type workflow_fork_<task>_<branch> — a scope within <root>
+//	<root>_for_0                  type workflow_for_<task>    — a scope (zigflow < v0.17)
 //	<parentRunId>_3               the user's own workflow type — a separate run entirely
 //	<parentRunId>_5               type <task name>            — a named workflow declared in
 //	                                                            the same document, started by
@@ -62,7 +64,7 @@ type Resolution struct {
 type Resolver struct {
 	db        *gorm.DB
 	temporal  *LazyClient
-	bus       *events.Broker
+	bus       events.Bus
 	retention int
 
 	cache sync.Map // workflowExecutionID -> Resolution
@@ -75,7 +77,7 @@ type Resolver struct {
 	warnedOnce sync.Map // workflowType -> struct{}, so an unknown child type logs once
 }
 
-func NewResolver(db *gorm.DB, temporal *LazyClient, bus *events.Broker, retention int) *Resolver {
+func NewResolver(db *gorm.DB, temporal *LazyClient, bus events.Bus, retention int) *Resolver {
 	return &Resolver{
 		db:        db,
 		temporal:  temporal,
@@ -111,8 +113,22 @@ func (r *Resolver) Enqueue(seq uint64) {
 	}
 }
 
-// Run processes the resolve queue until ctx is cancelled. Start it once, from main.
+// Run processes this copy's resolve queue until ctx is cancelled. Every API copy runs it for the
+// events its own ingest endpoint received. Start it once, from main.
 func (r *Resolver) Run(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case seq := <-r.in:
+			r.resolveEvent(ctx, seq)
+		}
+	}
+}
+
+// RunMaintenance retries unresolved events and prunes old ones until ctx is cancelled. It scans
+// the whole event table, so only the jobs leader runs it.
+func (r *Resolver) RunMaintenance(ctx context.Context) {
 	ticker := time.NewTicker(sweepInterval)
 	defer ticker.Stop()
 
@@ -120,8 +136,6 @@ func (r *Resolver) Run(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
-		case seq := <-r.in:
-			r.resolveEvent(ctx, seq)
 		case <-ticker.C:
 			r.sweep(ctx)
 			r.prune(ctx)
@@ -274,6 +288,7 @@ func (r *Resolver) resolve(ctx context.Context, wfExecID string, depth int) (Res
 				WorkflowType:    workflowType,
 				TemporalRunID:   runID,
 				ParentScopePath: parentRes.ScopePath,
+				TaskQueue:       info.GetTaskQueue(),
 			})
 			res := Resolution{ExecutionID: child.ID, RootExecutionID: child.RootExecutionID}
 			r.remember(wfExecID, runID, res)
@@ -388,6 +403,7 @@ func (r *Resolver) adoptScheduledRun(
 		WorkflowType:    workflowType,
 		TemporalRunID:   info.GetExecution().GetRunId(),
 		RootExecutionID: wfExecID,
+		TaskQueue:       info.GetTaskQueue(),
 		Trigger:         models.TriggerScheduled,
 		Status:          models.ExecutionRunning,
 		StartedAt:       startedAt,
